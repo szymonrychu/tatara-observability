@@ -1,0 +1,190 @@
+---
+interval_seconds: 60
+default_no_data_state: "OK"
+rules:
+  # ---------------------------------------------------------------------------
+  # Workload-generic rules (kube-state-metrics) pinned to the memory API server
+  # pods. The memory server runs one Deployment per Project (mem-<project>-...),
+  # so the selector matches mem-* but excludes the neo4j/pg/lightrag sidecar
+  # workloads. These rules key off kube-state-metrics, not up{}, because the
+  # memory API pods are not currently a Prometheus scrape target.
+  # ---------------------------------------------------------------------------
+  - name: "Memory API server pod not ready"
+    queries:
+      - expression: |
+          max(kube_pod_status_ready{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*",condition="true"}) by (pod)
+    math_operator: "<"
+    threshold: 1
+    for: 10m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-memory pod {{ index $labels \"pod\" }} not Ready for 10m. Project memory API degraded."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "critical"
+  - name: "Memory API server crash looping"
+    queries:
+      - expression: |
+          max(rate(kube_pod_container_status_restarts_total{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*"}[15m]) * 900) by (pod)
+    math_operator: ">"
+    threshold: 2
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-memory pod {{ index $labels \"pod\" }} restarting ~{{ index $values \"C\" }} times / 15m. Crash loop."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "warning"
+  - name: "Memory API server OOMKilled"
+    queries:
+      - expression: |
+          max(kube_pod_container_status_last_terminated_reason{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*",reason="OOMKilled"}) by (pod)
+    math_operator: ">"
+    threshold: 0
+    for: 1m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-memory pod {{ index $labels \"pod\" }} was OOMKilled. Raise memory limit or investigate leak."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "warning"
+  - name: "Memory API server container stuck waiting"
+    queries:
+      - expression: |
+          max(kube_pod_container_status_waiting_reason{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*",reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerError|CreateContainerConfigError"}) by (pod,reason)
+    math_operator: ">"
+    threshold: 0
+    for: 10m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-memory pod {{ index $labels \"pod\" }} container stuck waiting ({{ index $labels \"reason\" }}) for 10m."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "critical"
+  # ---------------------------------------------------------------------------
+  # Component-specific rules. Metric names + label keys are taken verbatim from
+  # tatara-memory/internal/**/metrics.go. NOTE: the memory API server is not yet
+  # a Prometheus scrape target (no active ServiceMonitor for the mem-* pods), so
+  # these series are DARK live until scraping is wired. The expressions are
+  # correct against the emitted instrument names and will fire once scraped.
+  # ---------------------------------------------------------------------------
+  - name: "Memory HTTP 5xx error ratio high"
+    queries:
+      - expression: |
+          sum(rate(http_requests_total{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*",status=~"Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout|Not Implemented|HTTP Version Not Supported"}[10m]))
+          /
+          clamp_min(sum(rate(http_requests_total{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*"}[10m])), 0.001)
+    math_operator: ">"
+    threshold: 0.05
+    for: 10m
+    decimal_points: 2
+    annotations:
+      summary: "tatara-memory HTTP 5xx ratio {{ index $values \"C\" }} (>5%) over 10m. API serving errors."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "warning"
+  - name: "Memory LightRAG call error ratio high"
+    queries:
+      - expression: |
+          sum(rate(lightrag_calls_total{namespace="tatara",result="error"}[10m]))
+          /
+          clamp_min(sum(rate(lightrag_calls_total{namespace="tatara"}[10m])), 0.001)
+    math_operator: ">"
+    threshold: 0.1
+    for: 10m
+    decimal_points: 2
+    annotations:
+      summary: "tatara-memory LightRAG client error ratio {{ index $values \"C\" }} (>10%) over 10m. Ingest/query backend failing."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "warning"
+  - name: "Memory LightRAG call p95 latency high"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(lightrag_call_duration_seconds_bucket{namespace="tatara"}[10m])) by (le))
+    math_operator: ">"
+    threshold: 30
+    for: 15m
+    decimal_points: 2
+    annotations:
+      summary: "tatara-memory LightRAG call p95 latency {{ index $values \"C\" }}s (>30s) over 10m. Backend slow."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "warning"
+  - name: "Memory ingest job failure ratio high"
+    queries:
+      - expression: |
+          sum(rate(ingest_jobs_total{namespace="tatara",status="failed"}[30m]))
+          /
+          clamp_min(sum(rate(ingest_jobs_total{namespace="tatara"}[30m])), 0.001)
+    math_operator: ">"
+    threshold: 0.2
+    for: 30m
+    decimal_points: 2
+    annotations:
+      summary: "tatara-memory ingest job failure ratio {{ index $values \"C\" }} (>20%) over 30m. Repo ingestion degraded."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "warning"
+  - name: "Memory ingest item error rate elevated"
+    queries:
+      - expression: |
+          sum(rate(ingest_items_total{namespace="tatara",result=~"error|timeout"}[15m]))
+    math_operator: ">"
+    threshold: 0
+    for: 30m
+    decimal_points: 2
+    annotations:
+      summary: "tatara-memory ingest items erroring/timing out at {{ index $values \"C\" }}/s for 30m. Items being dropped."
+    labels:
+      homelab: "true"
+      component: "memory"
+      severity: "info"
+  - name: "Memory code-graph query errors"
+    queries:
+      - expression: |
+          sum(rate(code_graph_query_total{namespace="tatara",result="error"}[10m]))
+    math_operator: ">"
+    threshold: 0
+    for: 15m
+    decimal_points: 2
+    annotations:
+      summary: "tatara-memory code-graph queries erroring at {{ index $values \"C\" }}/s for 15m. Agent graph traversals failing."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "warning"
+  - name: "Memory code-graph analytics stalled with dirty repos"
+    queries:
+      - expression: |
+          max(code_graph_analytics_dirty_repos{namespace="tatara"})
+          * on() group_left()
+          (sum(rate(code_graph_analytics_runs_total{namespace="tatara"}[30m])) == bool 0)
+    math_operator: ">"
+    threshold: 0
+    for: 1h
+    decimal_points: 0
+    annotations:
+      summary: "tatara-memory code-graph analytics stalled: {{ index $values \"C\" }} dirty repos with no recompute in 30m. Centrality/community data stale."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "warning"

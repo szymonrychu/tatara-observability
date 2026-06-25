@@ -1,0 +1,94 @@
+---
+interval_seconds: 60
+default_no_data_state: "OK"
+rules:
+  - name: "Tatara ingest job failing"
+    queries:
+      - expression: |
+          sum(increase(operator_ingest_job_total{namespace="tatara",result="failure"}[30m]))
+    math_operator: ">"
+    threshold: 2
+    for: 10m
+    decimal_points: 0
+    annotations:
+      summary: "Tatara ingest jobs failing: {{ index $values \"C\" }} failures in the last 30m (operator-side). Memory graph is going stale; re-ingest cron is not landing."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "ingester"
+      severity: "warning"
+  - name: "Tatara ingest job kube-state failures"
+    queries:
+      - expression: |
+          sum(kube_job_status_failed{namespace="tatara",job_name=~".*-ingest-.*"})
+    math_operator: ">"
+    threshold: 0
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "Tatara ingest Jobs report {{ index $values \"C\" }} failed pod(s) (kube-state, job_name~*-ingest-*). Backoff exhausted on a repo ingest."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "ingester"
+      severity: "warning"
+  - name: "Tatara ingest job stuck active"
+    queries:
+      - expression: |
+          max(kube_job_status_active{namespace="tatara",job_name=~".*-ingest-.*"} * on(job_name) group_left() (time() - kube_job_status_start_time{namespace="tatara",job_name=~".*-ingest-.*"}))
+    math_operator: ">"
+    threshold: 1800
+    for: 10m
+    decimal_points: 0
+    annotations:
+      summary: "A tatara ingest Job has been active for {{ index $values \"C\" }}s (>30m). Ingest is wedged (analyzer hang, lightrag lock, or slow clone)."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "ingester"
+      severity: "warning"
+  - name: "Tatara ingest pod OOMKilled"
+    queries:
+      - expression: |
+          sum(kube_pod_container_status_last_terminated_reason{namespace="tatara",pod=~".*-ingest-.*",reason="OOMKilled"})
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "Tatara ingest pod(s) OOMKilled ({{ index $values \"C\" }} container(s), pod~*-ingest-*). Bump ingest job memory limits; large repo blew the heap."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "ingester"
+      severity: "warning"
+  - name: "Tatara ingest pod stuck waiting"
+    queries:
+      - expression: |
+          sum(kube_pod_container_status_waiting_reason{namespace="tatara",pod=~".*-ingest-.*",reason=~"ImagePullBackOff|ErrImagePull|CrashLoopBackOff|CreateContainerError|CreateContainerConfigError"})
+    math_operator: ">"
+    threshold: 0
+    for: 10m
+    decimal_points: 0
+    annotations:
+      summary: "Tatara ingest pod(s) stuck waiting ({{ index $values \"C\" }} container(s), pod~*-ingest-*). Image pull or container-config error blocking ingest."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "ingester"
+      severity: "warning"
+  - name: "Tatara ingest run failure ratio high"
+    queries:
+      - expression: |
+          sum(increase(ingest_run_result_total{result="failure"}[1h])) / clamp_min(sum(increase(ingest_run_result_total[1h])), 1)
+    math_operator: ">"
+    threshold: 0.5
+    for: 15m
+    decimal_points: 2
+    annotations:
+      summary: "Ingester-side run failure ratio is {{ index $values \"C\" }} over 1h (>50%). Most ingest runs are terminating in failure."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "ingester"
+      severity: "warning"

@@ -1,0 +1,72 @@
+---
+interval_seconds: 60
+default_no_data_state: "OK"
+rules:
+  - name: "Tatara agent reported platform problem"
+    queries:
+      - expression: |
+          sum by (description, category, severity) (count_over_time({namespace="tatara", app="tatara-claude-code-wrapper"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | action="internal_issue_report" [5m]))
+        datasource_uid: "efihqbqlmroqod"
+        query_type: "loki"
+    math_operator: ">"
+    threshold: 0
+    for: 1m
+    decimal_points: 0
+    annotations:
+      summary: "Tatara agent reported a platform problem ({{ index $labels \"category\" }}/{{ index $labels \"severity\" }}): {{ index $labels \"description\" }}"
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "wrapper"
+      severity: "warning"
+  - name: "Tatara operator error log burst"
+    queries:
+      - expression: |
+          sum(count_over_time({namespace="tatara", app="tatara-operator"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | level="ERROR" [5m]))
+        datasource_uid: "efihqbqlmroqod"
+        query_type: "loki"
+    math_operator: ">"
+    threshold: 20
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator logged {{ index $values \"C\" }} ERROR lines in 5m (>20). Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\"} | json | level=\"ERROR\"."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  - name: "Tatara memory error log burst"
+    queries:
+      - expression: |
+          sum(count_over_time({namespace="tatara", app="tatara-memory"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | level="ERROR" [5m]))
+        datasource_uid: "efihqbqlmroqod"
+        query_type: "loki"
+    math_operator: ">"
+    threshold: 20
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-memory logged {{ index $values \"C\" }} ERROR lines in 5m (>20). Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-memory\"} | json | level=\"ERROR\"."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "warning"
+  - name: "Tatara chat error log burst"
+    queries:
+      - expression: |
+          sum(count_over_time({namespace="tatara", app="tatara-chat"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | level="ERROR" [5m]))
+        datasource_uid: "efihqbqlmroqod"
+        query_type: "loki"
+    math_operator: ">"
+    threshold: 20
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-chat logged {{ index $values \"C\" }} ERROR lines in 5m (>20). Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-chat\"} | json | level=\"ERROR\"."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "chat"
+      severity: "warning"

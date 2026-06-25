@@ -1,0 +1,171 @@
+---
+# tatara-claude-code-wrapper (component=wrapper) alert rules.
+#
+# The wrapper runs as EPHEMERAL agent job pods spawned by the operator
+# (container="wrapper", pods named tatara-<project>-<gh|gl>-<repo>-<issue|mr>-<n>
+# and tatara-<project>-<gh|gl>-brainstorm). It has NO long-lived Deployment and
+# NO /metrics scrape target: it pushes its ccw_*/tatara_wrapper_* series through
+# the operator's remote-write pushgateway. Therefore:
+#   * the workload-generic block pins on container="wrapper" in kube-state-metrics
+#     (there is no up{} series for the wrapper to do a "target down" rule on).
+#   * every ccw_*/tatara_wrapper_* rule below is INERT until tatara-helmfile widens
+#     pushMetricsAllowedPrefixes: those families are currently dropped by the
+#     operator push allowlist (operator_push_series_dropped_total{reason="reserved_name"}
+#     is climbing). default_no_data_state: "OK" keeps them green, not firing, while dark.
+#   * the only rule that fires today is the metrics-dark canary at the bottom.
+interval_seconds: 60
+default_no_data_state: "OK"
+rules:
+  # ---- workload-generic (pinned to the wrapper agent container) ----
+  - name: "Wrapper agent container crash-looping"
+    queries:
+      - expression: |
+          max(increase(kube_pod_container_status_restarts_total{namespace="tatara",container="wrapper"}[15m]))
+    math_operator: ">"
+    threshold: 3
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "Wrapper agent container restarted {{ index $values \"C\" }} times in 15m in namespace {{ index $labels \"namespace\" }}. Agent pods are crash-looping."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "wrapper"
+      severity: "warning"
+  - name: "Wrapper agent container OOMKilled"
+    queries:
+      - expression: |
+          sum(kube_pod_container_status_last_terminated_reason{namespace="tatara",container="wrapper",reason="OOMKilled"})
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "{{ index $values \"C\" }} wrapper agent container(s) last terminated OOMKilled in namespace {{ index $labels \"namespace\" }}. Raise the agent memory limit."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "wrapper"
+      severity: "warning"
+  - name: "Wrapper agent container stuck waiting"
+    queries:
+      - expression: |
+          sum(kube_pod_container_status_waiting_reason{namespace="tatara",container="wrapper",reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerError|CreateContainerConfigError"})
+    math_operator: ">"
+    threshold: 0
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "{{ index $values \"C\" }} wrapper agent container(s) stuck waiting (image-pull or create-container error) in namespace {{ index $labels \"namespace\" }}. Agents cannot start."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "wrapper"
+      severity: "critical"
+  - name: "Wrapper agent pods not becoming ready"
+    queries:
+      - expression: |
+          sum(kube_pod_status_ready{namespace="tatara",condition="false"} * on(pod,namespace) group_left() max(kube_pod_container_status_waiting_reason{namespace="tatara",container="wrapper"}) by (pod,namespace))
+    math_operator: ">"
+    threshold: 2
+    for: 30m
+    decimal_points: 0
+    annotations:
+      summary: "{{ index $values \"C\" }} wrapper agent pod(s) not Ready for 30m in namespace {{ index $labels \"namespace\" }}. Agent throughput degraded."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "wrapper"
+      severity: "warning"
+  # ---- wrapper-specific (DARK: ccw_*/tatara_wrapper_* dropped by operator push allowlist) ----
+  - name: "Wrapper commit/push failure ratio high"
+    queries:
+      - expression: |
+          sum(rate(ccw_commit_push_total{result="fail"}[30m])) / clamp_min(sum(rate(ccw_commit_push_total[30m])), 0.0001)
+    math_operator: ">"
+    threshold: 0.2
+    for: 30m
+    decimal_points: 2
+    annotations:
+      summary: "Wrapper commit/push failing {{ index $values \"C\" }} of pushes over 30m (>20%). Agent work is not landing on the source repos. (DARK until pushMetricsAllowedPrefixes widens.)"
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "wrapper"
+      severity: "warning"
+  - name: "Wrapper turns erroring"
+    queries:
+      - expression: |
+          sum(rate(ccw_turns_total{result="failed"}[30m])) / clamp_min(sum(rate(ccw_turns_total[30m])), 0.0001)
+    math_operator: ">"
+    threshold: 0.3
+    for: 30m
+    decimal_points: 2
+    annotations:
+      summary: "Wrapper turns failing {{ index $values \"C\" }} of turns over 30m (>30%). Claude sessions are erroring out. (DARK until pushMetricsAllowedPrefixes widens.)"
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "wrapper"
+      severity: "warning"
+  - name: "Wrapper HTTP 5xx responses"
+    queries:
+      - expression: |
+          sum(rate(ccw_http_requests_total{status_code=~"5.."}[10m]))
+    math_operator: ">"
+    threshold: 0
+    for: 10m
+    decimal_points: 2
+    annotations:
+      summary: "Wrapper HTTP API returning 5xx at {{ index $values \"C\" }}/s over 10m. Operator callbacks/turn-submit are failing. (DARK until pushMetricsAllowedPrefixes widens.)"
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "wrapper"
+      severity: "warning"
+  - name: "Wrapper HTTP handler panics"
+    queries:
+      - expression: |
+          sum(increase(ccw_http_panics_total[15m]))
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "Wrapper recovered {{ index $values \"C\" }} HTTP handler panic(s) in 15m. A request path is panicking. (DARK until pushMetricsAllowedPrefixes widens.)"
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "wrapper"
+      severity: "critical"
+  - name: "Wrapper token spend runaway"
+    queries:
+      - expression: |
+          sum(rate(ccw_turn_tokens_total[15m]))
+    math_operator: ">"
+    threshold: 80000
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "Wrapper agents consuming {{ index $values \"C\" }} tokens/s over 15m (>80k/s). A turn or loop is burning tokens. (DARK until pushMetricsAllowedPrefixes widens.)"
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "wrapper"
+      severity: "warning"
+  # ---- metrics-dark canary (LIVE today) ----
+  - name: "Wrapper metrics dropped by operator push allowlist"
+    queries:
+      - expression: |
+          sum(increase(operator_push_series_dropped_total{reason="reserved_name"}[30m]))
+    math_operator: ">"
+    threshold: 0
+    for: 30m
+    decimal_points: 0
+    annotations:
+      summary: "Operator dropped {{ index $values \"C\" }} pushed series (reason=reserved_name) in 30m. Wrapper ccw_*/tatara_wrapper_* metrics are dark; widen pushMetricsAllowedPrefixes in tatara-helmfile so the wrapper alerts above can fire."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "wrapper"
+      severity: "warning"

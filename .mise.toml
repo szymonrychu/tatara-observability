@@ -1,0 +1,7 @@
+[tools]
+# renovate: github=hashicorp/terraform
+terraform = '1.15.6'
+tflint = '0.63.1'
+
+[tool_alias]
+tflint = "aqua:terraform-linters/tflint"

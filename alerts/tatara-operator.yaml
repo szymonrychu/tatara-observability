@@ -1,0 +1,339 @@
+---
+interval_seconds: 60
+default_no_data_state: "OK"
+rules:
+  # ----------------------------------------------------------------------------
+  # Workload-generic: target down, crash loop, OOM, container-waiting, not-ready.
+  # Pinned to the tatara-operator Deployment in namespace tatara.
+  # ----------------------------------------------------------------------------
+  - name: "Operator scrape target down"
+    queries:
+      - expression: |
+          sum(up{namespace="tatara",job="tatara-operator"})
+    math_operator: "<"
+    threshold: 1
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "All tatara-operator replicas are down (sum(up)={{ index $values \"C\" }}). The platform control loop is dead: no reconciles, webhooks, or agent turns."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  - name: "Operator replica missing"
+    queries:
+      - expression: |
+          count(up{namespace="tatara",job="tatara-operator"} == 1)
+    math_operator: "<"
+    threshold: 3
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "Only {{ index $values \"C\" }}/3 tatara-operator replicas are up. Leader election and HA are degraded."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  - name: "Operator crash looping"
+    queries:
+      - expression: |
+          max by (pod) (increase(kube_pod_container_status_restarts_total{namespace="tatara",pod=~"tatara-operator-.*",container="tatara-operator"}[15m]))
+    math_operator: ">"
+    threshold: 2
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator container restarted {{ index $values \"C\" }} times in 15m. Pod {{ index $labels \"pod\" }} is crash looping."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  - name: "Operator OOMKilled"
+    queries:
+      - expression: |
+          max by (pod) (kube_pod_container_status_last_terminated_reason{namespace="tatara",pod=~"tatara-operator-.*",reason="OOMKilled"})
+    math_operator: ">"
+    threshold: 0
+    for: 1m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator pod {{ index $labels \"pod\" }} was OOMKilled. Raise the memory limit or investigate a leak."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  - name: "Operator container stuck waiting"
+    queries:
+      - expression: |
+          max by (pod, reason) (kube_pod_container_status_waiting_reason{namespace="tatara",pod=~"tatara-operator-.*",reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerConfigError|CreateContainerError"})
+    math_operator: ">"
+    threshold: 0
+    for: 10m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator pod {{ index $labels \"pod\" }} container stuck waiting ({{ index $labels \"reason\" }}). It is not running."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  - name: "Operator pod not ready"
+    queries:
+      - expression: |
+          sum(kube_pod_status_ready{namespace="tatara",pod=~"tatara-operator-.*",condition="true"})
+    math_operator: "<"
+    threshold: 1
+    for: 10m
+    decimal_points: 0
+    annotations:
+      summary: "No tatara-operator pod is Ready (sum ready={{ index $values \"C\" }}). Readiness probe failing across the Deployment."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  # ----------------------------------------------------------------------------
+  # Control-loop liveness: the leader emits business metrics only. A wedged or
+  # stalled loop shows up as flat scan/reconcile counters across all replicas.
+  # ----------------------------------------------------------------------------
+  - name: "Operator reconcile loop wedged"
+    queries:
+      - expression: |
+          sum(increase(operator_reconcile_total{namespace="tatara",job="tatara-operator"}[15m]))
+    math_operator: "<"
+    threshold: 1
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "No reconciles completed across all tatara-operator replicas in 15m (increase={{ index $values \"C\" }}). The controller loop is wedged."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  - name: "Operator scan loop stalled"
+    queries:
+      - expression: |
+          (sum(increase(tatara_scan_items_total{namespace="tatara",job="tatara-operator"}[3h])) or vector(0)) + (sum(increase(tatara_scan_tasks_created_total{namespace="tatara",job="tatara-operator"}[3h])) or vector(0))
+    math_operator: "<"
+    threshold: 1
+    for: 30m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator scan loop flat for 3h (scan items + tasks created increase={{ index $values \"C\" }}). The hourly mr/issue/brainstorm scans have stalled; no new work is being picked up."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  - name: "Operator reconcile error ratio high"
+    queries:
+      - expression: |
+          sum(increase(operator_reconcile_total{namespace="tatara",job="tatara-operator",result="error"}[15m])) / clamp_min(sum(increase(operator_reconcile_total{namespace="tatara",job="tatara-operator"}[15m])), 1)
+    math_operator: ">"
+    threshold: 0.2
+    for: 15m
+    decimal_points: 2
+    annotations:
+      summary: "tatara-operator reconcile error ratio is {{ index $values \"C\" }} (>0.20) over 15m. Reconciles are failing en masse."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # ----------------------------------------------------------------------------
+  # Agent turn pipeline: submit failures and slow SubmitTurn calls stall agents.
+  # ----------------------------------------------------------------------------
+  - name: "Operator turn submit failure ratio high"
+    queries:
+      - expression: |
+          sum(increase(operator_turn_submit_total{namespace="tatara",job="tatara-operator",result="error"}[15m])) / clamp_min(sum(increase(operator_turn_submit_total{namespace="tatara",job="tatara-operator"}[15m])), 1)
+    math_operator: ">"
+    threshold: 0.3
+    for: 15m
+    decimal_points: 2
+    annotations:
+      summary: "tatara-operator turn-submit error ratio is {{ index $values \"C\" }} (>0.30) over 15m. Agent turns are failing to dispatch to wrappers."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  - name: "Operator turn submit p95 latency high"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(operator_turn_submit_duration_seconds_bucket{namespace="tatara",job="tatara-operator"}[15m])) by (le))
+    math_operator: ">"
+    threshold: 30
+    for: 15m
+    decimal_points: 1
+    annotations:
+      summary: "tatara-operator SubmitTurn p95 latency is {{ index $values \"C\" }}s (>30s) over 15m. Dispatching agent turns is slow; wrappers may be unreachable or saturated."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  - name: "Operator agent HTTP failure spike"
+    queries:
+      - expression: |
+          sum(rate(operator_agent_http_total{namespace="tatara",job="tatara-operator",outcome=~"unreachable|timeout|transport_error"}[10m]))
+    math_operator: ">"
+    threshold: 0.2
+    for: 10m
+    decimal_points: 2
+    annotations:
+      summary: "tatara-operator agent-wrapper HTTP failures (unreachable/timeout/transport) at {{ index $values \"C\" }}/s over 10m. Wrappers are unreachable; agents cannot run turns."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  - name: "Operator agent boot crash budget exhausted"
+    queries:
+      - expression: |
+          sum by (reason) (increase(operator_agent_boot_crash_total{namespace="tatara",job="tatara-operator",outcome="failed"}[1h]))
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator exhausted the wrapper boot-respawn budget {{ index $values \"C\" }} time(s) in 1h (reason={{ index $labels \"reason\" }}). Tasks are failing because wrapper pods never reach /readyz."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # ----------------------------------------------------------------------------
+  # SCM / webhook write health: writeback failures break the agent->repo loop.
+  # ----------------------------------------------------------------------------
+  - name: "Operator SCM write failure ratio high"
+    queries:
+      - expression: |
+          sum(increase(operator_scm_writes_total{namespace="tatara",job="tatara-operator",result="error"}[15m])) / clamp_min(sum(increase(operator_scm_writes_total{namespace="tatara",job="tatara-operator"}[15m])), 1)
+    math_operator: ">"
+    threshold: 0.3
+    for: 15m
+    decimal_points: 2
+    annotations:
+      summary: "tatara-operator SCM write error ratio is {{ index $values \"C\" }} (>0.30) over 15m. Comments/labels/approvals/PRs are failing to land on GitHub/GitLab."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  - name: "Operator webhook error ratio high"
+    queries:
+      - expression: |
+          sum(increase(operator_webhook_events_total{namespace="tatara",job="tatara-operator",result=~"error|bad_signature|bad_request"}[15m])) / clamp_min(sum(increase(operator_webhook_events_total{namespace="tatara",job="tatara-operator"}[15m])), 1)
+    math_operator: ">"
+    threshold: 0.2
+    for: 15m
+    decimal_points: 2
+    annotations:
+      summary: "tatara-operator webhook error ratio is {{ index $values \"C\" }} (>0.20) over 15m. Inbound SCM events are being rejected; the platform may stop reacting to repo activity."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  - name: "Operator writeback 404 loop"
+    queries:
+      - expression: |
+          sum(increase(operator_writeback_outcome_total{namespace="tatara",job="tatara-operator",result="skip_4xx"}[30m]))
+    math_operator: ">"
+    threshold: 20
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator skipped {{ index $values \"C\" }} writebacks on 4xx in 30m. A PR/MR addressing bug is likely looping (per the GitLab writeback-404 incident class)."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # ----------------------------------------------------------------------------
+  # Memory stacks + lightrag: a Failed per-project memory stack blocks its agents.
+  # ----------------------------------------------------------------------------
+  - name: "Operator memory stack failed"
+    queries:
+      - expression: |
+          max(operator_memory_stacks{namespace="tatara",job="tatara-operator",phase="Failed"})
+    math_operator: ">"
+    threshold: 0
+    for: 10m
+    decimal_points: 0
+    annotations:
+      summary: "{{ index $values \"C\" }} per-project tatara-memory stack(s) are in phase Failed. Agents for that project cannot read/write memory."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  - name: "Operator memory retrieval surface absent"
+    queries:
+      - expression: |
+          sum by (route) (increase(operator_memory_retrieval_probe_total{namespace="tatara",job="tatara-operator",result="absent"}[30m]))
+    math_operator: ">"
+    threshold: 0
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator probed {{ index $values \"C\" }} tatara-memory retrieval routes as absent (404) in 30m. A memory binary has drifted/regressed; route {{ index $labels \"route\" }} is gone."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # ----------------------------------------------------------------------------
+  # Task throughput + queue: saturated lanes and terminal failures stall the loop.
+  # ----------------------------------------------------------------------------
+  - name: "Operator tasks inflight pinned at cap"
+    queries:
+      - expression: |
+          max(operator_tasks_inflight{namespace="tatara",job="tatara-operator"})
+    math_operator: ">"
+    threshold: 7.999
+    for: 30m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator has {{ index $values \"C\" }} Tasks in flight (>=8) pinned for 30m. The concurrency lane is saturated; new work is starved."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  - name: "Operator task failure spike"
+    queries:
+      - expression: |
+          sum(increase(operator_task_terminal_total{namespace="tatara",job="tatara-operator",phase="Failed"}[1h]))
+    math_operator: ">"
+    threshold: 5
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator saw {{ index $values \"C\" }} Tasks reach phase Failed in 1h (>5). Agents are failing terminally at an elevated rate."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  - name: "Operator queue depth backlog"
+    queries:
+      - expression: |
+          max by (project, class) (operator_queue_depth{namespace="tatara",job="tatara-operator"})
+    math_operator: ">"
+    threshold: 10
+    for: 30m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator queue depth is {{ index $values \"C\" }} (>10) for project {{ index $labels \"project\" }} class {{ index $labels \"class\" }}. QueuedEvents are backing up faster than they admit."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"

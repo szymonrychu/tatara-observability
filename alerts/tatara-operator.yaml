@@ -151,7 +151,7 @@ rules:
   - name: "Operator turn submit failure ratio high"
     queries:
       - expression: |
-          sum(increase(operator_turn_submit_total{namespace="tatara",job="tatara-operator",result="error"}[15m])) / clamp_min(sum(increase(operator_turn_submit_total{namespace="tatara",job="tatara-operator"}[15m])), 1)
+          (sum(increase(operator_turn_submit_total{namespace="tatara",job="tatara-operator",result="error"}[15m])) / clamp_min(sum(increase(operator_turn_submit_total{namespace="tatara",job="tatara-operator"}[15m])), 1)) and (sum(increase(operator_turn_submit_total{namespace="tatara",job="tatara-operator"}[15m])) >= 10)
     math_operator: ">"
     threshold: 0.3
     for: 15m
@@ -166,7 +166,7 @@ rules:
   - name: "Operator turn submit p95 latency high"
     queries:
       - expression: |
-          histogram_quantile(0.95, sum(rate(operator_turn_submit_duration_seconds_bucket{namespace="tatara",job="tatara-operator"}[15m])) by (le))
+          histogram_quantile(0.95, sum(rate(operator_turn_submit_duration_seconds_bucket{namespace="tatara",job="tatara-operator"}[15m])) by (le)) and on() (sum(rate(operator_turn_submit_duration_seconds_count{namespace="tatara",job="tatara-operator"}[15m])) > 0)
     math_operator: ">"
     threshold: 30
     for: 15m

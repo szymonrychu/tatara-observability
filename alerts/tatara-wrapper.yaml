@@ -153,19 +153,11 @@ rules:
       system: "tatara"
       component: "wrapper"
       severity: "warning"
-  # ---- metrics-dark canary (LIVE today) ----
-  - name: "Wrapper metrics dropped by operator push allowlist"
-    queries:
-      - expression: |
-          sum(increase(operator_push_series_dropped_total{reason="reserved_name"}[30m]))
-    math_operator: ">"
-    threshold: 0
-    for: 30m
-    decimal_points: 0
-    annotations:
-      summary: "Operator dropped {{ index $values \"C\" }} pushed series (reason=reserved_name) in 30m. Wrapper ccw_*/tatara_wrapper_* metrics are dark; widen pushMetricsAllowedPrefixes in tatara-helmfile so the wrapper alerts above can fire."
-    labels:
-      homelab: "true"
-      system: "tatara"
-      component: "wrapper"
-      severity: "warning"
+  # The "Wrapper metrics dropped by operator push allowlist" canary was REMOVED
+  # 2026-06-25: its purpose (signal that ccw_*/tatara_wrapper_* were dark) is done -
+  # pushMetricsAllowedPrefixes was widened (operator 12729ed). The residual
+  # reserved_name drops are the wrapper push-forwarding go_*/process_* runtime
+  # metrics it should not (wrapper bug, tracked separately), so the canary only
+  # false-fired. operator_push_series_dropped_total has no per-prefix label to scope
+  # it, so do not re-add it as-is; add a targeted rule only if a specific ccw_*
+  # family is observed dark again.

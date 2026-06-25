@@ -112,7 +112,7 @@ rules:
   - name: "tatara-chat store p95 latency high"
     queries:
       - expression: |
-          histogram_quantile(0.95, sum(rate(chat_store_duration_seconds_bucket{job="tatara-chat"}[10m])) by (le, operation))
+          histogram_quantile(0.95, sum(rate(chat_store_duration_seconds_bucket{job="tatara-chat"}[10m])) by (le, operation)) and on(operation) (sum(rate(chat_store_duration_seconds_count{job="tatara-chat"}[10m])) by (operation) > 0)
     math_operator: ">"
     threshold: 1
     for: 15m

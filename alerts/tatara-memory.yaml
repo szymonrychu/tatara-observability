@@ -113,7 +113,7 @@ rules:
   - name: "Memory LightRAG call p95 latency high"
     queries:
       - expression: |
-          histogram_quantile(0.95, sum(rate(lightrag_call_duration_seconds_bucket{namespace="tatara"}[10m])) by (le))
+          histogram_quantile(0.95, sum(rate(lightrag_call_duration_seconds_bucket{namespace="tatara"}[10m])) by (le)) and on() (sum(rate(lightrag_call_duration_seconds_count{namespace="tatara"}[10m])) > 0)
     math_operator: ">"
     threshold: 30
     for: 15m

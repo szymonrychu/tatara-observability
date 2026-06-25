@@ -5,13 +5,13 @@ rules:
   - name: "Tatara ingest job failing"
     queries:
       - expression: |
-          sum(increase(operator_ingest_job_total{namespace="tatara",result="failure"}[30m]))
+          sum(increase(operator_ingest_job_total{namespace="tatara",result="failure",mode="full"}[1h]))
     math_operator: ">"
-    threshold: 2
+    threshold: 0
     for: 10m
     decimal_points: 0
     annotations:
-      summary: "Tatara ingest jobs failing: {{ index $values \"C\" }} failures in the last 30m (operator-side). Memory graph is going stale; re-ingest cron is not landing."
+      summary: "Tatara FULL re-ingest failing: {{ index $values \"C\" }} full-ingest failure(s) in the last 1h (operator-side). Recall corpus is going stale: a scheduled/first full ingest or the incremental-to-full self-heal fallback failed. Benign self-healing incremental failures are excluded."
     labels:
       homelab: "true"
       system: "tatara"

@@ -17,6 +17,13 @@ Past decisions + context. One dated line per entry.
   homelab parent policy) AND `system=tatara` (matches the child route to the operator incident
   webhook). Per-rule `labels` REPLACE the module `default_labels` (no merge). `info` rules omit
   `system` so they email only (severity gate).
+- 2026-06-25: `alerts/tatara-ingester.yaml` rule "Tatara ingest job failing" MUST keep the
+  `mode="full"` selector (`operator_ingest_job_total{...,result="failure",mode="full"}[1h] > 0`).
+  The operator attributes ingest failures by `mode` so alerting pages ONLY on terminal full-ingest
+  failures; a failed `mode="incremental"` ingest self-heals via the full-ingest fallback
+  (`incrementalFallbackThreshold`) and is benign. Window/threshold mirror the operator's canonical
+  PrometheusRule `TataraIngestJobFailing`. Do NOT drop `mode="full"` (issue #3 - it paged on
+  benign incremental churn).
 - 2026-06-25: CI = GitHub Actions terraform, S3 state (`szymonrychu-terraform-state` key
   `terraform/tatara-observability`), Grafana Editor SA token. Secrets are GitHub Actions secrets
   (not sops): `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `TF_VAR_GRAFANA_API_KEY`,

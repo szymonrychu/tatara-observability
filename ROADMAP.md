@@ -2,7 +2,7 @@
 
 Planned work not yet started. Move items out when shipped (note in MEMORY.md if non-obvious).
 
-- `planned`: dashboards-as-code (per-component Grafana dashboards) once alerts are settled.
+- `shipped`: dashboards-as-code bootstrap - "Tatara - Task Delivery" dashboard (feat/task-delivery-dashboard). See MEMORY.md 2026-06-27.
 - `planned`: scope the Grafana SA token to Editor + (if Grafana supports it) the `Tatara` folder
   only, instead of a broad Editor token.
 - `planned`: wire the `mem-*` per-project memory pods + the Argo workflow-controller to Prometheus

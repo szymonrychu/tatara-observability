@@ -28,6 +28,7 @@ Past decisions + context. One dated line per entry.
   `terraform/tatara-observability`), Grafana Editor SA token. Secrets are GitHub Actions secrets
   (not sops): `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `TF_VAR_GRAFANA_API_KEY`,
   `TF_VAR_GRAFANA_URL`.
+- 2026-06-27: Added `dashboards/task-delivery.json` + `dashboards.tf` - Grafana dashboard "Tatara - Task Delivery" (uid=tatara-task-delivery, schemaVersion=39). 5 panels: open-issues table (tatara_issue_state, state+incident color maps, GitHub+GitLab data links), per-issue turns+tokens table (joinByLabels on tokens+turns sum by project/repo/issue/kind; requires Grafana 10.3+ experimental joinByLabels transform; column rename handles Grafana naming variants), inflight-by-kind stacked timeseries, token burn rate, turn rate. Panels 4+5 use new operator_task_turns_total and tatara_issue_state metrics - populate after operator A1/A2 deploy. `dashboards/**` added to workflow path filter. Datasource uid=prometheus (homelab fixed uid).
 - 2026-06-27: Removed `alerts/tatara-ingester.yaml` rule "Tatara ingest job kube-state failures"
   (`sum(kube_job_status_failed{...job_name=~".*-ingest-.*"}) > 0`, for 15m). It was a regression of
   the issue #3 lesson above: `kube_job_status_failed` counts EVERY failed pod with no mode

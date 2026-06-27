@@ -17,21 +17,6 @@ rules:
       system: "tatara"
       component: "ingester"
       severity: "warning"
-  - name: "Tatara ingest job kube-state failures"
-    queries:
-      - expression: |
-          sum(kube_job_status_failed{namespace="tatara",job_name=~".*-ingest-.*"})
-    math_operator: ">"
-    threshold: 0
-    for: 15m
-    decimal_points: 0
-    annotations:
-      summary: "Tatara ingest Jobs report {{ index $values \"C\" }} failed pod(s) (kube-state, job_name~*-ingest-*). Backoff exhausted on a repo ingest."
-    labels:
-      homelab: "true"
-      system: "tatara"
-      component: "ingester"
-      severity: "warning"
   - name: "Tatara ingest job stuck active"
     queries:
       - expression: |

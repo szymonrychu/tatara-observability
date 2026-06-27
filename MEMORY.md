@@ -28,3 +28,14 @@ Past decisions + context. One dated line per entry.
   `terraform/tatara-observability`), Grafana Editor SA token. Secrets are GitHub Actions secrets
   (not sops): `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `TF_VAR_GRAFANA_API_KEY`,
   `TF_VAR_GRAFANA_URL`.
+- 2026-06-27: Removed `alerts/tatara-ingester.yaml` rule "Tatara ingest job kube-state failures"
+  (`sum(kube_job_status_failed{...job_name=~".*-ingest-.*"}) > 0`, for 15m). It was a regression of
+  the issue #3 lesson above: `kube_job_status_failed` counts EVERY failed pod with no mode
+  discrimination and a failed Job lingers ~10m (`TTLSecondsAfterFinished`), so it fired ~permanently
+  on benign self-healing incremental churn (BackoffLimit=0) and transient full-ingest retries
+  (BackoffLimit=2). It cannot be made mode-aware: kube-state-metrics does not export the
+  `tatara.dev/ingest-mode` Job label (no `--metric-labels-allowlist`), so there is no PromQL path to
+  filter down to terminal full-ingest failures. Terminal full-ingest failures stay covered by the
+  mode-aware operator-native rule "Tatara ingest job failing"; genuine infra failure modes stay
+  covered by "Tatara ingest pod OOMKilled", "Tatara ingest pod stuck waiting", and "Tatara ingest
+  job stuck active". Issue #10.

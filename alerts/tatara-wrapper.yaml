@@ -8,11 +8,10 @@
 # the operator's remote-write pushgateway. Therefore:
 #   * the workload-generic block pins on container="wrapper" in kube-state-metrics
 #     (there is no up{} series for the wrapper to do a "target down" rule on).
-#   * every ccw_*/tatara_wrapper_* rule below is INERT until tatara-helmfile widens
-#     pushMetricsAllowedPrefixes: those families are currently dropped by the
-#     operator push allowlist (operator_push_series_dropped_total{reason="reserved_name"}
-#     is climbing). default_no_data_state: "OK" keeps them green, not firing, while dark.
-#   * the only rule that fires today is the metrics-dark canary at the bottom.
+#   * the ccw_*/tatara_wrapper_* rules below are LIVE: pushMetricsAllowedPrefixes was
+#     widened (operator 12729ed) so the operator push allowlist now forwards those
+#     families. default_no_data_state: "OK" keeps a rule green when its series is
+#     genuinely absent (e.g. no agent pods running), not firing.
 interval_seconds: 60
 default_no_data_state: "OK"
 rules:
@@ -77,7 +76,7 @@ rules:
       system: "tatara"
       component: "wrapper"
       severity: "warning"
-  # ---- wrapper-specific (DARK: ccw_*/tatara_wrapper_* dropped by operator push allowlist) ----
+  # ---- wrapper-specific (ccw_*/tatara_wrapper_* via operator push; LIVE since operator 12729ed) ----
   - name: "Wrapper commit/push failure ratio high"
     queries:
       - expression: |
@@ -87,7 +86,7 @@ rules:
     for: 30m
     decimal_points: 2
     annotations:
-      summary: "Wrapper commit/push failing {{ index $values \"C\" }} of pushes over 30m (>20%). Agent work is not landing on the source repos. (DARK until pushMetricsAllowedPrefixes widens.)"
+      summary: "Wrapper commit/push failing {{ index $values \"C\" }} of pushes over 30m (>20%). Agent work is not landing on the source repos."
     labels:
       homelab: "true"
       system: "tatara"
@@ -102,7 +101,7 @@ rules:
     for: 30m
     decimal_points: 2
     annotations:
-      summary: "Wrapper turns failing {{ index $values \"C\" }} of turns over 30m (>30%). Claude sessions are erroring out. (DARK until pushMetricsAllowedPrefixes widens.)"
+      summary: "Wrapper turns failing {{ index $values \"C\" }} of turns over 30m (>30%). Claude sessions are erroring out."
     labels:
       homelab: "true"
       system: "tatara"
@@ -111,13 +110,13 @@ rules:
   - name: "Wrapper HTTP 5xx responses"
     queries:
       - expression: |
-          sum(rate(ccw_http_requests_total{status_code=~"5.."}[10m]))
+          sum(rate(ccw_http_requests_total{status_code=~"5..", route!~"/readyz|/healthz|/metrics"}[10m]))
     math_operator: ">"
     threshold: 0
     for: 10m
     decimal_points: 2
     annotations:
-      summary: "Wrapper HTTP API returning 5xx at {{ index $values \"C\" }}/s over 10m. Operator callbacks/turn-submit are failing. (DARK until pushMetricsAllowedPrefixes widens.)"
+      summary: "Wrapper HTTP API returning 5xx (excludes /readyz|/healthz|/metrics probes) at {{ index $values \"C\" }}/s over 10m. A real wrapper API request path is erroring."
     labels:
       homelab: "true"
       system: "tatara"
@@ -132,7 +131,7 @@ rules:
     for: 5m
     decimal_points: 0
     annotations:
-      summary: "Wrapper recovered {{ index $values \"C\" }} HTTP handler panic(s) in 15m. A request path is panicking. (DARK until pushMetricsAllowedPrefixes widens.)"
+      summary: "Wrapper recovered {{ index $values \"C\" }} HTTP handler panic(s) in 15m. A request path is panicking."
     labels:
       homelab: "true"
       system: "tatara"
@@ -147,7 +146,7 @@ rules:
     for: 15m
     decimal_points: 0
     annotations:
-      summary: "Wrapper agents consuming {{ index $values \"C\" }} tokens/s over 15m (>80k/s). A turn or loop is burning tokens. (DARK until pushMetricsAllowedPrefixes widens.)"
+      summary: "Wrapper agents consuming {{ index $values \"C\" }} tokens/s over 15m (>80k/s). A turn or loop is burning tokens."
     labels:
       homelab: "true"
       system: "tatara"

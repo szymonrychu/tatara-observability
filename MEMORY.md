@@ -56,3 +56,17 @@ Past decisions + context. One dated line per entry.
   noise; `or vector(0)` is surgical, self-documenting, and per-rule. "Operator replica missing" stays
   `warning` (partial 1-2/3 HA degradation); total-outage CRITICAL is covered by the hardened
   `sum(up) < 1` plus the new kube-state-metrics rule.
+- 2026-06-28: Fixed `alerts/tatara-wrapper.yaml` rule "Wrapper HTTP 5xx responses" false-firing on
+  `/readyz` readiness-probe 503s during agent-pod bootstrap (issue #8; #9 is a duplicate). The
+  wrapper mounts `httpMetrics()` router-wide, so each kubelet probe 503 increments
+  `ccw_http_requests_total{route="/readyz",status_code="503"}` while `ctl.Alive()` is false (clone +
+  hook install + Claude start). With `>0 for 10m` on a rate, a ~10m slow bootstrap tripped the page
+  even though the real API emitted zero 5xx (`/v1/*` turn-submit returns 202/409; the operator
+  turn-complete callback runs on the loopback `InternalRouter()` which carries NO metrics middleware,
+  so it cannot emit `ccw_http_requests_total` at all). Fix: exclude probe routes from the 5xx
+  selector - `route!~"/readyz|/healthz|/metrics"`. Kept `>0 for 10m`: once probe 503s are excluded a
+  sustained real-API 5xx is genuinely abnormal, and readiness problems stay covered by the dedicated
+  "Wrapper agent pods not becoming ready" rule. Also swept the now-stale
+  "(DARK until pushMetricsAllowedPrefixes widens.)" caveat from ALL `ccw_*` rule annotations and the
+  INERT/DARK header + section comments: those families went LIVE when the operator push allowlist was
+  widened (operator 12729ed). Pairs with the app-side `/readyz`-503 tolerance fix in tatara-chat #45.

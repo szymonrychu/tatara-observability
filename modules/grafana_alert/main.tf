@@ -139,6 +139,13 @@ resource "grafana_rule_group" "rules" {
 
         content {
           ref_id = data.value.ref_id
+          # Grafana persists the AlertQuery `queryType` at the data-block level too, mirroring
+          # the model's `queryType` (loki -> "instant"; prometheus/math have none). Source it
+          # from the same model map so the block and the model never disagree. Without this the
+          # loki blocks perpetually plan `query_type: "instant" -> null`, force-updating the
+          # tatara-logs group on every apply - and that needless write against the slow Grafana
+          # provisioning API is what hit context-deadline-exceeded post-merge (issue #8).
+          query_type = lookup(local.type_to_model[data.value.query_type], "queryType", null)
           relative_time_range {
             from = data.value.relative_time_range_from
             to   = data.value.relative_time_range_to

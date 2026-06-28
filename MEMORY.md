@@ -83,3 +83,18 @@ Past decisions + context. One dated line per entry.
   own - the simplest root-cause fix, no provider-arg/timeout guessing. Applies are slower but this
   config is tiny (1 folder + 1 dashboard + 6 rule groups). If a single huge group ever times out on
   its own even when serialized, revisit with a provider-level `retries`/`retry_status_codes` bump.
+- 2026-06-28: `-parallelism=1` was NOT enough - the next post-merge apply (#15, SHA a7087d7) still
+  went red with `Get .../provisioning/alert-rules/<uid>: context deadline exceeded`. The real
+  trigger was a PERPETUAL DIFF, not concurrency: `modules/grafana_alert/main.tf` rendered the loki
+  model with `queryType="instant"` INSIDE the data-block model JSON but never set the data block's
+  own top-level `query_type` attribute, so Grafana persisted `queryType="instant"` on the loki
+  AlertQuery while terraform planned it back to null every run (`query_type: "instant" -> null` on
+  the 4 `tatara-logs` loki rules => "1 to change" on EVERY apply). That forced a needless rule-group
+  write each merge, and the write (plus the genuinely slow Grafana provisioning API - the
+  tatara-memory refresh alone took ~86s) tipped over the context deadline. Fix: set the data block's
+  `query_type` from the SAME model map - `lookup(local.type_to_model[query_type], "queryType", null)`
+  - so loki blocks get "instant" (matches Grafana) and prometheus/math stay unset (Grafana stores
+  "", no diff). Verified against live Grafana: tatara-logs loki query (refId A) queryType="instant";
+  all prometheus groups' refId A queryType="". With the drift gone the plan is empty, so steady-state
+  applies do refresh + 0 changes and never force a write - the durable fix the `-parallelism=1`
+  band-aid was masking. The model's `queryType` and the block's `query_type` now share one source.

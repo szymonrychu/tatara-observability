@@ -89,6 +89,8 @@ rules:
     decimal_points: 2
     annotations:
       summary: "tatara-chat serving {{ index $values \"C\" }} ratio 5xx responses (>5%) for 10m. Chat API erroring."
+      # filter-or-justify (CONVENTIONS.md): no consumer-side probe filter needed.
+      tatara_probe_exclusion: "Probes excluded producer-side: tatara-chat mounts /readyz and /healthz outside the metrics middleware (tatara-chat/internal/httpapi/router.go:30-34,51-68), so probe 503s never enter http_requests_total. See CONVENTIONS.md."
     labels:
       homelab: "true"
       system: "tatara"

@@ -58,11 +58,30 @@ jobs:
       # when terraform writes/refreshes multiple rule groups into the same folder
       # concurrently (default parallelism 10). Serialize the Grafana API calls so each
       # rule group is applied on its own. See MEMORY.md 2026-06-28.
+      #
+      # Retry the whole plan/apply: the homelab Grafana provisioning API intermittently
+      # stalls a single rule-group/alert-rule GET past the grafana provider's fixed 30s
+      # per-request deadline (go-openapi runtime DefaultTimeout). That deadline is NOT
+      # configurable via any provider argument, and the provider's own `retries` reuse the
+      # same already-expired request context, so they cannot recover a context-deadline
+      # stall. The stall is transient (a different rule group times out on each merge), so a
+      # fresh terraform process - with fresh per-request deadlines - succeeds on a later
+      # attempt. terraform is idempotent and converges to the same desired state.
+      # See MEMORY.md 2026-06-28.
       - name: terraform plan
         if: github.event_name == 'pull_request'
         run: |
           set -o pipefail
-          terraform plan -input=false -no-color -lock-timeout=300s -parallelism=1 2>&1 | tee plan.txt
+          ok=0
+          for attempt in 1 2 3; do
+            echo "terraform plan attempt ${attempt}/3"
+            if terraform plan -input=false -no-color -lock-timeout=300s -parallelism=1 2>&1 | tee plan.txt; then
+              ok=1
+              break
+            fi
+            echo "terraform plan attempt ${attempt} failed; retrying after backoff"
+            sleep $((attempt * 15))
+          done
           {
             echo '### terraform plan (tatara-observability)'
             echo
@@ -74,6 +93,10 @@ jobs:
             echo '```'
             echo '</details>'
           } > plan_comment.md
+          if [ "${ok}" -ne 1 ]; then
+            echo "terraform plan failed after 3 attempts"
+            exit 1
+          fi
 
       - name: sticky plan comment
         if: github.event_name == 'pull_request'
@@ -84,4 +107,14 @@ jobs:
 
       - name: terraform apply
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: terraform apply -input=false -auto-approve -lock-timeout=300s -parallelism=1
+        run: |
+          for attempt in 1 2 3; do
+            echo "terraform apply attempt ${attempt}/3"
+            if terraform apply -input=false -auto-approve -lock-timeout=300s -parallelism=1; then
+              exit 0
+            fi
+            echo "terraform apply attempt ${attempt} failed; retrying after backoff"
+            sleep $((attempt * 15))
+          done
+          echo "terraform apply failed after 3 attempts"
+          exit 1

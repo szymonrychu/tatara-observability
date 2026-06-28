@@ -7,3 +7,7 @@ plan.out
 plan.txt
 .env
 crash.log
+
+# Python bytecode (lint scripts)
+__pycache__/
+*.pyc

@@ -1,0 +1,44 @@
+name: alert-rules-lint
+
+# Standalone "filter-or-justify" lint over alerts/*.yaml (see CONVENTIONS.md). Kills the
+# recurring false-positive class where probe 5xx responses are counted as real HTTP errors.
+# Complementary to, and deliberately NOT folded into, the terraform apply workflow: this
+# check needs no AWS/Grafana secrets and is the false-POSITIVE guard (issue #18 is the
+# false-negative / dark-rule guard).
+
+on:
+  pull_request:
+    paths:
+      - "alerts/**"
+      - "scripts/lint_alert_rules.py"
+      - "scripts/test_lint_alert_rules.py"
+      - ".github/workflows/alert-rules-lint.yml"
+  push:
+    branches: [main]
+    paths:
+      - "alerts/**"
+      - "scripts/lint_alert_rules.py"
+      - "scripts/test_lint_alert_rules.py"
+      - ".github/workflows/alert-rules-lint.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: install deps
+        run: pip install --quiet pyyaml
+
+      - name: linter self-tests
+        run: python3 -m unittest discover scripts -p 'test_*.py' -v
+
+      - name: lint alert rules
+        run: python3 scripts/lint_alert_rules.py

@@ -98,3 +98,19 @@ Past decisions + context. One dated line per entry.
   all prometheus groups' refId A queryType="". With the drift gone the plan is empty, so steady-state
   applies do refresh + 0 changes and never force a write - the durable fix the `-parallelism=1`
   band-aid was masking. The model's `queryType` and the block's `query_type` now share one source.
+- 2026-06-28: Killed the recurring false-positive alert class (issue #19, set A1+B1+C1+D2+E1). Added
+  `CONVENTIONS.md` (the one normative "real error vs benign/transient" spec, co-located with
+  `alerts/`), a deterministic "filter-or-justify" lint `scripts/lint_alert_rules.py` (+ unittest
+  `scripts/test_lint_alert_rules.py`) wired as a STANDALONE CI job `.github/workflows/alert-rules-lint.yml`
+  (no AWS/Grafana secrets; complementary to #18's dark-rule check, not folded in - E1). The lint flags
+  any rule selecting a 5xx status on an `*http_requests_total` family unless the selector excludes probe
+  routes OR the rule carries a non-empty `tatara_probe_exclusion` annotation. It immediately caught chat
+  (`tatara-chat.yaml` 5xx ratio) and memory (`tatara-memory.yaml` 5xx ratio); both now carry the
+  justify annotation. chat's documents its real producer-side exclusion (chat router.go:30-34,51-68);
+  memory's documents a KNOWN GAP (latent #8/#9 reintro: mem-* metrics.Middleware is mounted before
+  /healthz,/readyz and the rules are currently dark) - the producer-side memory fix is a follow-up
+  (D2), see ROADMAP.md. Lint runs locally via `pip install pyyaml && python3 scripts/lint_alert_rules.py`.
+- 2026-06-28: Chose Python+PyYAML for the lint (not Go - this repo is "not a code component"; not raw
+  text scanning - that is the fragile tech-debt the convention warns against). yamldecode-equivalent
+  structural parse; `annotations` is `optional(map(string),{})` in the module so the arbitrary
+  `tatara_probe_exclusion` key passes straight through to Grafana.

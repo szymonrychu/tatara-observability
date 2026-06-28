@@ -36,13 +36,20 @@ rules:
 builds the reduce -> round -> threshold chain. `up == 0` becomes `expression: sum(up{...})`,
 `math_operator: "<"`, `threshold: 1`.
 
+Before adding or changing a rule that counts HTTP errors, read [`CONVENTIONS.md`](CONVENTIONS.md):
+the platform "real error vs benign/transient" classification and the filter-or-justify CI lint
+that keeps readiness-probe 5xx (and other benign/transient signals) from paging an incident.
+
 ## CI
 
-GitHub Actions (`.github/workflows/apply.yml`): PR -> `terraform plan` (sticky comment);
-merge to `main` -> `terraform apply` into the Grafana `Tatara` folder.
+GitHub Actions:
+- `.github/workflows/apply.yml`: PR -> `terraform plan` (sticky comment); merge to `main` ->
+  `terraform apply` into the Grafana `Tatara` folder.
+- `.github/workflows/alert-rules-lint.yml`: standalone filter-or-justify lint over `alerts/*.yaml`
+  (`scripts/lint_alert_rules.py`, no secrets). See [`CONVENTIONS.md`](CONVENTIONS.md).
 
-Required GitHub Actions secrets: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (S3 state),
-`TF_VAR_GRAFANA_API_KEY` (Grafana Editor SA token), `TF_VAR_GRAFANA_URL`.
+Required GitHub Actions secrets (terraform job only): `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
+(S3 state), `TF_VAR_GRAFANA_API_KEY` (Grafana Editor SA token), `TF_VAR_GRAFANA_URL`.
 
 ## Boundary
 

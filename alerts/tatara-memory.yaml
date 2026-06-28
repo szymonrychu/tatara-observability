@@ -79,17 +79,15 @@ rules:
   - name: "Memory HTTP 5xx error ratio high"
     queries:
       - expression: |
-          sum(rate(http_requests_total{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*",status=~"Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout|Not Implemented|HTTP Version Not Supported"}[10m]))
+          sum(rate(http_requests_total{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*",route!~"/readyz|/healthz|/metrics",status=~"Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout|Not Implemented|HTTP Version Not Supported"}[10m]))
           /
-          clamp_min(sum(rate(http_requests_total{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*"}[10m])), 0.001)
+          clamp_min(sum(rate(http_requests_total{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*",route!~"/readyz|/healthz|/metrics"}[10m])), 0.001)
     math_operator: ">"
     threshold: 0.05
     for: 10m
     decimal_points: 2
     annotations:
-      summary: "tatara-memory HTTP 5xx ratio {{ index $values \"C\" }} (>5%) over 10m. API serving errors."
-      # filter-or-justify (CONVENTIONS.md): KNOWN GAP documented, producer-side fix is a follow-up.
-      tatara_probe_exclusion: "KNOWN GAP (follow-up before scraping is wired): this selector has no probe-route filter and tatara-memory mounts metrics.Middleware before /healthz and /readyz (tatara-memory/internal/httpapi/router.go:41,43-44), so once mem-* pods are scraped probe 503s would count as 5xx (the chat/wrapper #8/#9 false-positive). Rules are currently dark. Fix producer-side (mount probes outside the middleware) or add a route exclusion here before enabling scraping. See CONVENTIONS.md."
+      summary: "tatara-memory HTTP 5xx ratio {{ index $values \"C\" }} (>5%, excludes /readyz|/healthz|/metrics probes) over 10m. API serving errors."
     labels:
       homelab: "true"
       system: "tatara"

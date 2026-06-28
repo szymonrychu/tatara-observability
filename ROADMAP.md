@@ -8,12 +8,13 @@ Planned work not yet started. Move items out when shipped (note in MEMORY.md if 
 - `planned`: wire the `mem-*` per-project memory pods + the Argo workflow-controller to Prometheus
   scrape (Gap 1 / Gap 2 from the alerting design) so the currently-dark memory app-metric rules and
   a precise argo CI rule (`argo_workflows_count`) can fire.
-- `planned` (follow-up from #19, D2): before enabling mem-* scrape (item above), close the latent
-  probe false-positive in tatara-memory. Either mount /healthz,/readyz OUTSIDE metrics.Middleware
-  producer-side (`tatara-memory/internal/httpapi/router.go:41,43-44`, the chat pattern) or add a
-  probe-route selector exclusion to "Memory HTTP 5xx error ratio high" in `alerts/tatara-memory.yaml`,
-  then drop that rule's `tatara_probe_exclusion` KNOWN-GAP annotation. See CONVENTIONS.md. The
-  filter-or-justify lint already documents the gap; this turns the documented exception into a real fix.
+- `shipped` (follow-up from #19, D2): closed the latent probe false-positive on "Memory HTTP 5xx
+  error ratio high" consumer-side (#21) - added `route!~"/readyz|/healthz|/metrics"` to both selectors
+  and dropped the rule's `tatara_probe_exclusion` KNOWN-GAP annotation. tatara-memory's
+  `http_requests_total` carries a chi `route` label (verified `tatara-memory/internal/httpapi/middleware.go`),
+  so the exclusion is exact, not a guess. The producer-side variant (mount /healthz,/readyz OUTSIDE
+  metrics.Middleware in `tatara-memory/internal/httpapi/router.go:41,43-44`) is now an OPTIONAL cleanup
+  follow-up in tatara-memory, no longer a prerequisite for enabling mem-* scrape. See CONVENTIONS.md.
 - `planned`: re-add an argo CI alert here once `argo_workflows_count` is scraped (the original
   namespace-wide Failed-pod proxy was dropped as too noisy).
 - `planned`: tune the p95 latency thresholds against real histogram buckets. Brainstorm issues

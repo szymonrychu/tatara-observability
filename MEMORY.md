@@ -132,3 +132,17 @@ Past decisions + context. One dated line per entry.
   un-stalls. Kept `-parallelism=1`. No `grafana_rule_group` `timeouts {}` block exists to raise the
   read deadline (checked the resource schema). Also dropped the two `scripts/__pycache__/*.pyc` files
   the #19 merge accidentally committed and added `__pycache__/` + `*.pyc` to `.gitignore`.
+- 2026-06-28: Closed the D2 KNOWN GAP from the 2026-06-28 #19 entry above (issue #21). Took the
+  consumer-side half of filter-or-justify on "Memory HTTP 5xx error ratio high": added
+  `route!~"/readyz|/healthz|/metrics"` to BOTH the numerator and denominator selectors and removed the
+  `tatara_probe_exclusion` annotation (lint now passes on the filter, not the justification). Verified
+  the label against source before editing: tatara-memory `http_requests_total` is a CounterVec keyed
+  `{route, method, status}` where `route` is the chi route pattern via `routeLabel` and `status` is
+  `http.StatusText` (`tatara-memory/internal/httpapi/middleware.go`), and the probe routes are the
+  literal chi patterns `/healthz`, `/readyz`, `/metrics` (`router.go`) - so the exclusion is exact, not
+  a guess (this is why it had to be confirmed: a wrong label name would make the filter a silent no-op).
+  Did NOT do the producer-side fix (mount probes outside `metrics.Middleware`, `router.go:41,43-44`):
+  that lives in tatara-memory, out of this repo's blast radius; it is now an OPTIONAL cleanup, no longer
+  a scrape prerequisite. The cross-repo CONVENTIONS.md pointers (tatara-documentation observability.md,
+  tatara-agent-skills review checklist) also stay as separate-repo follow-ups - neither repo is in scope
+  for a tatara-observability PR.

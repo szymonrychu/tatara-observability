@@ -9,13 +9,34 @@ rules:
   - name: "Operator scrape target down"
     queries:
       - expression: |
-          sum(up{namespace="tatara",job="tatara-operator"})
+          sum(up{namespace="tatara",job="tatara-operator"}) or vector(0)
     math_operator: "<"
     threshold: 1
     for: 5m
     decimal_points: 0
     annotations:
-      summary: "All tatara-operator replicas are down (sum(up)={{ index $values \"C\" }}). The platform control loop is dead: no reconciles, webhooks, or agent turns."
+      summary: "All tatara-operator replicas are down (sum(up)={{ index $values \"C\" }}). The platform control loop is dead: no reconciles, webhooks, or agent turns. The `or vector(0)` fallback makes this fire even when the scrape targets have vanished entirely (e.g. scaled to zero)."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  # Robust scaled-to-zero / unschedulable detector. kube-state-metrics keeps
+  # exposing this series (reading 0) even when every up{job="tatara-operator"}
+  # target disappears, so this pages CRITICAL fast on a full outage that the
+  # up-based rules used to miss (their series went absent -> NoData ->
+  # default_no_data_state: OK). `or vector(0)` also covers the Deployment being
+  # deleted, where even this kube-state-metrics series would otherwise vanish.
+  - name: "Operator deployment unavailable (scaled to zero)"
+    queries:
+      - expression: |
+          max(kube_deployment_status_replicas_available{namespace="tatara",deployment="tatara-operator"}) or vector(0)
+    math_operator: "<"
+    threshold: 1
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator Deployment has {{ index $values \"C\" }} available replicas (<1). It is scaled to zero, unschedulable, or deleted; the platform control loop is down. This fires from kube-state-metrics, which stays present when up{job=\"tatara-operator\"} vanishes."
     labels:
       homelab: "true"
       system: "tatara"
@@ -24,7 +45,7 @@ rules:
   - name: "Operator replica missing"
     queries:
       - expression: |
-          count(up{namespace="tatara",job="tatara-operator"} == 1)
+          count(up{namespace="tatara",job="tatara-operator"} == 1) or vector(0)
     math_operator: "<"
     threshold: 3
     for: 15m
@@ -84,13 +105,13 @@ rules:
   - name: "Operator pod not ready"
     queries:
       - expression: |
-          sum(kube_pod_status_ready{namespace="tatara",pod=~"tatara-operator-.*",condition="true"})
+          sum(kube_pod_status_ready{namespace="tatara",pod=~"tatara-operator-.*",condition="true"}) or vector(0)
     math_operator: "<"
     threshold: 1
     for: 10m
     decimal_points: 0
     annotations:
-      summary: "No tatara-operator pod is Ready (sum ready={{ index $values \"C\" }}). Readiness probe failing across the Deployment."
+      summary: "No tatara-operator pod is Ready (sum ready={{ index $values \"C\" }}). Readiness probe failing across the Deployment, or no pods exist at all (the `or vector(0)` fallback fires when the readiness series has vanished)."
     labels:
       homelab: "true"
       system: "tatara"
@@ -103,13 +124,13 @@ rules:
   - name: "Operator reconcile loop wedged"
     queries:
       - expression: |
-          sum(increase(operator_reconcile_total{namespace="tatara",job="tatara-operator"}[15m]))
+          sum(increase(operator_reconcile_total{namespace="tatara",job="tatara-operator"}[15m])) or vector(0)
     math_operator: "<"
     threshold: 1
     for: 15m
     decimal_points: 0
     annotations:
-      summary: "No reconciles completed across all tatara-operator replicas in 15m (increase={{ index $values \"C\" }}). The controller loop is wedged."
+      summary: "No reconciles completed across all tatara-operator replicas in 15m (increase={{ index $values \"C\" }}). The controller loop is wedged, or the operator is gone entirely (the `or vector(0)` fallback fires when the reconcile series has vanished)."
     labels:
       homelab: "true"
       system: "tatara"

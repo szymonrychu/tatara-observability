@@ -54,11 +54,15 @@ jobs:
       - name: terraform validate
         run: terraform validate
 
+      # -parallelism=1: Grafana's rule-group provisioning API 409-conflicts and times out
+      # when terraform writes/refreshes multiple rule groups into the same folder
+      # concurrently (default parallelism 10). Serialize the Grafana API calls so each
+      # rule group is applied on its own. See MEMORY.md 2026-06-28.
       - name: terraform plan
         if: github.event_name == 'pull_request'
         run: |
           set -o pipefail
-          terraform plan -input=false -no-color -lock-timeout=300s 2>&1 | tee plan.txt
+          terraform plan -input=false -no-color -lock-timeout=300s -parallelism=1 2>&1 | tee plan.txt
           {
             echo '### terraform plan (tatara-observability)'
             echo
@@ -80,4 +84,4 @@ jobs:
 
       - name: terraform apply
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: terraform apply -input=false -auto-approve -lock-timeout=300s
+        run: terraform apply -input=false -auto-approve -lock-timeout=300s -parallelism=1

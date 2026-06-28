@@ -70,3 +70,16 @@ Past decisions + context. One dated line per entry.
   "(DARK until pushMetricsAllowedPrefixes widens.)" caveat from ALL `ccw_*` rule annotations and the
   INERT/DARK header + section comments: those families went LIVE when the operator push allowlist was
   widened (operator 12729ed). Pairs with the app-side `/readyz`-503 tolerance fix in tatara-chat #45.
+- 2026-06-28: Pinned `terraform {plan,apply} -parallelism=1` in `.github/workflows/apply.yml`. The
+  post-merge `terraform apply` of the #8 wrapper fix went red even though the change itself was
+  correct and DID land in Grafana: `PUT .../rule-groups/tatara-operator` returned `409` and a
+  concurrent `GET .../alert-rules` (tatara-wrapper) hit `context deadline exceeded`. Root cause is a
+  concurrency race, NOT content: terraform's default parallelism (10) writes/refreshes every
+  `grafana_rule_group` into the SAME Grafana folder (Tatara, uid bfq61vizzm4n4f) at once, and the
+  Grafana provisioning API 409-conflicts / times out under concurrent same-folder writes (the large
+  slow `tatara-operator` rename from #7/#13 widened the window). Proof it was a race: the operator
+  group still converged to the desired 22-rule state despite the 409 (a real content conflict would
+  have stayed stale). `-parallelism=1` serializes the Grafana API calls so each group applies on its
+  own - the simplest root-cause fix, no provider-arg/timeout guessing. Applies are slower but this
+  config is tiny (1 folder + 1 dashboard + 6 rule groups). If a single huge group ever times out on
+  its own even when serialized, revisit with a provider-level `retries`/`retry_status_codes` bump.

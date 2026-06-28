@@ -114,3 +114,21 @@ Past decisions + context. One dated line per entry.
   text scanning - that is the fragile tech-debt the convention warns against). yamldecode-equivalent
   structural parse; `annotations` is `optional(map(string),{})` in the module so the arbitrary
   `tatara_probe_exclusion` key passes straight through to Grafana.
+- 2026-06-28: The #19 post-merge `terraform apply` (SHA fc8c323) still went red with
+  `Get .../provisioning/alert-rules/<uid>: context deadline exceeded` - same class as #15, but with
+  the perpetual diff already gone (so a genuine 2-annotation change, not drift). It is NOT content:
+  the timed-out GET was on the unrelated `tatara-wrapper` group, and a different rule group times out
+  on each merge - i.e. a TRANSIENT homelab stall. Ran down the provider internals to settle the next
+  step the prior note floated ("revisit with a provider-level `retries` bump"): that bump CANNOT work
+  here. The grafana provider's read uses the go-openapi runtime, which pins a fixed 30s per-request
+  deadline (`client/runtime.go` `DefaultTimeout = 30s`, `req.SetTimeout(DefaultTimeout)`); it is not
+  exposed by any provider argument (schema has only `retries`/`retry_wait`/`retry_status_codes`, none
+  a timeout). And the provider's retry transport (`grafana-openapi-client-go` `pkg/transport`) retries
+  on any error INCLUDING the deadline, but reuses the SAME already-expired request context, so every
+  retry inside one read fails instantly - useless for a >30s stall. The only lever that recovers a
+  transient stall is a fresh terraform process (fresh per-request deadlines). Fix: wrap
+  `terraform {plan,apply}` in a 3-attempt retry loop in `.github/workflows/apply.yml` (15s/30s
+  backoff); terraform is idempotent and converges, so a later attempt lands the change once the API
+  un-stalls. Kept `-parallelism=1`. No `grafana_rule_group` `timeouts {}` block exists to raise the
+  read deadline (checked the resource schema). Also dropped the two `scripts/__pycache__/*.pyc` files
+  the #19 merge accidentally committed and added `__pycache__/` + `*.pyc` to `.gitignore`.

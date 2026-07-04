@@ -358,3 +358,35 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "warning"
+  # ----------------------------------------------------------------------------
+  # Token/$ spend: model- and cache-aware runaway detection over the durable
+  # operator_task_tokens_total metric (durable-measurement design, review G17).
+  # ----------------------------------------------------------------------------
+  - name: "Agent token spend runaway ($/s)"
+    queries:
+      - expression: |
+          sum(
+              rate(operator_task_tokens_total{type="input",          model="claude-opus-4-8"}[15m]) * 5e-6
+           or rate(operator_task_tokens_total{type="output",         model="claude-opus-4-8"}[15m]) * 25e-6
+           or rate(operator_task_tokens_total{type="cache_read",     model="claude-opus-4-8"}[15m]) * 0.5e-6
+           or rate(operator_task_tokens_total{type="cache_creation", model="claude-opus-4-8"}[15m]) * 6.25e-6
+           or rate(operator_task_tokens_total{type="input",          model="claude-sonnet-5"}[15m]) * 3e-6
+           or rate(operator_task_tokens_total{type="output",         model="claude-sonnet-5"}[15m]) * 15e-6
+           or rate(operator_task_tokens_total{type="cache_read",     model="claude-sonnet-5"}[15m]) * 0.3e-6
+           or rate(operator_task_tokens_total{type="cache_creation", model="claude-sonnet-5"}[15m]) * 3.75e-6
+           or rate(operator_task_tokens_total{type="input",          model="claude-haiku-4-5"}[15m]) * 1e-6
+           or rate(operator_task_tokens_total{type="output",         model="claude-haiku-4-5"}[15m]) * 5e-6
+           or rate(operator_task_tokens_total{type="cache_read",     model="claude-haiku-4-5"}[15m]) * 0.1e-6
+           or rate(operator_task_tokens_total{type="cache_creation", model="claude-haiku-4-5"}[15m]) * 1.25e-6
+          )
+    math_operator: ">"
+    threshold: 0.5
+    for: 15m
+    decimal_points: 3
+    annotations:
+      summary: "Agents spending {{ index $values \"C\" }} USD/s over 15m (>$0.50/s, model-aware). A turn or loop is burning budget; check the task-delivery Cost panel."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"

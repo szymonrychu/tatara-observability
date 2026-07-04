@@ -137,21 +137,11 @@ rules:
       system: "tatara"
       component: "wrapper"
       severity: "critical"
-  - name: "Wrapper token spend runaway"
-    queries:
-      - expression: |
-          sum(rate(ccw_turn_tokens_total[15m]))
-    math_operator: ">"
-    threshold: 80000
-    for: 15m
-    decimal_points: 0
-    annotations:
-      summary: "Wrapper agents consuming {{ index $values \"C\" }} tokens/s over 15m (>80k/s). A turn or loop is burning tokens."
-    labels:
-      homelab: "true"
-      system: "tatara"
-      component: "wrapper"
-      severity: "warning"
+  # The "Wrapper token spend runaway" rule was MOVED to alerts/tatara-operator.yaml
+  # 2026-07-04 as "Agent token spend runaway ($/s)": it read the dead/ephemeral
+  # ccw_turn_tokens_total push family and thresholded on a flat token/s number;
+  # re-baselined onto the durable operator_task_tokens_total{model,type} metric
+  # priced per-model in $/s (review gap G17 / G2 durable-measurement design).
   # The "Wrapper metrics dropped by operator push allowlist" canary was REMOVED
   # 2026-06-25: its purpose (signal that ccw_*/tatara_wrapper_* were dark) is done -
   # pushMetricsAllowedPrefixes was widened (operator 12729ed). The residual

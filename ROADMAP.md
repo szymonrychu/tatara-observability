@@ -23,3 +23,10 @@ Planned work not yet started. Move items out when shipped (note in MEMORY.md if 
   after the NaN-guard fix the rule is inert (never fires). Lower the threshold below the bucket
   ceiling (and confirm buckets per component) so it can fire on genuine slowness; same check for the
   memory/chat p95 rules.
+- `planned` (Task 6, follows the G4 quality-feedback dashboard above): tier-quality alert rule(s) in
+  `alerts/*.yaml` for rubber-stamp detection - `homelab` + `system="tatara"` +
+  `tatara_tier_quality="true"` + `kind`/`model`/`project` labels on
+  `operator_review_outcome_total`/`operator_review_findings_total` (the sustained-near-zero find-rate
+  or findings-per-review the dashboard panels above flag as the "G5 tier-revert" signature), plus
+  project-webhook routing and a provisional alert threshold. Not started; no rule exists in `alerts/`
+  yet.

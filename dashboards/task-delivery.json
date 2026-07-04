@@ -518,7 +518,7 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Cumulative Claude spend in USD per Task kind and repo, from the wrapper's ccw_turn_cost_usd_total (result.json total_cost_usd). Populates once wrappers carrying the kind/repo/project labels are deployed. Use to attribute $ spend and A/B the per-kind model tiering. Estimated $ from operator_task_tokens_total x per-model price (Sonnet for triageIssue/review, Opus otherwise). cache_read is folded into input by the operator so cache tokens are priced at the input rate (slight over-estimate); cache_creation is not tracked. Prices track the current tier map. The ccw_turn_cost_usd_total metric has no producer (result.json is never written), so this operator-side derivation replaces it.",
+      "description": "Cumulative Claude spend in USD per Task kind and repo, derived from the durable operator_task_tokens_total{model,type} series (input/output/cache_read/cache_creation priced per-model). Model- and cache-accurate: no kind->model coupling, cache_read priced at 0.1x input and cache_creation at 1.25x input per model. Prices: opus-4-8 $5/$25 per 1M in/out, sonnet-5 $3/$15, haiku-4-5 $1/$5 (sonnet-5 intro pricing $2/$10 through 2026-08-31, not yet reflected here). Replaces the dead ccw_turn_cost_usd_total (result.json is never written).",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "thresholds"},
@@ -569,7 +569,7 @@
         {
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "editorMode": "code",
-          "expr": "sum by (kind, repo) ( (operator_task_tokens_total{type=\"input\",  kind=~\"triageIssue|review\", project=~\"$project\"} * 0.000003) or (operator_task_tokens_total{type=\"output\", kind=~\"triageIssue|review\", project=~\"$project\"} * 0.000015) or (operator_task_tokens_total{type=\"input\",  kind!~\"triageIssue|review\", project=~\"$project\"} * 0.000005) or (operator_task_tokens_total{type=\"output\", kind!~\"triageIssue|review\", project=~\"$project\"} * 0.000025) )",
+          "expr": "sum by (kind, repo) ( operator_task_tokens_total{type=\"input\", model=\"claude-opus-4-8\", project=~\"$project\"} * 5e-6 or operator_task_tokens_total{type=\"output\", model=\"claude-opus-4-8\", project=~\"$project\"} * 25e-6 or operator_task_tokens_total{type=\"cache_read\", model=\"claude-opus-4-8\", project=~\"$project\"} * 0.5e-6 or operator_task_tokens_total{type=\"cache_creation\", model=\"claude-opus-4-8\", project=~\"$project\"} * 6.25e-6 or operator_task_tokens_total{type=\"input\", model=\"claude-sonnet-5\", project=~\"$project\"} * 3e-6 or operator_task_tokens_total{type=\"output\", model=\"claude-sonnet-5\", project=~\"$project\"} * 15e-6 or operator_task_tokens_total{type=\"cache_read\", model=\"claude-sonnet-5\", project=~\"$project\"} * 0.3e-6 or operator_task_tokens_total{type=\"cache_creation\", model=\"claude-sonnet-5\", project=~\"$project\"} * 3.75e-6 or operator_task_tokens_total{type=\"input\", model=\"claude-haiku-4-5\", project=~\"$project\"} * 1e-6 or operator_task_tokens_total{type=\"output\", model=\"claude-haiku-4-5\", project=~\"$project\"} * 5e-6 or operator_task_tokens_total{type=\"cache_read\", model=\"claude-haiku-4-5\", project=~\"$project\"} * 0.1e-6 or operator_task_tokens_total{type=\"cache_creation\", model=\"claude-haiku-4-5\", project=~\"$project\"} * 1.25e-6 )",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
@@ -592,7 +592,7 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Prompt-cache hit ratio per Task kind: cache_read / (cache_read + input) over the wrapper ccw_turn_tokens_total families. A ratio near 0 means the stable prefix is being re-billed at full input price every pod (cache-hostile); component 4 (cross-pod cache reclaim) is gated on this rising above 0 for a fresh pod's turn-0. Currently non-functional: depends on ccw cache_read/input which the push pipeline does not durably deliver; pending a durable cache-aware metric (review G2).",
+      "description": "Prompt-cache hit ratio per Task kind: cache_read / (cache_read + input) over the durable operator_task_tokens_total family. A ratio near 0 means the stable prefix is being re-billed at full input price every pod (cache-hostile); component 4 (cross-pod cache reclaim) is gated on this rising above 0 for a fresh pod's turn-0. Functional for every kind including single-turn triageIssue/review, since operator_task_tokens_total separates cache_read from uncached input.",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "palette-classic"},
@@ -639,13 +639,76 @@
         {
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "editorMode": "code",
-          "expr": "sum by (kind) (rate(ccw_turn_tokens_total{type=\"cache_read\", project=~\"$project\"}[$__rate_interval])) / clamp_min(sum by (kind) (rate(ccw_turn_tokens_total{type=~\"cache_read|input\", project=~\"$project\"}[$__rate_interval])), 0.0001)",
+          "expr": "sum by (kind) (rate(operator_task_tokens_total{type=\"cache_read\", project=~\"$project\"}[$__rate_interval])) / clamp_min(sum by (kind) (rate(operator_task_tokens_total{type=~\"cache_read|input\", project=~\"$project\"}[$__rate_interval])), 0.0001)",
           "legendFormat": "{{kind}}",
           "refId": "A"
         }
       ],
       "title": "Cache Hit Ratio by Kind",
       "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Churn cost: cumulative $ spend by terminal outcome (delivered, churned, abandoned), derived from operator_task_terminal_tokens_total{outcome,model,type} priced per-model the same way as the Cost panel. Churned = recreated/gave-up-and-rerolled Tasks; abandoned = declined/parked with no delivery. A high churned:delivered ratio surfaces recreation-loop waste (the motivating pathology, G12) that the per-issue Cost panel cannot see once a Task is recreated under a new name.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "custom": {
+            "align": "auto",
+            "cellOptions": {"type": "auto"},
+            "filterable": true,
+            "inspect": false
+          },
+          "mappings": [],
+          "unit": "currencyUSD",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "green", "value": null}]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "USD"},
+            "properties": [
+              {"id": "custom.cellOptions", "value": {"type": "color-background", "mode": "gradient"}},
+              {"id": "custom.width", "value": 120}
+            ]
+          }
+        ]
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 34},
+      "id": 8,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {"countRows": false, "fields": ["USD"], "reducer": ["sum"], "show": true},
+        "showHeader": true,
+        "sortBy": [{"desc": true, "displayName": "USD"}]
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (outcome) ( operator_task_terminal_tokens_total{type=\"input\", model=\"claude-opus-4-8\", project=~\"$project\"} * 5e-6 or operator_task_terminal_tokens_total{type=\"output\", model=\"claude-opus-4-8\", project=~\"$project\"} * 25e-6 or operator_task_terminal_tokens_total{type=\"cache_read\", model=\"claude-opus-4-8\", project=~\"$project\"} * 0.5e-6 or operator_task_terminal_tokens_total{type=\"cache_creation\", model=\"claude-opus-4-8\", project=~\"$project\"} * 6.25e-6 or operator_task_terminal_tokens_total{type=\"input\", model=\"claude-sonnet-5\", project=~\"$project\"} * 3e-6 or operator_task_terminal_tokens_total{type=\"output\", model=\"claude-sonnet-5\", project=~\"$project\"} * 15e-6 or operator_task_terminal_tokens_total{type=\"cache_read\", model=\"claude-sonnet-5\", project=~\"$project\"} * 0.3e-6 or operator_task_terminal_tokens_total{type=\"cache_creation\", model=\"claude-sonnet-5\", project=~\"$project\"} * 3.75e-6 or operator_task_terminal_tokens_total{type=\"input\", model=\"claude-haiku-4-5\", project=~\"$project\"} * 1e-6 or operator_task_terminal_tokens_total{type=\"output\", model=\"claude-haiku-4-5\", project=~\"$project\"} * 5e-6 or operator_task_terminal_tokens_total{type=\"cache_read\", model=\"claude-haiku-4-5\", project=~\"$project\"} * 0.1e-6 or operator_task_terminal_tokens_total{type=\"cache_creation\", model=\"claude-haiku-4-5\", project=~\"$project\"} * 1.25e-6 )",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ],
+      "title": "Churn Cost (USD) by Outcome",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {"Time": true, "__name__": true, "job": true, "pod": true, "project": true, "model": true, "type": true},
+            "includeByName": {},
+            "indexByName": {"outcome": 0},
+            "renameByName": {"Value": "USD"}
+          }
+        }
+      ],
+      "type": "table"
     }
   ],
   "refresh": "1m",
@@ -700,6 +763,6 @@
   "timezone": "browser",
   "title": "Tatara - Task Delivery",
   "uid": "tatara-task-delivery",
-  "version": 3,
+  "version": 4,
   "weekStart": ""
 }

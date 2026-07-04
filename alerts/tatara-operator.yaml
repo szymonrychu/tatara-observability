@@ -358,3 +358,60 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "warning"
+  # ----------------------------------------------------------------------------
+  # Token/$ spend: model- and cache-aware runaway detection over the durable
+  # operator_task_tokens_total metric (durable-measurement design, review G17).
+  #
+  # SEQUENCING: the `model`/`type=cache_read|cache_creation` label set below is
+  # produced by the operator's durable-measurement work (tatara-operator
+  # AddTaskTokens model/cache args + AddTerminalTokens). Until that ships, this
+  # repo has NO runaway detector for the wrapper-side removed rule (see
+  # tatara-wrapper.yaml note) other than the "Agent token spend runaway series
+  # missing" coverage-gap rule directly below, which pages loudly instead of
+  # this rule silently evaluating empty. Do not apply this file to a cluster
+  # running an operator that predates the model/type=cache_* label set without
+  # that coverage-gap rule alongside it.
+  # ----------------------------------------------------------------------------
+  - name: "Agent token spend runaway series missing (coverage gap)"
+    queries:
+      - expression: |
+          absent(operator_task_tokens_total{model=~".+", type=~"input|output|cache_read|cache_creation"})
+    math_operator: ">"
+    threshold: 0
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "operator_task_tokens_total carries no model/cache-aware series for 15m. The 'Agent token spend runaway ($/s)' rule below has no data source and CANNOT detect a runaway right now - deploy the operator's model/cache token metrics (AddTaskTokens model+cacheRead+cacheCreation args) before relying on it."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  - name: "Agent token spend runaway ($/s)"
+    queries:
+      - expression: |
+          sum(
+              rate(operator_task_tokens_total{type="input",          model="claude-opus-4-8"}[15m]) * 5e-6
+           or rate(operator_task_tokens_total{type="output",         model="claude-opus-4-8"}[15m]) * 25e-6
+           or rate(operator_task_tokens_total{type="cache_read",     model="claude-opus-4-8"}[15m]) * 0.5e-6
+           or rate(operator_task_tokens_total{type="cache_creation", model="claude-opus-4-8"}[15m]) * 6.25e-6
+           or rate(operator_task_tokens_total{type="input",          model="claude-sonnet-5"}[15m]) * 3e-6
+           or rate(operator_task_tokens_total{type="output",         model="claude-sonnet-5"}[15m]) * 15e-6
+           or rate(operator_task_tokens_total{type="cache_read",     model="claude-sonnet-5"}[15m]) * 0.3e-6
+           or rate(operator_task_tokens_total{type="cache_creation", model="claude-sonnet-5"}[15m]) * 3.75e-6
+           or rate(operator_task_tokens_total{type="input",          model="claude-haiku-4-5"}[15m]) * 1e-6
+           or rate(operator_task_tokens_total{type="output",         model="claude-haiku-4-5"}[15m]) * 5e-6
+           or rate(operator_task_tokens_total{type="cache_read",     model="claude-haiku-4-5"}[15m]) * 0.1e-6
+           or rate(operator_task_tokens_total{type="cache_creation", model="claude-haiku-4-5"}[15m]) * 1.25e-6
+          )
+    math_operator: ">"
+    threshold: 0.5
+    for: 15m
+    decimal_points: 3
+    annotations:
+      summary: "Agents spending {{ index $values \"C\" }} USD/s over 15m (>$0.50/s, model-aware). A turn or loop is burning budget; check the task-delivery Cost panel."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"

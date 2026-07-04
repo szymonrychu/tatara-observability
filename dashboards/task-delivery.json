@@ -518,7 +518,7 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Cumulative Claude spend in USD per Task kind and repo, from the wrapper's ccw_turn_cost_usd_total (result.json total_cost_usd). Populates once wrappers carrying the kind/repo/project labels are deployed. Use to attribute $ spend and A/B the per-kind model tiering.",
+      "description": "Cumulative Claude spend in USD per Task kind and repo, from the wrapper's ccw_turn_cost_usd_total (result.json total_cost_usd). Populates once wrappers carrying the kind/repo/project labels are deployed. Use to attribute $ spend and A/B the per-kind model tiering. Estimated $ from operator_task_tokens_total x per-model price (Sonnet for triageIssue/review, Opus otherwise). cache_read is folded into input by the operator so cache tokens are priced at the input rate (slight over-estimate); cache_creation is not tracked. Prices track the current tier map. The ccw_turn_cost_usd_total metric has no producer (result.json is never written), so this operator-side derivation replaces it.",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "thresholds"},
@@ -569,7 +569,7 @@
         {
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "editorMode": "code",
-          "expr": "sum by (kind, repo) (ccw_turn_cost_usd_total{project=~\"$project\"})",
+          "expr": "sum by (kind, repo) ( (operator_task_tokens_total{type=\"input\",  kind=~\"triageIssue|review\", project=~\"$project\"} * 0.000003) or (operator_task_tokens_total{type=\"output\", kind=~\"triageIssue|review\", project=~\"$project\"} * 0.000015) or (operator_task_tokens_total{type=\"input\",  kind!~\"triageIssue|review\", project=~\"$project\"} * 0.000005) or (operator_task_tokens_total{type=\"output\", kind!~\"triageIssue|review\", project=~\"$project\"} * 0.000025) )",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
@@ -592,7 +592,7 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Prompt-cache hit ratio per Task kind: cache_read / (cache_read + input) over the wrapper ccw_turn_tokens_total families. A ratio near 0 means the stable prefix is being re-billed at full input price every pod (cache-hostile); component 4 (cross-pod cache reclaim) is gated on this rising above 0 for a fresh pod's turn-0.",
+      "description": "Prompt-cache hit ratio per Task kind: cache_read / (cache_read + input) over the wrapper ccw_turn_tokens_total families. A ratio near 0 means the stable prefix is being re-billed at full input price every pod (cache-hostile); component 4 (cross-pod cache reclaim) is gated on this rising above 0 for a fresh pod's turn-0. Currently non-functional: depends on ccw cache_read/input which the push pipeline does not durably deliver; pending a durable cache-aware metric (review G2).",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "palette-classic"},
@@ -700,6 +700,6 @@
   "timezone": "browser",
   "title": "Tatara - Task Delivery",
   "uid": "tatara-task-delivery",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }

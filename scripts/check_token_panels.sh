@@ -6,9 +6,9 @@ DB="dashboards/task-delivery.json"
 
 python3 -c "import json,sys; json.load(open('$DB'))"  # valid JSON
 
-# $-spend panel: title present and queries ccw_turn_cost_usd_total by kind,repo.
+# $-spend panel: title present and derives $ from operator_task_tokens_total by kind,repo.
 jq -e '.panels[] | select(.title=="Cost (USD) by Kind and Repo")
-       | .targets[].expr | select(test("ccw_turn_cost_usd_total"))
+       | .targets[].expr | select(test("operator_task_tokens_total"))
        | select(test("by ?\\(kind, ?repo\\)"))' "$DB" >/dev/null
 
 # cache-hit-ratio panel: title present and computes cache_read/(cache_read+input).

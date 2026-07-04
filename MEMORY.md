@@ -146,3 +146,20 @@ Past decisions + context. One dated line per entry.
   a scrape prerequisite. The cross-repo CONVENTIONS.md pointers (tatara-documentation observability.md,
   tatara-agent-skills review checklist) also stay as separate-repo follow-ups - neither repo is in scope
   for a tatara-observability PR.
+- 2026-07-04: Added `alerts/tatara-quality.yaml` (Task 6, quality-feedback-loop plan, G5): the
+  tier-quality rubber-stamp rule reading `operator_review_outcome_total` (Task 1, G4, operator repo),
+  find-rate `changes_requested / all` for `model="claude-sonnet-5"` over `[6h]`, gated with
+  `and on() (... * 21600 > 5)` so it cannot fire on 1-2 reviews (min-volume >5 reviews/6h). Threshold
+  0.02 and the 6h window/for are PROVISIONAL - no G4 baseline data exists yet, see ROADMAP.md.
+  `project="tatara"` is the one live Project CR name (`tatara-helmfile/values/project-tatara/common.yaml`
+  `name: tatara`), not a template placeholder - single-tenant homelab, so one rule file, not one per
+  project. Routing is unchanged from every other rule here: `homelab=true` + `system=tatara` match the
+  existing label-based parent/child notification policy in `infra/terraform/grafana` - there is no
+  separate literal "project webhook contact point" resource in this repo despite the plan's wording;
+  the label pair IS the routing mechanism. Added `scripts/check_tier_quality_alert.sh` (same
+  manual-run structural-guard pattern as `check_quality_panels.sh`/`check_token_panels.sh`, not wired
+  into CI) as the TDD covering test: asserts the rule exists with the required label set and PromQL
+  shape (metric name, verdict/model selectors, `and on()` volume gate). `scripts/lint_alert_rules.py`
+  and its `RealAlertFilesPass` unittest ignore this rule (it selects no `*http_requests_total` 5xx
+  status - out of that lint's scope), and `terraform validate`/`fmt -check -recursive` pass unchanged
+  since `grafana.tf`'s `fileset(alerts/*.yaml)` picks the new file up with no `.tf` edits needed.

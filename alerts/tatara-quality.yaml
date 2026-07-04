@@ -1,0 +1,36 @@
+---
+interval_seconds: 60
+default_no_data_state: "OK"
+rules:
+  # ---------------------------------------------------------------------------
+  # G5 tier-revert quality-feedback rules. Sourced from the operator's
+  # operator_review_outcome_total / operator_review_findings_total families
+  # (G4, tatara-operator internal/obs/operator_metrics.go), surfaced on the
+  # "Tatara - Quality Feedback" dashboard (dashboards/quality-feedback.json).
+  #
+  # THRESHOLDS ARE PROVISIONAL: 0.02 find-rate and the 5-review min-volume gate
+  # are rough starting points chosen before any real G4 baseline data exists.
+  # Tune both against the dashboard once the metric has run long enough to show
+  # a genuine claude-sonnet-5 review population - see ROADMAP.md.
+  # ---------------------------------------------------------------------------
+  - name: "Tier-quality rubber-stamp (model=claude-sonnet-5)"
+    queries:
+      - expression: |
+          (sum(rate(operator_review_outcome_total{model="claude-sonnet-5",verdict="changes_requested"}[6h])) or vector(0))
+          /
+          clamp_min(sum(rate(operator_review_outcome_total{model="claude-sonnet-5"}[6h])), 0.001)
+          and on() (sum(rate(operator_review_outcome_total{model="claude-sonnet-5"}[6h])) * 21600 > 5)
+    math_operator: "<"
+    threshold: 0.02
+    for: 6h
+    decimal_points: 2
+    annotations:
+      summary: "claude-sonnet-5 review find-rate {{ index $values \"C\" }} (<2%) over 6h with a minimum review volume met. Reviews may be rubber-stamping (approving without substantive scrutiny) rather than reviewing seriously; consider a tier-revert per the G5 incident goal."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      tatara_tier_quality: "true"
+      kind: "review"
+      model: "claude-sonnet-5"
+      project: "tatara"
+      severity: "warning"

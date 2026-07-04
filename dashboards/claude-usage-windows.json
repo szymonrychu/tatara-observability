@@ -163,7 +163,7 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "1 when the account-usage poller's last cycle succeeded, 0 when stale (poll failures exceeded the failure threshold - tatara_account_usage_poll_health, tatara-operator internal/accountusage/poller.go). Stale means the gate falls back to the customWindow path; the ladder is no longer proactively enforced on live account data.",
+      "description": "1 when the account-usage poller's last cycle succeeded, 0 when stale (poll failures exceeded the failure threshold - tatara_account_usage_poll_health, tatara-operator internal/accountusage/poller.go). Stale means the gate keeps holding on the last-known windows until they expire (eventual fail-open, by design); the ladder is no longer refreshed on live account data.",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "thresholds"},

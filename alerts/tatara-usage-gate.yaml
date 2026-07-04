@@ -20,7 +20,7 @@ rules:
     for: 15m
     decimal_points: 0
     annotations:
-      summary: "tatara_account_usage_poll_health={{ index $values \"C\" }} (<1) for 15m. The /api/oauth/usage poller has exceeded its failure threshold; the account-usage snapshot is stale and the claudeSubscription gate has fallen back to the customWindow path (design fail-safe). Check operator logs for poll errors (auth, 429, schema drift)."
+      summary: "tatara_account_usage_poll_health={{ index $values \"C\" }} (<1) for 15m. The /api/oauth/usage poller has exceeded its failure threshold; the account-usage snapshot is stale. The gate keeps holding on the last-known windows until each expires (eventual fail-open, by design - a claudeSubscription project has no customWindow inputs to fall back to); the OTel 429 backstop is the hard floor. Check operator logs for poll errors (auth, 429, schema drift)."
     labels:
       homelab: "true"
       system: "tatara"

@@ -163,3 +163,24 @@ Past decisions + context. One dated line per entry.
   and its `RealAlertFilesPass` unittest ignore this rule (it selects no `*http_requests_total` 5xx
   status - out of that lint's scope), and `terraform validate`/`fmt -check -recursive` pass unchanged
   since `grafana.tf`'s `fileset(alerts/*.yaml)` picks the new file up with no `.tf` edits needed.
+- 2026-07-04: Added `dashboards/claude-usage-windows.json` (uid=tatara-claude-usage-windows) +
+  `alerts/tatara-usage-gate.yaml` for the claude-subscription-usage-gate feature (Phase C of
+  `tatara` docs `docs/superpowers/plans/2026-07-04-claude-subscription-usage-gate.md`). Dashboard:
+  per-window utilization (timeseries + gauge) from `tatara_account_usage_utilization{window}`, reset
+  countdown from `tatara_account_usage_resets_at_seconds - time()`, per-kind admission holds from
+  `operator_admission_blocked_total{reason="kind_ceiling"}`, read-only monthly overage from
+  `tatara_account_overage_{percent,used,limit}` - all confirmed verbatim against tatara-operator
+  `internal/obs/operator_metrics.go` (worktree `feat/usage-window-gating`). Two panels + one alert
+  rule are PENDING OTEL DEPLOYMENT and explicitly labeled as such: `claude_code_cost_usage` (real
+  cost) and `claude_code_api_error{status_code="429"}` (reactive backstop) - these are the
+  Prometheus-normalized names the operator's own plan/progress notes commit to
+  (`.superpowers/sdd/progress.md:26` in the operator repo), translated from the documented dotted
+  OTel instrument names (`claude_code.cost.usage`, `claude_code.api_error`); the exact suffix the
+  OTLP->Prometheus collector's exporter adds (unit/type) is NOT yet confirmed since that collector
+  ships later (Phase D, tatara-helmfile) - fix the query if the deployed name differs. Emergency-
+  ceiling alert threshold (80%) reuses `budget.DefaultEmergencyPercent` (tatara-operator
+  `internal/budget/budget.go:38`) as the closest existing platform "emergency" convention, flagged
+  PROVISIONAL pending real five_hour/seven_day utilization data, matching the tier-quality rule's
+  precedent above. `terraform fmt`/`validate` pass (ran `init -backend=false` locally, no state
+  touched); `lint_alert_rules.py` + its unittest pass unchanged (the 429 rule selects no
+  `*http_requests_total` family, out of that lint's scope).

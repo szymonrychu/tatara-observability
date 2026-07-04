@@ -515,6 +515,137 @@
       ],
       "title": "Turn Rate by Kind",
       "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Cumulative Claude spend in USD per Task kind and repo, from the wrapper's ccw_turn_cost_usd_total (result.json total_cost_usd). Populates once wrappers carrying the kind/repo/project labels are deployed. Use to attribute $ spend and A/B the per-kind model tiering.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "custom": {
+            "align": "auto",
+            "cellOptions": {"type": "auto"},
+            "filterable": true,
+            "inspect": false
+          },
+          "mappings": [],
+          "unit": "currencyUSD",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "green", "value": null}]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "USD"},
+            "properties": [
+              {"id": "custom.cellOptions", "value": {"type": "color-background", "mode": "gradient"}},
+              {"id": "custom.width", "value": 120},
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {"color": "green", "value": null},
+                    {"color": "yellow", "value": 1},
+                    {"color": "red", "value": 5}
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 26},
+      "id": 6,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {"countRows": false, "fields": ["USD"], "reducer": ["sum"], "show": true},
+        "showHeader": true,
+        "sortBy": [{"desc": true, "displayName": "USD"}]
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (kind, repo) (ccw_turn_cost_usd_total{project=~\"$project\"})",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ],
+      "title": "Cost (USD) by Kind and Repo",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {"Time": true, "__name__": true, "job": true, "pod": true, "run_id": true, "project": true},
+            "includeByName": {},
+            "indexByName": {"kind": 0, "repo": 1},
+            "renameByName": {"Value": "USD"}
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Prompt-cache hit ratio per Task kind: cache_read / (cache_read + input) over the wrapper ccw_turn_tokens_total families. A ratio near 0 means the stable prefix is being re-billed at full input price every pod (cache-hostile); component 4 (cross-pod cache reclaim) is gated on this rising above 0 for a fresh pod's turn-0.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "min": 0,
+          "max": 1,
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "green", "value": null}]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 26},
+      "id": 7,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (kind) (rate(ccw_turn_tokens_total{type=\"cache_read\", project=~\"$project\"}[$__rate_interval])) / clamp_min(sum by (kind) (rate(ccw_turn_tokens_total{type=~\"cache_read|input\", project=~\"$project\"}[$__rate_interval])), 0.0001)",
+          "legendFormat": "{{kind}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Cache Hit Ratio by Kind",
+      "type": "timeseries"
     }
   ],
   "refresh": "1m",
@@ -569,6 +700,6 @@
   "timezone": "browser",
   "title": "Tatara - Task Delivery",
   "uid": "tatara-task-delivery",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

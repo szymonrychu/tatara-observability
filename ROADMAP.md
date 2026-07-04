@@ -23,10 +23,9 @@ Planned work not yet started. Move items out when shipped (note in MEMORY.md if 
   after the NaN-guard fix the rule is inert (never fires). Lower the threshold below the bucket
   ceiling (and confirm buckets per component) so it can fire on genuine slowness; same check for the
   memory/chat p95 rules.
-- `planned` (Task 6, follows the G4 quality-feedback dashboard above): tier-quality alert rule(s) in
-  `alerts/*.yaml` for rubber-stamp detection - `homelab` + `system="tatara"` +
-  `tatara_tier_quality="true"` + `kind`/`model`/`project` labels on
-  `operator_review_outcome_total`/`operator_review_findings_total` (the sustained-near-zero find-rate
-  or findings-per-review the dashboard panels above flag as the "G5 tier-revert" signature), plus
-  project-webhook routing and a provisional alert threshold. Not started; no rule exists in `alerts/`
-  yet.
+- `shipped` (Task 6, G5): tier-quality rubber-stamp alert rule in `alerts/tatara-quality.yaml`
+  ("Tier-quality rubber-stamp (model=claude-sonnet-5)"), labels `homelab`/`system=tatara`/
+  `tatara_tier_quality=true`/`kind=review`/`model=claude-sonnet-5`/`project=tatara`. See MEMORY.md
+  2026-07-04. `planned` follow-up: tune the 0.02 find-rate threshold and 5-review min-volume gate
+  against the real G4 baseline once claude-sonnet-5 review data accumulates; add the optional
+  implement-CI-pass-rate floor rule once CI attribution is trusted.

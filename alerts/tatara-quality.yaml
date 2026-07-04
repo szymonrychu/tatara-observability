@@ -16,7 +16,7 @@ rules:
   - name: "Tier-quality rubber-stamp (model=claude-sonnet-5)"
     queries:
       - expression: |
-          sum(rate(operator_review_outcome_total{model="claude-sonnet-5",verdict="changes_requested"}[6h]))
+          (sum(rate(operator_review_outcome_total{model="claude-sonnet-5",verdict="changes_requested"}[6h])) or vector(0))
           /
           clamp_min(sum(rate(operator_review_outcome_total{model="claude-sonnet-5"}[6h])), 0.001)
           and on() (sum(rate(operator_review_outcome_total{model="claude-sonnet-5"}[6h])) * 21600 > 5)

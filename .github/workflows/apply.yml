@@ -105,12 +105,25 @@ jobs:
           header: tatara-observability-plan
           path: plan_comment.md
 
+      # Attempt 1 keeps the full refresh so genuine out-of-band drift is still reconciled.
+      # Retries drop to -refresh=false: the transient homelab stall always fires on a GET
+      # during the mass refresh of the ~34 rule reads (a different rule each attempt - see
+      # MEMORY.md 2026-06-28), so refreshing every resource again just re-stalls and burns
+      # the retry. -refresh=false plans config-vs-state and touches ONLY the actually-changed
+      # rule group - state is authoritative here (this repo is the sole, bot-only writer of
+      # the Tatara folder) - shrinking the provisioning-API read surface from ~34 GETs to ~1
+      # so a fresh terraform process rides out the stall and lands the change. PR plans still
+      # refresh, so drift stays visible in the sticky plan comment. See MEMORY.md 2026-07-05.
       - name: terraform apply
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           for attempt in 1 2 3; do
             echo "terraform apply attempt ${attempt}/3"
-            if terraform apply -input=false -auto-approve -lock-timeout=300s -parallelism=1; then
+            refresh_flag=""
+            if [ "${attempt}" -gt 1 ]; then
+              refresh_flag="-refresh=false"
+            fi
+            if terraform apply -input=false -auto-approve -lock-timeout=300s -parallelism=1 ${refresh_flag}; then
               exit 0
             fi
             echo "terraform apply attempt ${attempt} failed; retrying after backoff"

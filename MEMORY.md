@@ -262,3 +262,20 @@ Past decisions + context. One dated line per entry.
   "Operator scrape target down" (`sum(up) or vector(0)`) + "Operator pod not ready", both
   KSM-independent. Verified the `and`-gate against live Prometheus (spec=available=3 -> value 3;
   false guard -> empty). `lint_alert_rules.py` passes.
+- 2026-07-05: The #33 merge's post-merge `terraform apply` (SHA bafb4f4) went red - NOT content:
+  all 3 retry attempts hit `context deadline exceeded` on a GET during the state refresh, each on a
+  DIFFERENT resource (alert-rules cfr6fz1u0r9c1e/afr3zl2erjtoge, dashboard tatara-chat, alert-rules
+  cfq61vwizchs0f) - the same transient homelab provisioning-API stall class documented across the
+  2026-06-28 entries. The existing mitigation (`-parallelism=1` + 3x whole-process retry) was not
+  enough because the API stayed slow for the entire ~11m window, and EVERY attempt re-refreshed all
+  ~34 rule reads, so each one had a fresh chance to stall on some random resource. Durable fix in
+  `.github/workflows/apply.yml`: keep attempt 1 as a full-refresh apply (still reconciles genuine
+  out-of-band drift on the happy path), but drop retries to `terraform apply -refresh=false`. State
+  is authoritative here (this repo is the sole, bot-only writer of the Tatara folder), so -refresh=false
+  plans config-vs-state and touches ONLY the actually-changed rule group - cutting the provisioning-API
+  read surface from ~34 GETs to ~1 (the changed group's post-write read-back), so a fresh process rides
+  out the stall and lands the change instead of re-stalling on an unrelated refresh GET. This attacks
+  the root cause the 2026-06-28 retry-loop band-aid was masking (the mass refresh, not the retry count).
+  PR plans are untouched (still refresh -> drift stays visible in the sticky plan comment). Chose this
+  over -refresh=false-on-all-attempts (attempt 1 keeps drift reconciliation when the API is healthy)
+  and over just bumping the retry count (probabilistic; would not have ridden out an 11m slow window).

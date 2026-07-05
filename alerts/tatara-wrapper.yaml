@@ -137,6 +137,31 @@ rules:
       system: "tatara"
       component: "wrapper"
       severity: "critical"
+  - name: "Wrapper Claude process crash-looping"
+    # ccw_claude_restarts_total counts restarts of the Claude subprocess INSIDE a
+    # wrapper pod - distinct from the kube container crash-loop rule above, which
+    # keys on kube_pod_container_status_restarts_total{container="wrapper"} and only
+    # increments when the wrapper CONTAINER restarts. A looping Claude subprocess
+    # with the wrapper staying up burns budget and stalls the Task without tripping
+    # that rule. Group by exported_pod (the ephemeral agent pod): on the pushed
+    # series `pod` is the operator re-exporter pod, so by(pod) would fan every agent
+    # run on one operator replica into a single bucket. for:5m (not 15m) so it fires
+    # before the ephemeral agent pod's pushed series is TTL-evicted (matches the
+    # ccw_http_panics_total precedent).
+    queries:
+      - expression: |
+          sum by (exported_pod) (increase(ccw_claude_restarts_total[15m]))
+    math_operator: ">"
+    threshold: 3
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "Claude subprocess restarted {{ index $values \"C\" }} times in 15m inside wrapper agent pod {{ index $labels \"exported_pod\" }}. The in-pod agent session is crash-looping (burning budget, stalling the Task)."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "wrapper"
+      severity: "warning"
   # The "Wrapper token spend runaway" rule was MOVED to alerts/tatara-operator.yaml
   # 2026-07-04 as "Agent token spend runaway ($/s)": it read the dead/ephemeral
   # ccw_turn_tokens_total push family and thresholded on a flat token/s number;

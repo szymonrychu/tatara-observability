@@ -6,9 +6,19 @@ Planned work not yet started. Move items out when shipped (note in MEMORY.md if 
 - `shipped`: semver push-CD cascade alerts - `alerts/tatara-cd.yaml` (`tatara_cd_cascade_failed`/`_stalled`). See MEMORY.md 2026-06-28. Depends on the operator G5 metrics landing; rules stay inert (`or vector(0)` -> 0) until then.
 - `planned`: scope the Grafana SA token to Editor + (if Grafana supports it) the `Tatara` folder
   only, instead of a broad Editor token.
-- `planned`: wire the `mem-*` per-project memory pods + the Argo workflow-controller to Prometheus
-  scrape (Gap 1 / Gap 2 from the alerting design) so the currently-dark memory app-metric rules and
-  a precise argo CI rule (`argo_workflows_count`) can fire.
+- `shipped` (Gap 1, confirmed 2026-07-05): the `mem-*` per-project memory pods ARE scraped
+  (`job="tatara-memory"`, `service="mem-<project>"` label from the Service object) - verified live
+  against Grafana/Prometheus (see MEMORY.md 2026-07-05, dashboard consolidation entry). This item
+  was stale; only Gap 2 remains.
+- `planned` (Gap 2): wire the Argo workflow-controller to Prometheus scrape so a precise argo CI rule
+  (`argo_workflows_count`) can fire.
+- `shipped` (2026-07-05): consolidated the monitoring-audit workflow's duplicate dashboards (operator
+  x3, wrapper/memory/chat x2 each) into one canonical board apiece - `operator.json` (47p),
+  `wrapper.json` (27p), `memory.json` (32p), `chat.json` (16p) - plus new `ingester.json` (10p) and
+  `agent-lifecycle.json` (9p); deleted the 9 redundant JSONs; and wired ALL of
+  operator/wrapper/memory/chat/ingester/agent-lifecycle into `dashboards.tf` (previously only
+  task_delivery/quality_feedback/claude_usage_windows had resources, so every other dashboard JSON was
+  dead/unapplied). See MEMORY.md 2026-07-05.
 - `shipped` (follow-up from #19, D2): closed the latent probe false-positive on "Memory HTTP 5xx
   error ratio high" consumer-side (#21) - added `route!~"/readyz|/healthz|/metrics"` to both selectors
   and dropped the rule's `tatara_probe_exclusion` KNOWN-GAP annotation. tatara-memory's

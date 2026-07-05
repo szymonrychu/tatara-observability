@@ -77,3 +77,63 @@ rules:
       system: "tatara"
       component: "ingester"
       severity: "warning"
+  - name: "Repository ingest stale"
+    queries:
+      - expression: |
+          max by (repo) (time() - operator_repository_last_ingest_timestamp_seconds{namespace="tatara"})
+    math_operator: ">"
+    threshold: 86400
+    for: 30m
+    decimal_points: 0
+    annotations:
+      summary: "Repository {{ index $labels \"repo\" }} last successful ingest was {{ index $values \"C\" }}s ago (>24h). Its recall corpus is going stale: the per-repo re-ingest cron missed or is silently wedged. Normal live staleness is ~2.5h; 24h is a backstop."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "ingester"
+      severity: "warning"
+  - name: "Repository stuck in failing ingest state"
+    queries:
+      - expression: |
+          max by (repo) (operator_repository_ingest_failing{namespace="tatara"})
+    math_operator: ">"
+    threshold: 0
+    for: 1h
+    decimal_points: 0
+    annotations:
+      summary: "Repository {{ index $labels \"repo\" }} is pinned in a failing ingest state (operator_repository_ingest_failing=1) for >1h. A persistent analyzer/auth/graph failure survived the incremental-to-full self-heal and has not cleared on re-ingest."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "ingester"
+      severity: "warning"
+  - name: "Ingester LLM call failure ratio high"
+    queries:
+      - expression: |
+          (sum(increase(llm_calls_total{result="fail"}[1h])) / clamp_min(sum(increase(llm_calls_total[1h])), 1)) * (sum(increase(llm_calls_total[1h])) >= bool 20)
+    math_operator: ">"
+    threshold: 0.3
+    for: 15m
+    decimal_points: 2
+    annotations:
+      summary: "Ingester LLM call failure ratio is {{ index $values \"C\" }} over 1h (>0.3, gated to >=20 calls). Semantic chunk extraction is failing best-effort, so graph enrichment is degrading while the ingest run still reports success."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "ingester"
+      severity: "warning"
+  - name: "Tatara ingester quarantining files (analyzer hard-error)"
+    queries:
+      - expression: |
+          sum(increase(ingest_files_quarantined_total[1h]))
+    math_operator: ">"
+    threshold: 0
+    for: 10m
+    decimal_points: 0
+    annotations:
+      summary: "Tatara ingester quarantined {{ index $values \"C\" }} file(s) in the last 1h (analyzer hard-error). Those files are held at last-good and dropped from the code graph until their next diff edit, so agents get an incomplete graph for the affected repo/language. Check the ingest job WARN logs for analyzer name + paths + error."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "ingester"
+      severity: "warning"

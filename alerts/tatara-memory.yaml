@@ -6,8 +6,9 @@ rules:
   # Workload-generic rules (kube-state-metrics) pinned to the memory API server
   # pods. The memory server runs one Deployment per Project (mem-<project>-...),
   # so the selector matches mem-* but excludes the neo4j/pg/lightrag sidecar
-  # workloads. These rules key off kube-state-metrics, not up{}, because the
-  # memory API pods are not currently a Prometheus scrape target.
+  # workloads. These rules key off kube-state-metrics for pod-lifecycle state
+  # (readiness, restarts, OOM, waiting reason), which is only available there
+  # regardless of app-level scrape.
   # ---------------------------------------------------------------------------
   - name: "Memory API server pod not ready"
     queries:
@@ -71,10 +72,8 @@ rules:
       severity: "critical"
   # ---------------------------------------------------------------------------
   # Component-specific rules. Metric names + label keys are taken verbatim from
-  # tatara-memory/internal/**/metrics.go. NOTE: the memory API server is not yet
-  # a Prometheus scrape target (no active ServiceMonitor for the mem-* pods), so
-  # these series are DARK live until scraping is wired. The expressions are
-  # correct against the emitted instrument names and will fire once scraped.
+  # tatara-memory/internal/**/metrics.go. The mem-* pods are scraped by
+  # Prometheus (job=tatara-memory), so these series are live.
   # ---------------------------------------------------------------------------
   - name: "Memory HTTP 5xx error ratio high"
     queries:
@@ -88,6 +87,38 @@ rules:
     decimal_points: 2
     annotations:
       summary: "tatara-memory HTTP 5xx ratio {{ index $values \"C\" }} (>5%, excludes /readyz|/healthz|/metrics probes) over 10m. API serving errors."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "warning"
+  - name: "Memory service operation error ratio high"
+    queries:
+      - expression: |
+          sum(rate(tatara_memory_op_total{namespace="tatara",result="error",op!~"get|get_entity"}[10m]))
+          /
+          clamp_min(sum(rate(tatara_memory_op_total{namespace="tatara",op!~"get|get_entity"}[10m])), 0.001)
+    math_operator: ">"
+    threshold: 0.1
+    for: 15m
+    decimal_points: 2
+    annotations:
+      summary: "tatara-memory service op error ratio {{ index $values \"C\" }} (>10% of memory service ops - writes + non-lookup reads - erroring over 10m; get/get_entity not-found excluded). Agents failing to read/write memory."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "warning"
+  - name: "Memory API server HTTP handler panics"
+    queries:
+      - expression: |
+          sum(increase(http_panics_total{job="tatara-memory"}[15m]))
+    math_operator: ">"
+    threshold: 0
+    for: 1m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-memory recovered {{ index $values \"C\" }} HTTP handler panic(s) in 15m. Investigate the memory API handler crash."
     labels:
       homelab: "true"
       system: "tatara"

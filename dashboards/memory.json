@@ -1,0 +1,1132 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 100,
+      "panels": [],
+      "title": "LightRAG backend (graphify store)",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Per-operation call rate to the LightRAG backend (insert/query/entity/relation CRUD/health), per selected memory stack. The core graphify read/write path. Sudden drops mean ingestion or query stall. Confirmed live: lightrag_calls_total{job=\"tatara-memory\",service} scraped from mem-tatara and mem-infrastructure.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "normal"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "reqps",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 1},
+      "id": 1,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (op) (rate(lightrag_calls_total{job=\"tatara-memory\",service=~\"$service\"}[5m]))",
+          "legendFormat": "{{op}}",
+          "refId": "A"
+        }
+      ],
+      "title": "LightRAG call rate by op",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Fraction of LightRAG calls returning result=error over 5m, per selected memory stack. Backs the 'Memory LightRAG call error ratio high' alert (fires >10% for 10m).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "dashed"}
+          },
+          "mappings": [], "min": 0, "max": 1, "unit": "percentunit",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 0.1}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 1},
+      "id": 2,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (service) (rate(lightrag_calls_total{job=\"tatara-memory\",service=~\"$service\",result=\"error\"}[5m])) / clamp_min(sum by (service) (rate(lightrag_calls_total{job=\"tatara-memory\",service=~\"$service\"}[5m])), 0.001)",
+          "legendFormat": "{{service}}",
+          "refId": "A"
+        }
+      ],
+      "title": "LightRAG error ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "LightRAG call latency quantiles over 5m, per selected memory stack. Backs the 'LightRAG call p95 latency high' alert (fires p95 >30s for 15m).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "dashed"}
+          },
+          "mappings": [], "min": 0, "unit": "s",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 30}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 1},
+      "id": 3,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le, service) (rate(lightrag_call_duration_seconds_bucket{job=\"tatara-memory\",service=~\"$service\"}[5m])))",
+          "legendFormat": "p95 {{service}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le, service) (rate(lightrag_call_duration_seconds_bucket{job=\"tatara-memory\",service=~\"$service\"}[5m])))",
+          "legendFormat": "p99 {{service}}",
+          "refId": "B"
+        }
+      ],
+      "title": "LightRAG call latency (p95/p99)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 9},
+      "id": 101,
+      "panels": [],
+      "title": "Ingest workers (repo -> graph)",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Repo-ingest job completion rate by terminal status, per selected memory stack. status=partial (incremental did less than a full run) is benign, not a failure; only status=failed is a real error (CONVENTIONS.md).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "normal"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "reqps",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 10},
+      "id": 4,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (status) (rate(ingest_jobs_total{job=\"tatara-memory\",service=~\"$service\"}[5m]))",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Ingest job rate by status",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Per-item ingest outcome rate, per selected memory stack. result=error|timeout means items are being dropped; backs the 'ingest item error rate elevated' alert.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "normal"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "reqps",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 10},
+      "id": 5,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (result) (rate(ingest_items_total{job=\"tatara-memory\",service=~\"$service\"}[5m]))",
+          "legendFormat": "{{result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Ingest item rate by result",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Items currently being processed by the ingest workers, per selected memory stack. A rising, non-draining value indicates a stuck backlog.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 10},
+      "id": 6,
+      "options": {
+        "legend": {"calcs": ["lastNotNull", "max"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (service) (ingest_items_in_flight{job=\"tatara-memory\",service=~\"$service\"})",
+          "legendFormat": "{{service}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Ingest items in-flight",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Per-item ingest processing latency quantiles over 5m across the selected memory stack(s). This histogram carries no per-op label.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "s",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 10},
+      "id": 7,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ingest_item_duration_seconds_bucket{job=\"tatara-memory\",service=~\"$service\"}[5m])))",
+          "legendFormat": "p95",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ingest_item_duration_seconds_bucket{job=\"tatara-memory\",service=~\"$service\"}[5m])))",
+          "legendFormat": "p99",
+          "refId": "B"
+        }
+      ],
+      "title": "Ingest item latency (p95/p99)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Non-fatal loss counters: store-op failures (progress/finalize JobStore writes), source-index (SourceSink.Add) failures after a successful CreateMemory, and notify drops (job IDs dropped because the notify channel was full). All represent observable silent loss. These counters carry no service label in the source (internal/ingest/metrics.go), so they are process-wide, not split per memory stack.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 18},
+      "id": 8,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull", "max"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(rate(ingest_store_op_errors_total{job=\"tatara-memory\"}[5m]))",
+          "legendFormat": "store-op errors",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(rate(ingest_source_index_errors_total{job=\"tatara-memory\"}[5m]))",
+          "legendFormat": "source-index errors",
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(rate(ingest_notify_dropped_total{job=\"tatara-memory\"}[5m]))",
+          "legendFormat": "notify-dropped",
+          "refId": "C"
+        }
+      ],
+      "title": "Ingest silent-loss errors",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 26},
+      "id": 106,
+      "panels": [],
+      "title": "Code-graph queries (agent traversals)",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Per-operation code-graph query rate (search/neighbors/shortest_path/communities/etc), per selected memory stack. This is how agents traverse the memory graph via the CLI MCP tools.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "normal"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "reqps",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 27},
+      "id": 9,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (op) (rate(code_graph_query_total{job=\"tatara-memory\",service=~\"$service\"}[5m]))",
+          "legendFormat": "{{op}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Code-graph query rate by op",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Rate of code-graph queries returning result=error, per op, per selected memory stack. Agent graph traversals failing. Mirrors the 'code-graph query errors' alert (fires on any sustained value for 15m).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "normal"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "reqps",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 27},
+      "id": 10,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (op) (rate(code_graph_query_total{job=\"tatara-memory\",service=~\"$service\",result=\"error\"}[5m]))",
+          "legendFormat": "{{op}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Code-graph query errors by op",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Code-graph query latency quantiles over 5m, per selected memory stack.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "s",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 27},
+      "id": 11,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(code_graph_query_duration_seconds_bucket{job=\"tatara-memory\",service=~\"$service\"}[5m])))",
+          "legendFormat": "p95",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(code_graph_query_duration_seconds_bucket{job=\"tatara-memory\",service=~\"$service\"}[5m])))",
+          "legendFormat": "p99",
+          "refId": "B"
+        }
+      ],
+      "title": "Code-graph query latency (p95/p99)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Rate of graph entities and edges written per source repo during ingest, across the selected memory stack(s). Zero across all repos while ingest jobs run indicates the graph writer is stalled.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 35},
+      "id": 12,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull", "max"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (repo) (rate(code_graph_entities_upserted_total{job=\"tatara-memory\",service=~\"$service\"}[5m]))",
+          "legendFormat": "{{repo}} entities",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (repo) (rate(code_graph_edges_upserted_total{job=\"tatara-memory\",service=~\"$service\"}[5m]))",
+          "legendFormat": "{{repo}} edges",
+          "refId": "B"
+        }
+      ],
+      "title": "Code-graph upsert throughput by repo",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 43},
+      "id": 102,
+      "panels": [],
+      "title": "Analytics compute + backlog",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Dirty-repo count (repos with graph changes awaiting centrality/community recompute) against the analytics run rate, per selected memory stack. Dirty repos > 0 with a flat-zero run rate is the exact 'analytics stalled with dirty repos' alert condition (fires after 1h).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 44},
+      "id": 13,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "max by (service) (code_graph_analytics_dirty_repos{job=\"tatara-memory\",service=~\"$service\"})",
+          "legendFormat": "{{service}} dirty repos",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (service, result) (increase(code_graph_analytics_runs_total{job=\"tatara-memory\",service=~\"$service\"}[30m]))",
+          "legendFormat": "{{service}} {{result}} runs / 30m",
+          "refId": "B"
+        }
+      ],
+      "title": "Analytics backlog: dirty repos vs recompute",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Centrality/community recompute duration quantiles over 30m, across the selected memory stack(s). This histogram carries no per-op or per-repo label. Long compute times explain a growing dirty-repo backlog.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "s",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 44},
+      "id": 14,
+      "options": {
+        "legend": {"calcs": ["mean", "max", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(code_graph_compute_duration_seconds_bucket{job=\"tatara-memory\",service=~\"$service\"}[30m])))",
+          "legendFormat": "p95",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(code_graph_compute_duration_seconds_bucket{job=\"tatara-memory\",service=~\"$service\"}[30m])))",
+          "legendFormat": "p99",
+          "refId": "B"
+        }
+      ],
+      "title": "Analytics compute latency (p95/p99)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Betweenness-centrality computations skipped (graph too large / budget exceeded) per 30m, alongside in-flight analytics runs, across the selected memory stack(s). Sustained skips mean centrality data is degrading.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 52},
+      "id": 15,
+      "options": {
+        "legend": {"calcs": ["lastNotNull", "max"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(increase(code_graph_betweenness_skipped_total{job=\"tatara-memory\",service=~\"$service\"}[30m]))",
+          "legendFormat": "betweenness skipped / 30m",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(code_graph_analytics_in_flight{job=\"tatara-memory\",service=~\"$service\"})",
+          "legendFormat": "analytics in-flight",
+          "refId": "B"
+        }
+      ],
+      "title": "Betweenness skipped & analytics in-flight",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 60},
+      "id": 103,
+      "panels": [],
+      "title": "Memory service operations + tombstones",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Rate of memory-service operations (create/query/delete/patch/edge ops) served to agents, split by op, per selected memory stack.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "normal"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "reqps",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 61},
+      "id": 16,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (op) (rate(tatara_memory_op_total{job=\"tatara-memory\",service=~\"$service\"}[5m]))",
+          "legendFormat": "{{op}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Memory op rate by op",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Error ratio of memory ops over 5m, excluding get/get_entity (their not-found is a benign lookup miss per CONVENTIONS.md), per selected memory stack. Backs the 'service operation error ratio high' alert (fires >10% for 15m).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "dashed"}
+          },
+          "mappings": [], "min": 0, "max": 1, "unit": "percentunit",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 0.1}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 61},
+      "id": 17,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(rate(tatara_memory_op_total{job=\"tatara-memory\",service=~\"$service\",result=\"error\",op!~\"get|get_entity\"}[5m])) / clamp_min(sum(rate(tatara_memory_op_total{job=\"tatara-memory\",service=~\"$service\",op!~\"get|get_entity\"}[5m])), 0.001)",
+          "legendFormat": "error ratio",
+          "refId": "A"
+        }
+      ],
+      "title": "Memory op error ratio (writes + non-lookup reads)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Deletion-tombstone activity by op (created/forced/reaped/check_error/force_skipped_still_present), per selected memory stack. check_error or a spike in forced/skipped signals delete-consistency trouble between the store and LightRAG.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "reqps",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 69},
+      "id": 18,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (op) (rate(tatara_memory_tombstone_total{job=\"tatara-memory\",service=~\"$service\"}[5m]))",
+          "legendFormat": "{{op}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Tombstone rate by op",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 77},
+      "id": 104,
+      "panels": [],
+      "title": "HTTP API (job=tatara-memory)",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Server request rate by route, probes excluded, per selected memory stack. Filtered job=tatara-memory to avoid the name collision with tatara-chat's identically-named http_requests_total.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "normal"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "reqps",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 78},
+      "id": 19,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (route) (rate(http_requests_total{job=\"tatara-memory\",service=~\"$service\",route!~\"/readyz|/healthz|/metrics\"}[5m]))",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ],
+      "title": "HTTP request rate by route",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Share of non-probe requests returning a 5xx status text over 5m, per selected memory stack. Probes (/readyz,/healthz,/metrics) excluded consumer-side (CONVENTIONS.md pattern 2). Backs the 'HTTP 5xx error ratio high' alert (fires >5% for 10m).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "dashed"}
+          },
+          "mappings": [], "min": 0, "max": 1, "unit": "percentunit",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 0.05}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 78},
+      "id": 20,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(rate(http_requests_total{job=\"tatara-memory\",service=~\"$service\",route!~\"/readyz|/healthz|/metrics\",status=~\"Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout|Not Implemented|HTTP Version Not Supported\"}[5m])) / clamp_min(sum(rate(http_requests_total{job=\"tatara-memory\",service=~\"$service\",route!~\"/readyz|/healthz|/metrics\"}[5m])), 0.001)",
+          "legendFormat": "5xx ratio",
+          "refId": "A"
+        }
+      ],
+      "title": "HTTP 5xx error ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Server request latency quantiles over 5m, job=tatara-memory, per selected memory stack.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "s",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 78},
+      "id": 21,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{job=\"tatara-memory\",service=~\"$service\"}[5m])))",
+          "legendFormat": "p95",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{job=\"tatara-memory\",service=~\"$service\"}[5m])))",
+          "legendFormat": "p99",
+          "refId": "B"
+        }
+      ],
+      "title": "HTTP latency (p95/p99)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 86},
+      "id": 105,
+      "panels": [],
+      "title": "Operator vantage (operator-global probes - no service filter)",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "p95 of operator_memory_provision_duration_seconds over 5m: wall-clock for a per-project memory stack to reach Ready, measured from the operator (job=tatara-operator). This metric carries no per-project service label, so it cannot be filtered by $service.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "s",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 87},
+      "id": 22,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull", "max"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(operator_memory_provision_duration_seconds_bucket{job=\"tatara-operator\"}[5m])))",
+          "legendFormat": "p95",
+          "refId": "A"
+        }
+      ],
+      "title": "Memory provision p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Rate of operator_lightrag_query_errors_total: failed attempts by the operator to read document counts from a project's lightrag corpus.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 87},
+      "id": 23,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(rate(operator_lightrag_query_errors_total{job=\"tatara-operator\"}[5m]))",
+          "legendFormat": "query errors",
+          "refId": "A"
+        }
+      ],
+      "title": "LightRAG document-count read errors",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Rate of operator_memory_retrieval_probe_total{result=\"absent\"} by route (/queries, /code-graph/stats): the operator's authenticated functional probe hit a 404, i.e. a drifted/stale memory binary missing a contract route.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 87},
+      "id": 24,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (route) (rate(operator_memory_retrieval_probe_total{job=\"tatara-operator\",result=\"absent\"}[5m]))",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Memory retrieval probe: absent by route",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Rate of operator_tool_surface_probe_total by backend (operator/chat), vantage (in-cluster), and result (ok/present/absent/error/unreachable). absent=route drift, error=handler broken, unreachable=process down.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "",
+            "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10,
+            "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5,
+            "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [], "min": 0, "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 87},
+      "id": 25,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (backend, vantage, result) (rate(operator_tool_surface_probe_total{job=\"tatara-operator\"}[5m]))",
+          "legendFormat": "{{backend}}/{{vantage}} {{result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Tool-surface probe by backend/vantage/result",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": ["tatara"],
+  "templating": {
+    "list": [
+      {
+        "allValue": ".*",
+        "current": {},
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "definition": "label_values(http_requests_total{job=\"tatara-memory\"}, service)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Memory stack",
+        "multi": true,
+        "name": "service",
+        "options": [],
+        "query": {
+          "query": "label_values(http_requests_total{job=\"tatara-memory\"}, service)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Tatara - Memory",
+  "uid": "tatara-memory",
+  "version": 1,
+  "weekStart": ""
+}

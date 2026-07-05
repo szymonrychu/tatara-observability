@@ -232,3 +232,18 @@ Past decisions + context. One dated line per entry.
   precedent above. `terraform fmt`/`validate` pass (ran `init -backend=false` locally, no state
   touched); `lint_alert_rules.py` + its unittest pass unchanged (the 429 rule selects no
   `*http_requests_total` family, out of that lint's scope).
+- 2026-07-05: Fixed the "Agent token spend runaway series missing (coverage gap)" rule in
+  `alerts/tatara-operator.yaml` (issue #36). It used a raw
+  `absent(operator_task_tokens_total{model=~".+", type=~"..."}) > 0`, which pages on ordinary
+  idleness: `operator_task_tokens_total` is an ephemeral per-task counter (series created on the
+  first token-bearing turn, deleted on task GC by the reaper - tatara-operator
+  `internal/obs/operator_metrics.go` AddTaskTokens/DeleteTaskSeries + `controller/reaper.go`), so
+  the selector is legitimately empty during any idle/cold-start window >=15m. `absent()` could not
+  tell the benign idle case from the real regression the rule guards (operator emitting token
+  series WITHOUT the model/cache labels - the pre-#220 state). Gated the check on token activity:
+  `(count(operator_task_tokens_total) > 0) and absent(...{model=~".+", type=~"..."})`, so it only
+  fires when tokens ARE being emitted but none carry the model/cache labels, and stays silent
+  (NoData -> OK, same as the healthy-present case) when idle. Also refreshed the stale summary +
+  comment block (the model/cache schema shipped in tatara-operator #220; old text said "deploy the
+  metrics before relying on it"). The `and`-gated-threshold pattern is idiomatic here (see the
+  turn-submit/restapi error-rate rules). `lint_alert_rules.py` passes.

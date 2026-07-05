@@ -382,26 +382,34 @@ rules:
   # Token/$ spend: model- and cache-aware runaway detection over the durable
   # operator_task_tokens_total metric (durable-measurement design, review G17).
   #
-  # SEQUENCING: the `model`/`type=cache_read|cache_creation` label set below is
-  # produced by the operator's durable-measurement work (tatara-operator
-  # AddTaskTokens model/cache args + AddTerminalTokens). Until that ships, this
-  # repo has NO runaway detector for the wrapper-side removed rule (see
-  # tatara-wrapper.yaml note) other than the "Agent token spend runaway series
-  # missing" coverage-gap rule directly below, which pages loudly instead of
-  # this rule silently evaluating empty. Do not apply this file to a cluster
-  # running an operator that predates the model/type=cache_* label set without
-  # that coverage-gap rule alongside it.
+  # COVERAGE GUARD: the `model`/`type=cache_read|cache_creation` label set below
+  # is produced by the operator's durable-measurement work (tatara-operator
+  # AddTaskTokens model/cache args, shipped in tatara-operator #220). The
+  # coverage-gap rule directly below guards against a schema REGRESSION: the
+  # operator emitting operator_task_tokens_total series WITHOUT the model/cache
+  # labels (the pre-#220 state), which would silently blind the "$/s" detector.
+  #
+  # It must NOT fire on ordinary idleness: operator_task_tokens_total is an
+  # ephemeral per-task counter (series are lazily created on the first
+  # token-bearing turn and deleted on task GC by the reaper), so the whole
+  # selector is legitimately empty whenever the fleet is idle or cold-starting.
+  # A raw absent() therefore pages on every quiet period. The rule below is
+  # gated on `count(operator_task_tokens_total) > 0` so it only fires when the
+  # operator IS emitting token series but none carry the model/cache labels -
+  # the real regression - and stays silent (NoData -> OK) when idle.
   # ----------------------------------------------------------------------------
   - name: "Agent token spend runaway series missing (coverage gap)"
     queries:
       - expression: |
+          (count(operator_task_tokens_total) > 0)
+          and
           absent(operator_task_tokens_total{model=~".+", type=~"input|output|cache_read|cache_creation"})
     math_operator: ">"
     threshold: 0
     for: 15m
     decimal_points: 0
     annotations:
-      summary: "operator_task_tokens_total carries no model/cache-aware series for 15m. The 'Agent token spend runaway ($/s)' rule below has no data source and CANNOT detect a runaway right now - deploy the operator's model/cache token metrics (AddTaskTokens model+cacheRead+cacheCreation args) before relying on it."
+      summary: "operator_task_tokens_total is being emitted but NO series carry the model/cache-aware labels (model + type=input|output|cache_read|cache_creation) for 15m, while token series ARE present. The operator's model/cache token schema (tatara-operator #220) has regressed, so the 'Agent token spend runaway ($/s)' rule below has no data source and CANNOT detect a runaway. This rule is gated on token activity, so it does NOT fire on an idle fleet - if it is firing, the operator token-metric labelling is broken. Check AddTaskTokens model/cacheRead/cacheCreation args in tatara-operator."
     labels:
       homelab: "true"
       system: "tatara"

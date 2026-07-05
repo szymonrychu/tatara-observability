@@ -21,22 +21,29 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "critical"
-  # Robust scaled-to-zero / unschedulable detector. kube-state-metrics keeps
-  # exposing this series (reading 0) even when every up{job="tatara-operator"}
-  # target disappears, so this pages CRITICAL fast on a full outage that the
-  # up-based rules used to miss (their series went absent -> NoData ->
-  # default_no_data_state: OK). `or vector(0)` also covers the Deployment being
-  # deleted, where even this kube-state-metrics series would otherwise vanish.
-  - name: "Operator deployment unavailable (scaled to zero)"
+  # Fires when the Deployment is SUPPOSED to be running (spec_replicas >= 1) but
+  # has zero available replicas - unschedulable, or every pod failing readiness.
+  # Two deliberate design choices (issue #33):
+  #   1. Gated on `and (max(kube_deployment_spec_replicas) >= 1)` so an
+  #      INTENTIONAL scale-to-zero does not page. When spec is 0 the guard drops
+  #      the series -> empty -> NoData -> default_no_data_state: OK.
+  #   2. NO `or vector(0)` fallback. A fabricated 0 turned a transient
+  #      kube-state-metrics scrape gap (series briefly absent) into a false
+  #      CRITICAL - the #33 root cause. Without it, an absent series is NoData
+  #      -> OK, not a page.
+  # Full-outage / Deployment-deleted coverage is unaffected: "Operator scrape
+  # target down" (sum(up) or vector(0)) and "Operator pod not ready" still page
+  # when the operator is gone entirely, independent of kube-state-metrics.
+  - name: "Operator deployment has no available replicas"
     queries:
       - expression: |
-          max(kube_deployment_status_replicas_available{namespace="tatara",deployment="tatara-operator"}) or vector(0)
+          max(kube_deployment_status_replicas_available{namespace="tatara",deployment="tatara-operator"}) and (max(kube_deployment_spec_replicas{namespace="tatara",deployment="tatara-operator"}) >= 1)
     math_operator: "<"
     threshold: 1
     for: 5m
     decimal_points: 0
     annotations:
-      summary: "tatara-operator Deployment has {{ index $values \"C\" }} available replicas (<1). It is scaled to zero, unschedulable, or deleted; the platform control loop is down. This fires from kube-state-metrics, which stays present when up{job=\"tatara-operator\"} vanishes."
+      summary: "tatara-operator Deployment has {{ index $values \"C\" }} available replicas (<1) while its spec calls for >=1. It is unschedulable or every pod is failing readiness; the platform control loop is down. Gated on spec_replicas>=1 so an intentional scale-to-zero does not fire, and it reports NoData (not a fabricated 0) during a transient kube-state-metrics gap."
     labels:
       homelab: "true"
       system: "tatara"

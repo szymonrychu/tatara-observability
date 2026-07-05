@@ -247,3 +247,18 @@ Past decisions + context. One dated line per entry.
   comment block (the model/cache schema shipped in tatara-operator #220; old text said "deploy the
   metrics before relying on it"). The `and`-gated-threshold pattern is idiomatic here (see the
   turn-submit/restapi error-rate rules). `lint_alert_rules.py` passes.
+- 2026-07-05: Issue #33 - the CRITICAL "Operator deployment unavailable (scaled to zero)" rule
+  (added 2026-06-25, above) false-paged from a transient kube-state-metrics scrape gap: its
+  `or vector(0)` fabricated a 0 whenever `kube_deployment_status_replicas_available` went briefly
+  absent. Human @szymonrychu: "If something is scaled to 0, this alert shouldn't fire. Scaling to 0
+  is intentional." Reworked into "Operator deployment has no available replicas":
+  `max(kube_deployment_status_replicas_available{...}) and (max(kube_deployment_spec_replicas{...})
+  >= 1) < 1` for 5m. Two changes: (1) dropped `or vector(0)` so a KSM absence is NoData -> OK
+  (default_no_data_state) instead of a fabricated 0; (2) gated on spec_replicas>=1 so an intentional
+  scale-to-zero (spec=0 -> guard drops the series -> empty -> NoData -> OK) never pages. Only fires
+  when the Deployment is scheduled to run but has zero available replicas (unschedulable / all pods
+  failing readiness). Contradicts the 2026-06-25 reasoning that this rule was the "robust primary
+  down-detector" via `or vector(0)`: full-outage/Deployment-deleted coverage instead stays on
+  "Operator scrape target down" (`sum(up) or vector(0)`) + "Operator pod not ready", both
+  KSM-independent. Verified the `and`-gate against live Prometheus (spec=available=3 -> value 3;
+  false guard -> empty). `lint_alert_rules.py` passes.

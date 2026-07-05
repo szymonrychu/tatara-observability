@@ -342,7 +342,7 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "PENDING OTEL DEPLOYMENT (Phase B/D of the claude-subscription-usage-gate plan). Real Claude spend as reported by Claude Code's native OTel exporter (claude_code.cost.usage), once agent pods enable CLAUDE_CODE_ENABLE_TELEMETRY and the OTLP->Prometheus collector is wired via tatara-helmfile. Metric name shown (claude_code_cost_usage, dots->underscores) is the operator plan's named producer; confirm the exact scraped name (unit/type suffix the OTel Collector's Prometheus exporter adds) once the collector is live and correct this query if it differs.",
+      "description": "LIVE. Real Claude spend rate ($/h) summed across all projects, derived from the durable operator_task_tokens_total{model,type} series priced per-model (same formula as task-delivery.json 'Cost (USD) by Kind and Repo': opus-4-8 $5/$25 per 1M in/out, sonnet-5 $3/$15, haiku-4-5 $1/$5; cache_read 0.1x input, cache_creation 1.25x input). Repointed off the never-emitted claude_code_cost_usage_total OTel guess (no OTLP->Prometheus collector wired; zero series) and off the dead ccw_turn_cost_usd_total (result.json is never written). Once CLAUDE_CODE_ENABLE_TELEMETRY + the OTLP->Prometheus collector land, Claude Code's native claude_code.cost.usage becomes the authoritative cross-check; confirm the collector's scraped name then (add_metric_suffixes appends a unit token, e.g. claude_code_cost_usage_usd_total).",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "palette-classic"},
@@ -388,17 +388,17 @@
         {
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "editorMode": "code",
-          "expr": "sum(rate(claude_code_cost_usage_total[1h])) * 3600",
+          "expr": "sum( rate(operator_task_tokens_total{type=\"input\", model=\"claude-opus-4-8\"}[1h]) * 5e-6 or rate(operator_task_tokens_total{type=\"output\", model=\"claude-opus-4-8\"}[1h]) * 25e-6 or rate(operator_task_tokens_total{type=\"cache_read\", model=\"claude-opus-4-8\"}[1h]) * 0.5e-6 or rate(operator_task_tokens_total{type=\"cache_creation\", model=\"claude-opus-4-8\"}[1h]) * 6.25e-6 or rate(operator_task_tokens_total{type=\"input\", model=\"claude-sonnet-5\"}[1h]) * 3e-6 or rate(operator_task_tokens_total{type=\"output\", model=\"claude-sonnet-5\"}[1h]) * 15e-6 or rate(operator_task_tokens_total{type=\"cache_read\", model=\"claude-sonnet-5\"}[1h]) * 0.3e-6 or rate(operator_task_tokens_total{type=\"cache_creation\", model=\"claude-sonnet-5\"}[1h]) * 3.75e-6 or rate(operator_task_tokens_total{type=\"input\", model=\"claude-haiku-4-5\"}[1h]) * 1e-6 or rate(operator_task_tokens_total{type=\"output\", model=\"claude-haiku-4-5\"}[1h]) * 5e-6 or rate(operator_task_tokens_total{type=\"cache_read\", model=\"claude-haiku-4-5\"}[1h]) * 0.1e-6 or rate(operator_task_tokens_total{type=\"cache_creation\", model=\"claude-haiku-4-5\"}[1h]) * 1.25e-6 ) * 3600",
           "legendFormat": "cost $/h",
           "refId": "A"
         }
       ],
-      "title": "Real Cost (Claude Code OTel) - PENDING OTel deployment",
+      "title": "Real Cost Rate ($/h, priced operator_task_tokens_total)",
       "type": "timeseries"
     },
     {
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "PENDING OTEL DEPLOYMENT (Phase B/D of the claude-subscription-usage-gate plan). Reactive 429 backstop: rate of Claude Code API errors with status_code=429 (claude_code.api_error OTel event, the always-on floor of the degradation ladder per the design spec), once the wrapper's native OTel export is enabled and wired through the OTLP->Prometheus collector. A sustained non-zero rate means agents are hitting the account rate limit despite the proactive gate. Metric name is provisional - confirm against the deployed collector's translation of claude_code.api_error.",
+      "datasource": {"type": "loki", "uid": "efihqbqlmroqod"},
+      "description": "Reactive 429 backstop: the always-on floor of the degradation ladder. Count per 5m of agent-pod log lines indicating a Claude API 429 / rate-limit, sourced from Loki (count_over_time on {namespace=\"tatara\", app=\"tatara-claude-code-wrapper\"}), NOT a Prometheus counter: Claude Code's claude_code.api_error is an OTel LOG EVENT, so a claude_code_api_error_total metric will never exist even after the OTLP collector lands. Reads 0 until agents surface Anthropic 429s in their logs (e.g. once CLAUDE_CODE_ENABLE_TELEMETRY log export or wrapper 429-logging lands). A sustained non-zero count means agents are hitting the account rate limit despite the proactive gate. Follow-up: once the exact log schema is known, tighten the line filter to a json field per CONVENTIONS.md / tatara-logs.yaml (confirm the status key: status vs status_code vs http.status_code).",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "palette-classic"},
@@ -429,7 +429,7 @@
             "mode": "absolute",
             "steps": [{"color": "green", "value": null}]
           },
-          "unit": "reqps"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -442,14 +442,14 @@
       "pluginVersion": "11.0.0",
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "datasource": {"type": "loki", "uid": "efihqbqlmroqod"},
           "editorMode": "code",
-          "expr": "sum(rate(claude_code_api_error_total{status_code=\"429\"}[5m])) or vector(0)",
-          "legendFormat": "429/s",
+          "expr": "sum(count_over_time({namespace=\"tatara\", app=\"tatara-claude-code-wrapper\"} |~ `(?i)(429|rate.?limit)` [5m])) or vector(0)",
+          "legendFormat": "429s /5m",
           "refId": "A"
         }
       ],
-      "title": "API 429 Error Rate (OTel reactive backstop) - PENDING OTel deployment",
+      "title": "API 429 Rate-Limit Hits (agent-pod logs, /5m)",
       "type": "timeseries"
     }
   ],

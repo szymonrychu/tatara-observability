@@ -15,3 +15,39 @@ resource "grafana_dashboard" "claude_usage_windows" {
   config_json = file("${path.module}/dashboards/claude-usage-windows.json")
   overwrite   = true
 }
+
+resource "grafana_dashboard" "operator" {
+  folder      = grafana_folder.tatara.uid
+  config_json = file("${path.module}/dashboards/operator.json")
+  overwrite   = true
+}
+
+resource "grafana_dashboard" "wrapper" {
+  folder      = grafana_folder.tatara.uid
+  config_json = file("${path.module}/dashboards/wrapper.json")
+  overwrite   = true
+}
+
+resource "grafana_dashboard" "memory" {
+  folder      = grafana_folder.tatara.uid
+  config_json = file("${path.module}/dashboards/memory.json")
+  overwrite   = true
+}
+
+resource "grafana_dashboard" "chat" {
+  folder      = grafana_folder.tatara.uid
+  config_json = file("${path.module}/dashboards/chat.json")
+  overwrite   = true
+}
+
+resource "grafana_dashboard" "ingester" {
+  folder      = grafana_folder.tatara.uid
+  config_json = file("${path.module}/dashboards/ingester.json")
+  overwrite   = true
+}
+
+resource "grafana_dashboard" "agent_lifecycle" {
+  folder      = grafana_folder.tatara.uid
+  config_json = file("${path.module}/dashboards/agent-lifecycle.json")
+  overwrite   = true
+}

@@ -310,6 +310,26 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "warning"
+  # Sibling of the memory-retrieval probe: the operator's synthetic probe of
+  # whether agents can actually reach the operator-write tool backend and the
+  # chat tool backend. result ok|present are HEALTHY (present = route+auth
+  # reachable, 401/403); absent|error|unreachable are the real failures (route
+  # drift / broken 5xx handler / process down). Excluding ok|present is required.
+  - name: "Operator tool-surface probe failing"
+    queries:
+      - expression: |
+          sum by (backend) (increase(operator_tool_surface_probe_total{namespace="tatara",job="tatara-operator",result=~"absent|error|unreachable"}[30m]))
+    math_operator: ">"
+    threshold: 0
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator probed the {{ index $labels \"backend\" }} tool backend as failing (absent/error/unreachable) {{ index $values \"C\" }} times in 30m. Agents may have lost access to that tool surface."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
   # ----------------------------------------------------------------------------
   # Task throughput + queue: saturated lanes and terminal failures stall the loop.
   # ----------------------------------------------------------------------------
@@ -410,6 +430,176 @@ rules:
     decimal_points: 3
     annotations:
       summary: "Agents spending {{ index $values \"C\" }} USD/s over 15m (>$0.50/s, model-aware). A turn or loop is burning budget; check the task-delivery Cost panel."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # ----------------------------------------------------------------------------
+  # Agent turn-execution + boot failure paths: stalled turns and never-reachable
+  # wrappers destroy work terminally. Distinct from the SubmitTurn RPC rules
+  # (dispatch side) and the boot-crash-budget rule (pod never reaches /readyz).
+  # ----------------------------------------------------------------------------
+  - name: "Operator agent turn timeout spike"
+    queries:
+      - expression: |
+          sum(increase(operator_turn_timeout_total{namespace="tatara",job="tatara-operator"}[1h]))
+    math_operator: ">"
+    threshold: 5
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator terminated {{ index $values \"C\" }} agent turn(s) for stalling in 1h (>5). Turns are exceeding the inactivity deadline (wedged model session or wrapper hang), burning budget and blocking Tasks. Operator-side turn-execution stall detector (across sources reconcile|poll_backstop|planning_watchdog), distinct from the SubmitTurn RPC latency rule."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  - name: "Operator agent unreachable terminations"
+    queries:
+      - expression: |
+          sum(increase(operator_agent_unreachable_termination_total{namespace="tatara",job="tatara-operator"}[1h]))
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator terminated {{ index $values \"C\" }} Task(s) in 1h because the wrapper stayed unreachable past the boot deadline. A pod that booted but never became network-reachable killed the Task and wasted the work; a systemic pod-networking/CNI fault would otherwise go unnoticed. Distinct from the boot-crash-budget rule (pod never reached /readyz)."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # ----------------------------------------------------------------------------
+  # Lifecycle progress: agents giving up on genuine-failure reasons park in
+  # LifecycleState=Parked with an empty Phase, so the task-terminal Failed rule
+  # never sees them. Benign give-up reasons are deliberately excluded.
+  # ----------------------------------------------------------------------------
+  - name: "Operator lifecycle give-up spike"
+    queries:
+      - expression: |
+          sum(increase(tatara_lifecycle_giveup_total{namespace="tatara",job="tatara-operator",reason=~"maxIterations|implement-failed|triage-failed|deadline|refused-no-explanation"}[3h]))
+    math_operator: ">"
+    threshold: 3
+    for: 30m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator recorded {{ index $values \"C\" }} genuine-failure lifecycle give-ups in 3h (>3; reasons maxIterations/implement-failed/triage-failed/deadline/refused-no-explanation). Agents are unable to deliver (env/tooling breakage, refusal loops, iteration exhaustion). These park in LifecycleState=Parked with an empty Phase, so operator_task_terminal_total{phase=Failed} misses them. Benign give-ups (duplicate-merged-change, refused-already-done, refused-declined, not-bot-authored, no-pr-number) are excluded."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # ----------------------------------------------------------------------------
+  # Inbound REST API + auth: agent turn callbacks/writebacks land on the operator
+  # REST API (patch_task, propose_issue, *_outcome, post_comment, handover).
+  # Auth rejections are info-only (email, no system=tatara label -> no incident
+  # Task) so a credential typo does not raise an emergency-brainstorm.
+  # ----------------------------------------------------------------------------
+  - name: "Operator REST API error ratio high"
+    queries:
+      - expression: |
+          (sum(increase(operator_restapi_requests_total{namespace="tatara",job="tatara-operator",result="error"}[15m])) / clamp_min(sum(increase(operator_restapi_requests_total{namespace="tatara",job="tatara-operator"}[15m])), 1)) and (sum(increase(operator_restapi_requests_total{namespace="tatara",job="tatara-operator"}[15m])) >= 10)
+    math_operator: ">"
+    threshold: 0.1
+    for: 15m
+    decimal_points: 2
+    annotations:
+      summary: "tatara-operator inbound REST API error ratio is {{ index $values \"C\" }} (>0.10) over 15m. Agent turn callbacks/writebacks (patch_task, propose_issue, *_outcome, post_comment, handover) are failing to land (5xx or Task-gone 404 on the internal-failure path; 4xx validation rejections are not counted as error)."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  - name: "Operator auth rejections elevated"
+    queries:
+      - expression: |
+          sum(rate(operator_auth_total{namespace="tatara",job="tatara-operator",result=~"missing_token|invalid_scheme|invalid_token|rejected"}[10m]))
+    math_operator: ">"
+    threshold: 1
+    for: 15m
+    decimal_points: 2
+    annotations:
+      summary: "Operator REST API rejecting auth at {{ index $values \"C\" }}/s (missing/invalid/rejected tokens) for 15m. Possible misconfigured wrapper token, expired credential, or probing. Info-only (no system=tatara label): emails, does not raise an incident Task."
+    labels:
+      homelab: "true"
+      component: "operator"
+      severity: "info"
+  # ----------------------------------------------------------------------------
+  # Wrapper metric-push pipeline: wrapper pods have NO scrape target, so every
+  # ccw_* series reaches Prometheus only via HTTP push to the operator receiver.
+  # A push rejection or a fully dark receiver silently blinds all ccw_* alerts
+  # (several of which use clamp_min/or vector(0) and stay green when blind).
+  # ----------------------------------------------------------------------------
+  - name: "Operator push receiver rejecting wrapper metrics"
+    queries:
+      - expression: |
+          sum(increase(operator_push_receive_total{namespace="tatara",job="tatara-operator",result=~"rejected|too_large"}[15m]))
+    math_operator: ">"
+    threshold: 0
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator push receiver rejected {{ index $values \"C\" }} wrapper metric pushes (rejected/too_large) in 15m. Wrapper pods have no scrape target, so all ccw_* series arrive only via this push; rejections silently blind every ccw_* alert."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # Fleet-wide backstop: aggregate across all 3 replicas. Each replica runs its
+  # own in-memory receiver so pushed runs are LB-distributed, while only the
+  # leader sets tasks_inflight. Per-instance matching would false-fire on the
+  # leader whenever the LB routes zero pushes to it. The value emitted is the
+  # in-flight Task count when the whole fleet is metric-dark, else empty/0.
+  - name: "Wrapper metrics blind while agents running"
+    queries:
+      - expression: |
+          (sum(operator_tasks_inflight{namespace="tatara",job="tatara-operator"}) > 0) * (sum(operator_pushed_runs{namespace="tatara",job="tatara-operator"}) == bool 0)
+    math_operator: ">"
+    threshold: 0
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator holds {{ index $values \"C\" }} Task(s) in flight but the entire fleet pushed zero wrapper metric runs for 15m. The ccw_* metric-push pipeline is dark while agents are running, so every wrapper alert (turns erroring, commit/push fail, http 5xx, panics) is silently blind."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # ----------------------------------------------------------------------------
+  # Slow leaks + per-project budget ceiling. Both are wired-but-quiet (0 series
+  # today): the reaper-error metric emits only on a delete failure, the
+  # token-budget gauge only once a project enables a budget window.
+  # ----------------------------------------------------------------------------
+  - name: "Operator orphan reap delete errors"
+    queries:
+      - expression: |
+          sum(increase(operator_reap_delete_error_total{namespace="tatara",job="tatara-operator"}[1h])) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator backstop reaper failed to delete orphan wrapper resources {{ index $values \"C\" }} time(s) in 1h. Orphans are accumulating (control-plane node pressure / cost leak); the success-side operator_orphan_reaped_total does not surface this. The `or vector(0)` keeps the series defined while the metric is wired-but-quiet."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # Compares scope=used against the per-project emitted scope=emergency threshold
+  # (drift-proof: no hardcoded ratio, tracks DefaultEmergencyPercent). The >=
+  # join returns the used ratio for any project at/over its emergency ceiling, so
+  # `> 0` fires only then. 0 series until a project sets budgetCfg.Enabled.
+  - name: "Project token budget riding emergency ceiling"
+    queries:
+      - expression: |
+          max by (project) (operator_token_budget_used_ratio{namespace="tatara",job="tatara-operator",scope="used"}) >= on(project) max by (project) (operator_token_budget_used_ratio{namespace="tatara",job="tatara-operator",scope="emergency"})
+    math_operator: ">"
+    threshold: 0
+    for: 15m
+    decimal_points: 2
+    annotations:
+      summary: "Project {{ index $labels \"project\" }} token-budget used ratio {{ index $values \"C\" }} has reached its own configured emergency spawn-pause threshold for 15m. Further agent spawns for the project are being paused. Distinct from the account-wide usage-gate alerts and the fleet $/s runaway rule."
     labels:
       homelab: "true"
       system: "tatara"

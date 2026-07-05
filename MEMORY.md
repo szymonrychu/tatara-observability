@@ -174,6 +174,43 @@ Past decisions + context. One dated line per entry.
   and its `RealAlertFilesPass` unittest ignore this rule (it selects no `*http_requests_total` 5xx
   status - out of that lint's scope), and `terraform validate`/`fmt -check -recursive` pass unchanged
   since `grafana.tf`'s `fileset(alerts/*.yaml)` picks the new file up with no `.tf` edits needed.
+- 2026-07-05: Consolidated the two overlapping memory dashboards (`dashboards/memory-server.json`
+  uid `tatara-memory-server` 25 panels, and `dashboards/tatara-memory.json` uid `tatara-memory` 27
+  panels - both created by a monitoring-audit workflow) into one canonical
+  `dashboards/memory.json` (uid `tatara-memory`, 32 panels, `job="tatara-memory"` +
+  `service=~"$service"` templating variable). Verified live against Prometheus via the grafana MCP
+  (`list_prometheus_metric_names` + `query_prometheus`, not just source-reading): every app metric
+  family referenced (`lightrag_calls_total`, `code_graph_query_total`/`_entities_upserted_total`/
+  `_edges_upserted_total`/`_analytics_*`/`_compute_duration_seconds`/`_betweenness_skipped_total`,
+  `ingest_items_total`/`_jobs_total`/`_item_duration_seconds`/`_notify_dropped_total`/
+  `_source_index_errors_total`/`_store_op_errors_total`, `tatara_memory_op_total`/
+  `_tombstone_total`, `http_requests_total`/`_request_duration_seconds`, and the operator-side
+  `operator_memory_provision_duration_seconds`/`operator_lightrag_query_errors_total`/
+  `operator_memory_retrieval_probe_total`/`operator_tool_surface_probe_total`) is live-scraped, with
+  real `service` label values `mem-tatara`/`mem-infrastructure` confirmed on `job="tatara-memory"`
+  targets. This CLOSES the ROADMAP "planned: wire mem-* pods to scrape" item (Gap 1) - it was stale;
+  the pods have been scraped for a while, `alerts/tatara-memory.yaml`'s own header comment already
+  said so. No panel needed a "dark, not-yet-scraped" disclaimer as a result - every metric family in
+  the merged dashboard is real and live. Dedup calls made: kept the `job=tatara-memory` filter
+  convention (avoids the documented `http_requests_total` name collision with tatara-chat) AND added
+  back memory-server.json's `$service` template variable (per-project `mem-tatara`/
+  `mem-infrastructure` breakout) since it is a real, live label - confirmed via MCP query, not
+  assumed. Kept memory-server.json's absolute-rate "Code-graph query errors by op" panel over
+  tatara-memory.json's ratio version because it mirrors the actual deployed alert's PromQL shape
+  (`alerts/tatara-memory.yaml` "Memory code-graph query errors" fires on absolute rate>0, not a
+  ratio). Kept the unique "Ingest silent-loss errors" panel (memory-server.json) and the unique
+  "HTTP API" row + refined "Memory op error ratio" / "Analytics compute latency p95/p99" panels
+  (tatara-memory.json). All rate/histogram windows normalized to a fixed `[5m]` (`[30m]` for the
+  slow-moving analytics-backlog panels) rather than `$__rate_interval`, since the latter can resolve
+  under 5m on this dashboard's time range and the task required rate windows >= 5m explicitly.
+  SEPARATE FINDING (not fixed, flagged in ROADMAP): `dashboards.tf` only has 3
+  `grafana_dashboard` resources (task_delivery, quality_feedback, claude_usage_windows) - neither
+  memory dashboard, nor `chat*`/`wrapper*`/`ingester`/`operator*`/`agent-lifecycle` dashboard JSON
+  files are wired to any Grafana dashboard resource at all. RESOLVED IN THIS SAME PR: the orchestrator
+  ran the same consolidation for chat/wrapper/operator (each had 2-3 duplicate boards), deleted all 9
+  redundant JSONs, and wired every canonical dashboard (operator/wrapper/memory/chat/ingester/
+  agent-lifecycle) into `dashboards.tf` - so `memory.json` and the others ARE now applied. `terraform
+  validate`/`fmt` + `scripts/lint_alert_rules.py` green.
 - 2026-07-04: Added `dashboards/claude-usage-windows.json` (uid=tatara-claude-usage-windows) +
   `alerts/tatara-usage-gate.yaml` for the claude-subscription-usage-gate feature (Phase C of
   `tatara` docs `docs/superpowers/plans/2026-07-04-claude-subscription-usage-gate.md`). Dashboard:

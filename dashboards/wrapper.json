@@ -1,0 +1,1149 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "gridPos": {"h": 3, "w": 24, "x": 0, "y": 0},
+      "id": 1,
+      "options": {
+        "mode": "markdown",
+        "content": "Wrapper (`ccw_*` / `tatara_wrapper_*`) agent-runtime metrics. Agent pods are EPHEMERAL and have no scrape target of their own: each pod pushes its `ccw_*` series to the operator's pushmetrics receiver (`POST /internal/metrics/push`), which Prometheus scrapes as `job=tatara-operator` WITHOUT honor_labels. So the agent's own pod/job labels are relabeled to `exported_pod`/`exported_job`, while plain `pod`/`job` are the operator scrape target itself. Agent identity is `exported_pod` (the pod name encodes project/repo/issue: `tatara-<project>-<gh|gl>-<repo>-<issue|mr>-<n>`). Filter with the `$pod` variable (it targets `exported_pod`). Per-run counters start fresh per pod and the whole series is TTL-evicted (default 5m - see `operator_pushed_runs` / `operator_pushed_runs_evicted_total` below) after a run's last push, so a turn's first increment can be under-counted and rate()/increase() windows here are kept >=5m (mostly 15m/30m) to survive that churn; idle-fleet panels legitimately read 0 or blank, not broken queries. Durable per-kind/repo/project token spend and USD cost live on `Tatara - Task Delivery` (`operator_task_tokens_total`); the token panel here is a wrapper-vantage cross-check only, not billing. `ccw_turn_cost_usd_total` is DEAD (result.json is never written, and it is absent from live Prometheus) so it is deliberately not dashboarded."
+      },
+      "pluginVersion": "11.0.0",
+      "title": "About this dashboard",
+      "type": "text"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Agent-reported platform problems: agents call the report_internal_issue MCP tool when they hit a platform defect, and the wrapper tailer meters them as tatara_wrapper_internal_issue_total{category,severity}. Highest-value panel on this dashboard: this signal was previously only visible via the Loki alert. A non-zero bar means an agent explicitly flagged a broken platform behavior during its run.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "normal"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "min": 0,
+          "noValue": "0",
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "green", "value": null}]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 3},
+      "id": 2,
+      "options": {
+        "legend": {"calcs": ["lastNotNull", "max"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (category, severity) (increase(tatara_wrapper_internal_issue_total{exported_pod=~\"$pod\"}[$__rate_interval]))",
+          "legendFormat": "{{category}} / {{severity}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Agent-Reported Platform Problems (report_internal_issue)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 11},
+      "id": 3,
+      "title": "Pushed-run liveness (TTL)",
+      "type": "row",
+      "panels": []
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "operator_pushed_runs (job=tatara-operator): agent runs currently pushing ccw_* series to the operator pushmetrics receiver. When this is 0, every ccw_* panel below is blank BY DESIGN - per-run counters age out within the receiver TTL (~5m) of a run's last push. That is an idle fleet, not a broken query.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "min": 0,
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "text", "value": null},
+              {"color": "green", "value": 1}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 12},
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(operator_pushed_runs{job=\"tatara-operator\"})",
+          "legendFormat": "live runs",
+          "refId": "A"
+        }
+      ],
+      "title": "Live Wrapper Runs",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "increase(operator_pushed_runs_evicted_total[1h]): per-run ccw_* series dropped after their TTL lapsed. A non-zero, rising value while runs are active is normal churn - each finished agent pod's pushed series ages out. It is the mechanism that makes short rate() windows and per-run counter continuity unreliable on this dashboard.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "min": 0,
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "text", "value": null}]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 6, "w": 6, "x": 6, "y": 12},
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "increase(operator_pushed_runs_evicted_total{job=\"tatara-operator\"}[1h])",
+          "legendFormat": "evicted (1h)",
+          "refId": "A"
+        }
+      ],
+      "title": "Runs Evicted (TTL, 1h)",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Live pushed runs (operator_pushed_runs) against the TTL-eviction rate (increase of operator_pushed_runs_evicted_total over 15m). Read every ccw_* panel below against this: where live runs is 0 the ccw_* series are aged out and the panels are legitimately empty.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "min": 0,
+          "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 12},
+      "id": 6,
+      "options": {
+        "legend": {"calcs": ["lastNotNull", "max"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(operator_pushed_runs{job=\"tatara-operator\"})",
+          "legendFormat": "live runs",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(increase(operator_pushed_runs_evicted_total{job=\"tatara-operator\"}[15m]))",
+          "legendFormat": "evicted (15m)",
+          "refId": "B"
+        }
+      ],
+      "title": "Pushed-Run Liveness",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 18},
+      "id": 7,
+      "title": "Turn outcomes",
+      "type": "row",
+      "panels": []
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "ccw_turns_total by terminal result (complete|failed), increase over 15m. TTL/first-jump caveat: each agent pod starts its turn counter fresh and its series is evicted within the receiver TTL of its last push, so a turn's first increment can be lost and very short-lived runs may under-count. Window is 15m (>= receiver TTL) to mitigate.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "normal"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "min": 0,
+          "noValue": "0",
+          "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "failed"},
+            "properties": [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "complete"},
+            "properties": [{"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}}]
+          }
+        ]
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 19},
+      "id": 8,
+      "options": {
+        "legend": {"calcs": ["sum", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (result) (increase(ccw_turns_total{exported_pod=~\"$pod\"}[15m]))",
+          "legendFormat": "{{result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Turn Result Mix",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Share of turns ending result=failed over 30m: increase(ccw_turns_total{result=failed}) / clamp_min(increase(ccw_turns_total),1). clamp_min(...,1) keeps the ratio at 0 (not NaN) while the fleet is idle. The 'Wrapper turns erroring' alert fires above 0.3 for 30m.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"},
+            "thresholdsStyle": {"mode": "line"}
+          },
+          "mappings": [],
+          "min": 0,
+          "max": 1,
+          "noValue": "0",
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 0.3}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 19},
+      "id": 9,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull", "max"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(increase(ccw_turns_total{result=\"failed\", exported_pod=~\"$pod\"}[30m])) / clamp_min(sum(increase(ccw_turns_total{exported_pod=~\"$pod\"}[30m])), 1)",
+          "legendFormat": "failed ratio",
+          "refId": "A"
+        }
+      ],
+      "title": "Turn Failure Ratio (30m)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 27},
+      "id": 10,
+      "title": "Turn & bootstrap duration",
+      "type": "row",
+      "panels": []
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Turn wall-clock duration quantiles from the ccw_turn_duration_seconds histogram (rate of _bucket over 30m). Idle windows yield no line (gaps) - an idle service is not a slow one. Window is 30m (>= receiver TTL) to keep buckets populated across per-run series churn.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "min": 0,
+          "unit": "s",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 28},
+      "id": 11,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(ccw_turn_duration_seconds_bucket{exported_pod=~\"$pod\"}[30m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ccw_turn_duration_seconds_bucket{exported_pod=~\"$pod\"}[30m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ccw_turn_duration_seconds_bucket{exported_pod=~\"$pod\"}[30m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "title": "Turn Duration Quantiles",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Full Render() bootstrap wall-clock duration quantiles from the ccw_bootstrap_duration_seconds histogram (rate of _bucket over 30m). This is per-pod cold-start cost (clone/resume, hook + skills install, config render). Idle windows yield no line (gaps).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "min": 0,
+          "unit": "s",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 28},
+      "id": 12,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(ccw_bootstrap_duration_seconds_bucket{exported_pod=~\"$pod\"}[30m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ccw_bootstrap_duration_seconds_bucket{exported_pod=~\"$pod\"}[30m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ccw_bootstrap_duration_seconds_bucket{exported_pod=~\"$pod\"}[30m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "title": "Bootstrap Duration Quantiles",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 36},
+      "id": 13,
+      "title": "Bootstrap & delivery",
+      "type": "row",
+      "panels": []
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Bootstrap repo clone/resume attempts per second by result (ccw_bootstrap_clone_total{result=ok|fail}). A sustained fail line means agents cannot lay down their workspace and never reach a first turn.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "normal"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "min": 0,
+          "noValue": "0",
+          "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 37},
+      "id": 14,
+      "options": {
+        "legend": {"calcs": ["lastNotNull", "max"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (result) (rate(ccw_bootstrap_clone_total{exported_pod=~\"$pod\"}[$__rate_interval]))",
+          "legendFormat": "{{result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Bootstrap Clone Outcomes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Share of CommitAndPush calls ending result=ok over 30m (ccw_commit_push_total), clamp_min(...,1) so it reads 0 (not NaN) when no pushes ran in the window. The 'Wrapper commit/push failure ratio high' alert fires when the fail ratio exceeds 0.2 (i.e. this drops below 0.8) for 30m.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"},
+            "thresholdsStyle": {"mode": "line"}
+          },
+          "mappings": [],
+          "min": 0,
+          "max": 1,
+          "noValue": "0",
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 0.8},
+              {"color": "green", "value": 0.95}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 37},
+      "id": 15,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull", "min"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(increase(ccw_commit_push_total{result=\"ok\", exported_pod=~\"$pod\"}[30m])) / clamp_min(sum(increase(ccw_commit_push_total{exported_pod=~\"$pod\"}[30m])), 1)",
+          "legendFormat": "push success ratio",
+          "refId": "A"
+        }
+      ],
+      "title": "Commit/Push Success Ratio (30m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Turn resume attempts by mode (nudge|resubmit|complete_from_transcript) and result (ok|write_fail), increase over 15m (ccw_turn_resumes_total{result,resume_mode}). result=write_fail means the resume PTY/store write itself failed. A rising write_fail line means the recovery path is broken, not just that turns need resuming.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "normal"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "min": 0,
+          "noValue": "0",
+          "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 37},
+      "id": 16,
+      "options": {
+        "legend": {"calcs": ["sum", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (resume_mode, result) (increase(ccw_turn_resumes_total{exported_pod=~\"$pod\"}[15m]))",
+          "legendFormat": "{{resume_mode}} / {{result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Turn Resumes by Mode/Result",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 45},
+      "id": 17,
+      "title": "Tool calls",
+      "type": "row",
+      "panels": []
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Top agent tool calls by rate, split by outcome (ccw_tool_calls_total{tool,outcome=success|error}). tool is clamped to a bounded set (built-ins + tatara MCP surface, else 'other'). An error line for a tool is a mid-turn tool failure that otherwise completes the turn with no other fleet-visible signal.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "min": 0,
+          "noValue": "0",
+          "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 46},
+      "id": 18,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "right", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "topk(15, sum by (tool, outcome) (rate(ccw_tool_calls_total{exported_pod=~\"$pod\"}[$__rate_interval])))",
+          "legendFormat": "{{tool}} / {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Tool-Call Mix (top 15 by rate)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Per-tool error ratio: outcome=error over all outcomes for each tool over 30m (ccw_tool_calls_total), clamp_min(...,1) so it reads 0 (not NaN) for a tool with no calls in the window. A tool with a persistently high error ratio is silently eating turns without tripping the turn-level failure alert.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "min": 0,
+          "max": 1,
+          "noValue": "0",
+          "unit": "percentunit",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 46},
+      "id": 19,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull", "max"], "displayMode": "table", "placement": "right", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (tool) (increase(ccw_tool_calls_total{outcome=\"error\", exported_pod=~\"$pod\"}[30m])) / clamp_min(sum by (tool) (increase(ccw_tool_calls_total{exported_pod=~\"$pod\"}[30m])), 1)",
+          "legendFormat": "{{tool}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Tool Call Error Ratio by Tool (30m)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 54},
+      "id": 20,
+      "title": "Session health: restarts, interjections, streams",
+      "type": "row",
+      "panels": []
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Claude subprocess restarts inside a wrapper pod (ccw_claude_restarts_total), increase over 15m, grouped by exported_pod (the ephemeral agent pod - pod is the operator re-exporter, so grouping by pod would fan every run onto one operator replica). Distinct from the kube container crash-loop: a looping Claude subprocess with the wrapper staying up burns budget and stalls the Task. The 'Wrapper Claude process crash-looping' alert fires >3 in 15m per pod.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "min": 0,
+          "noValue": "0",
+          "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 3}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 55},
+      "id": 21,
+      "options": {
+        "legend": {"calcs": ["sum", "max"], "displayMode": "table", "placement": "right", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (exported_pod) (increase(ccw_claude_restarts_total{exported_pod=~\"$pod\"}[15m]))",
+          "legendFormat": "{{exported_pod}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Claude Subprocess Restarts (by agent pod, 15m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Mid-turn interjections injected into the live session (ccw_interjections_total), increase over 15m. Interjections are operator/lifecycle nudges pushed into a running turn; a sustained rise means turns increasingly need steering to complete.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "min": 0,
+          "noValue": "0",
+          "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 55},
+      "id": 22,
+      "options": {
+        "legend": {"calcs": ["sum", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(increase(ccw_interjections_total{exported_pod=~\"$pod\"}[15m]))",
+          "legendFormat": "interjections",
+          "refId": "A"
+        }
+      ],
+      "title": "Mid-Turn Interjections (15m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Transcript stream events per second by stream_type (ccw_stream_events_total{stream_type}). Reflects how the live transcript is flowing during a turn; a stall or a skewed mix is an early signal that a session is degrading.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "min": 0,
+          "noValue": "0",
+          "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 55},
+      "id": 23,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (stream_type) (rate(ccw_stream_events_total{exported_pod=~\"$pod\"}[$__rate_interval]))",
+          "legendFormat": "{{stream_type}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Stream Events by Type",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 63},
+      "id": 24,
+      "title": "Wrapper HTTP API",
+      "type": "row",
+      "panels": []
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Wrapper HTTP API health: 5xx responses per second (probes /readyz|/healthz|/metrics excluded, per CONVENTIONS.md) and recovered handler panics counted over the window. Either being non-zero means a real wrapper API request path is erroring; these back the 'Wrapper HTTP 5xx responses' and 'Wrapper HTTP handler panics' alerts.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "min": 0,
+          "noValue": "0",
+          "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 64},
+      "id": 25,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull", "max"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(rate(ccw_http_requests_total{status_code=~\"5..\", route!~\"/readyz|/healthz|/metrics\", exported_pod=~\"$pod\"}[$__rate_interval]))",
+          "legendFormat": "5xx/s",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(increase(ccw_http_panics_total{exported_pod=~\"$pod\"}[$__rate_interval]))",
+          "legendFormat": "panics (window)",
+          "refId": "B"
+        }
+      ],
+      "title": "Wrapper HTTP 5xx and Panics",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 72},
+      "id": 26,
+      "title": "Tokens (wrapper cross-check, not billing)",
+      "type": "row",
+      "panels": []
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Wrapper-vantage token cross-check ONLY (not billing): tokens/s by type and model from ccw_turn_tokens_total{type,model,kind,repo,project}. Durable, per-model-priced cost lives on Tatara - Task Delivery (operator_task_tokens_total); ccw_turn_cost_usd_total is dead (result.json is never written, and the metric is absent from live Prometheus). Use this only to sanity-check the wrapper's own token accounting against the operator's, not to reason about spend.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "min": 0,
+          "noValue": "0",
+          "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 73},
+      "id": 27,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (type, model) (rate(ccw_turn_tokens_total{exported_pod=~\"$pod\"}[$__rate_interval]))",
+          "legendFormat": "{{type}} / {{model}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Turn Tokens by Type and Model (wrapper cross-check, not billing)",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": ["tatara"],
+  "templating": {
+    "list": [
+      {
+        "allValue": ".*",
+        "current": {},
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "definition": "label_values(ccw_http_requests_total, exported_pod)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Pod (agent)",
+        "multi": true,
+        "name": "pod",
+        "options": [],
+        "query": {
+          "query": "label_values(ccw_http_requests_total, exported_pod)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Tatara - Wrapper (Agent Pods)",
+  "uid": "tatara-wrapper",
+  "version": 1,
+  "weekStart": ""
+}

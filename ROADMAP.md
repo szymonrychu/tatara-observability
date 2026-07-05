@@ -3,6 +3,7 @@
 Planned work not yet started. Move items out when shipped (note in MEMORY.md if non-obvious).
 
 - `shipped`: dashboards-as-code bootstrap - "Tatara - Task Delivery" dashboard (feat/task-delivery-dashboard). See MEMORY.md 2026-06-27.
+- `shipped`: semver push-CD cascade alerts - `alerts/tatara-cd.yaml` (`tatara_cd_cascade_failed`/`_stalled`). See MEMORY.md 2026-06-28. Depends on the operator G5 metrics landing; rules stay inert (`or vector(0)` -> 0) until then.
 - `planned`: scope the Grafana SA token to Editor + (if Grafana supports it) the `Tatara` folder
   only, instead of a broad Editor token.
 - `planned`: wire the `mem-*` per-project memory pods + the Argo workflow-controller to Prometheus

@@ -17,6 +17,17 @@ Past decisions + context. One dated line per entry.
   homelab parent policy) AND `system=tatara` (matches the child route to the operator incident
   webhook). Per-rule `labels` REPLACE the module `default_labels` (no merge). `info` rules omit
   `system` so they email only (severity gate).
+- 2026-06-28: Added `alerts/tatara-cd.yaml` (semver push-CD, design
+  `docs/superpowers/specs/2026-06-28-semver-push-cd-design.md` sec 8.4) - two critical rules over the
+  operator G5 leader-only gauges `tatara_cd_cascade_failed` and `tatara_cd_cascade_stalled` (>0). Both
+  `max(...) or vector(0)` (leader-only -> max picks the leader; `or vector(0)` keeps the rule defined
+  when the operator is gone, deferring the outage page to the operator-down rules). `component=cd`,
+  `system=tatara`+critical so the existing routing escalates to the operator incident webhook,
+  mirroring the internal-issue path. Metrics lack a `_total` suffix = gauges, threshold `>0`. NO scrape
+  allowlist widening needed: the operator ServiceMonitor (`tatara-operator/charts/.../templates/servicemonitor.yaml`)
+  scrapes the full `/metrics` with NO `__name__` keep filter, so `tatara_cd_*` is picked up
+  automatically once emitted (the `pushMetricsAllowedPrefixes` allowlist is the wrapper/ingester
+  push-gateway, unrelated to the operator's own scrape).
 - 2026-06-25: `alerts/tatara-ingester.yaml` rule "Tatara ingest job failing" MUST keep the
   `mode="full"` selector (`operator_ingest_job_total{...,result="failure",mode="full"}[1h] > 0`).
   The operator attributes ingest failures by `mode` so alerting pages ONLY on terminal full-ingest

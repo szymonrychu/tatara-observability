@@ -1,0 +1,45 @@
+---
+interval_seconds: 60
+default_no_data_state: "OK"
+rules:
+  # ----------------------------------------------------------------------------
+  # Semver push-CD cascade health. The operator (G5) emits these leader-only
+  # gauges to flag a deploy cascade that broke or wedged on its way from a merged
+  # component PR to a tatara-helmfile apply. A firing rule routes (system=tatara
+  # + critical) to the operator incident webhook, mirroring the internal-issue
+  # escalation: a CD cascade that is not delivering code to the cluster is a
+  # platform-level outage of the delivery path. Leader-only -> max() picks the
+  # leader's value; `or vector(0)` keeps the rule defined when the operator (and
+  # thus the series) is gone, deferring the full-outage page to the operator-down
+  # rules in tatara-operator.yaml.
+  # ----------------------------------------------------------------------------
+  - name: "Tatara CD cascade failed"
+    queries:
+      - expression: |
+          max(tatara_cd_cascade_failed{namespace="tatara",job="tatara-operator"}) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "{{ index $values \"C\" }} semver push-CD cascade(s) are in a FAILED state. A deploy stage broke (red required check, failed build, wrapper build-guard rejection, un-mergeable bump PR, or a helmfile apply error) and bounded recovery has not cleared it. Merged component code is NOT reaching the cluster; check the operator cd-cascade Tasks and the tatara-helmfile cd/deploy-train PR."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "cd"
+      severity: "critical"
+  - name: "Tatara CD cascade stalled"
+    queries:
+      - expression: |
+          max(tatara_cd_cascade_stalled{namespace="tatara",job="tatara-operator"}) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 10m
+    decimal_points: 0
+    annotations:
+      summary: "{{ index $values \"C\" }} semver push-CD cascade(s) have STALLED past the Deploying deadline with no live watcher (cdScan backstop trip). The deploy train is wedged: a bump/merge/apply hop never completed and no agent is driving it. Merged component code is NOT reaching the cluster; inspect the stalled cd-cascade Task and the tatara-helmfile apply run."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "cd"
+      severity: "critical"

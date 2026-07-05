@@ -219,3 +219,48 @@ rules:
       system: "tatara"
       component: "memory"
       severity: "warning"
+  # ---------------------------------------------------------------------------
+  # Root-cause early-warning added after the 2026-07-05 mem-tatara-pg WAL-fill
+  # incident: the CNPG postgres volumes slowly filled with un-recyclable WAL
+  # (a replica down for days held a replication slot) until the CephFS quota was
+  # exceeded, crashlooping the cluster below memory quorum and gating every tatara
+  # Task for ~4h. NO disk-fullness alert existed, so the only signal was a
+  # symptom (HTTP 5xx) firing AFTER the outage - and that symptom's incident agent
+  # was itself gated on the down memory (circular). These two rules catch the root
+  # cause days early (volume filling) and the platform-level symptom (memory stuck
+  # not-Ready), independent of the memory app being up.
+  # ---------------------------------------------------------------------------
+  - name: "Memory PVC volume near full"
+    queries:
+      - expression: |
+          min(
+            kubelet_volume_stats_available_bytes{namespace="tatara",persistentvolumeclaim=~"mem-.*"}
+            /
+            kubelet_volume_stats_capacity_bytes{namespace="tatara",persistentvolumeclaim=~"mem-.*"}
+          ) by (persistentvolumeclaim)
+    math_operator: "<"
+    threshold: 0.15
+    for: 15m
+    decimal_points: 2
+    annotations:
+      summary: "tatara-memory PVC {{ index $labels \"persistentvolumeclaim\" }} is {{ index $values \"C\" }} free (below 15%). Postgres WAL/data fill leads to a CNPG crash loop below memory quorum; expand storage (Project spec.memory.pgStorage / neo4jStorage) before it hits 0."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "warning"
+  - name: "Memory stack stuck not ready"
+    queries:
+      - expression: |
+          max(operator_memory_stacks{namespace="tatara",job="tatara-operator",phase=~"Provisioning|Failed"})
+    math_operator: ">"
+    threshold: 0
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "{{ index $values \"C\" }} tatara-memory stack(s) stuck in Provisioning/Failed for 15m (not Ready). Every Task for that project is hard-gated on memory Ready, so the whole project stalls - INCLUDING the incident agent that would investigate this (circular dependency: infra-outage self-heal needs the subsystem that is down). Escalate to a human / check the CNPG cluster + PVCs directly."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "critical"

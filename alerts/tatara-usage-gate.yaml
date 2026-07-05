@@ -1,0 +1,73 @@
+---
+# Claude account usage windows + per-kind gate (claudeSubscription mode) alert
+# rules. Sourced from the operator's usage-window poller and admission gate
+# (tatara_account_usage_*, tatara_account_overage_*, operator_admission_blocked_total
+# {reason="kind_ceiling"} - tatara-operator internal/accountusage + internal/obs/
+# operator_metrics.go) and, forward-looking, Claude Code's native OTel export
+# (claude_code.cost.usage / claude_code.api_error - tatara-claude-code-wrapper,
+# lands via a separate OTLP->Prometheus collector deploy through tatara-helmfile).
+# Surfaced on "Tatara - Claude Usage Windows" (dashboards/claude-usage-windows.json).
+# See docs/superpowers/specs/2026-07-04-claude-subscription-usage-gate-design.md.
+interval_seconds: 60
+default_no_data_state: "OK"
+rules:
+  - name: "Claude account usage poll unhealthy"
+    queries:
+      - expression: |
+          tatara_account_usage_poll_health
+    math_operator: "<"
+    threshold: 1
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "tatara_account_usage_poll_health={{ index $values \"C\" }} (<1) for 15m. The /api/oauth/usage poller has exceeded its failure threshold; the account-usage snapshot is stale. The gate keeps holding on the last-known windows until each expires (eventual fail-open, by design - a claudeSubscription project has no customWindow inputs to fall back to); the OTel 429 backstop is the hard floor. Check operator logs for poll errors (auth, 429, schema drift)."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  - name: "Claude account usage window near emergency ceiling"
+    queries:
+      - expression: |
+          max(tatara_account_usage_utilization)
+    math_operator: ">"
+    threshold: 80
+    for: 15m
+    decimal_points: 1
+    annotations:
+      summary: "Highest Claude account usage window is at {{ index $values \"C\" }}% (>80%, the operator's DefaultEmergencyPercent) for 15m. The shared subscription is close to a window ceiling; only the incident kind (98% ceiling) still has headroom. THRESHOLD IS PROVISIONAL: reused from budget.DefaultEmergencyPercent (tatara-operator internal/budget/budget.go) as the closest existing platform convention for 'emergency'; tune once real five_hour/seven_day utilization data accumulates."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  - name: "Claude Code API 429 rate (reactive backstop) - PENDING OTel deployment"
+    queries:
+      - expression: |
+          (sum(rate(claude_code_api_error_total{status_code="429"}[5m])) or vector(0))
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 3
+    annotations:
+      summary: "Claude Code agents hit HTTP 429 at {{ index $values \"C\" }}/s over 5m (reactive backstop per the design spec's 'any live-turn 429 -> emergency fleet stop' floor). The proactive per-kind gate failed to prevent a rate-limit hit; treat as an incident. INERT UNTIL DEPLOYED: this metric requires Claude Code native OTel to be enabled on wrapper agent pods (Phase B, tatara-claude-code-wrapper) and the OTLP->Prometheus collector wired via tatara-helmfile (Phase D) - both land after this dashboard/alert PR."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "wrapper"
+      severity: "critical"
+  - name: "Claude account monthly overage climbing"
+    queries:
+      - expression: |
+          tatara_account_overage_percent
+    math_operator: ">"
+    threshold: 80
+    for: 30m
+    decimal_points: 1
+    annotations:
+      summary: "Monthly pay-as-you-go overage utilization is {{ index $values \"C\" }}% (>80%) for 30m. Read-only signal (overage never gates spawning, per the design's explicit non-goal) - informational for the human plan owner to decide whether to raise the limit or curb discretionary agent kinds manually."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"

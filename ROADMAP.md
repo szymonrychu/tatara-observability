@@ -29,3 +29,12 @@ Planned work not yet started. Move items out when shipped (note in MEMORY.md if 
   2026-07-04. `planned` follow-up: tune the 0.02 find-rate threshold and 5-review min-volume gate
   against the real G4 baseline once claude-sonnet-5 review data accumulates; add the optional
   implement-CI-pass-rate floor rule once CI attribution is trusted.
+- `shipped` (Phase C, claude-subscription-usage-gate): "Tatara - Claude Usage Windows" dashboard
+  (`dashboards/claude-usage-windows.json`) + `alerts/tatara-usage-gate.yaml` (poll-health, emergency-
+  ceiling, 429 backstop, overage-climbing). See MEMORY.md 2026-07-04. `planned` follow-up: (1) once
+  the operator poller (Phase A) deploys, confirm `tatara_account_usage_*`/`operator_admission_blocked_
+  total{reason="kind_ceiling"}` panels populate as expected and tune the 80% emergency-ceiling
+  threshold against real utilization; (2) once the OTLP->Prometheus collector deploys (Phase D,
+  tatara-helmfile), confirm the exact scraped names for `claude_code_cost_usage` /
+  `claude_code_api_error{status_code}` and fix the two OTel panels + the 429 alert rule if the
+  collector's naming differs from the plan's assumed Prometheus-normalized form.

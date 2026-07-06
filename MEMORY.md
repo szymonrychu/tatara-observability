@@ -279,3 +279,23 @@ Past decisions + context. One dated line per entry.
   PR plans are untouched (still refresh -> drift stays visible in the sticky plan comment). Chose this
   over -refresh=false-on-all-attempts (attempt 1 keeps drift reconciliation when the API is healthy)
   and over just bumping the retry count (probabilistic; would not have ridden out an 11m slow window).
+- 2026-07-06: Added "Memory postgres or neo4j container stuck waiting" to `alerts/tatara-memory.yaml`,
+  closing the gap that let both `mem-tatara-pg` cnpg REPLICAS crashloop ~8h at 1/3 ready (HA=0) with
+  ZERO alerts. Root: every pod-lifecycle rule here scopes to the memory API pod and EXPLICITLY excludes
+  the backing stores (`pod!~"mem-.*-(neo4j|pg|lightrag).*"`), and "Memory stack stuck not ready"
+  (`operator_memory_stacks` phase=Provisioning|Failed) stayed silent because the memory API kept SERVING
+  via the surviving primary - the stack read Ready while HA was gone. New rule mirrors "Memory API
+  server container stuck waiting" for the stateful members:
+  `kube_pod_container_status_waiting_reason{pod=~"mem-.*-(pg|neo4j)-[0-9]+",reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerError|CreateContainerConfigError"} > 0`
+  for 10m, critical. Chose the container-waiting-REASON signal over pod-not-ready deliberately (review
+  finding): a legit replica re-clone stays Running-but-not-Ready through basebackup/catchup (can exceed
+  10m on a large DB) and would false-fire a not-ready rule, but is NOT in a waiting reason, so the
+  reason-keyed rule has no re-clone noise while still catching the crash loop + the CephFS
+  CreateContainerError class. Anchored `-(pg|neo4j)-[0-9]+` (PromQL matchers are fully anchored) matches
+  only stable instance pods, not transient `-join-`/basebackup clone pods; lightrag omitted (Deployment,
+  hashed pod names; its outages surface via the LightRAG/API rules). Critical not warning: a member
+  stuck 10m is one failure from the full-outage circular deadlock, and it is still-serving so the
+  incident agent can act. Verified: lint + self-tests pass; a range query over the 2026-07-06 incident
+  window returns exactly `mem-tatara-pg-1`/`pg-3` reason=CrashLoopBackOff=1 for ~8h and nothing else, so
+  the rule provably fires on the real incident with no false positives. Root cause (operator-default 2Gi
+  WAL volume too small) fixed in tatara-operator#270 (default 2Gi->8Gi) + tatara-helmfile#140.

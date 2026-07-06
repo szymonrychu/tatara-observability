@@ -11,3 +11,6 @@ crash.log
 # Python bytecode (lint scripts)
 __pycache__/
 *.pyc
+
+# Local git worktrees
+.worktrees/

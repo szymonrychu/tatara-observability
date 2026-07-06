@@ -264,3 +264,34 @@ rules:
       system: "tatara"
       component: "memory"
       severity: "critical"
+  # 2026-07-06 follow-up, same mem-tatara-pg family: the WAL-fill fix left a 2Gi
+  # dedicated WAL volume that was itself too small, crashlooping both cnpg REPLICAS
+  # for ~8h at 1/3 ready. It went unnoticed because every pod-lifecycle rule above
+  # EXCLUDES the backing stores (pod!~"...-(neo4j|pg|lightrag)...") and "Memory
+  # stack stuck not ready" stayed silent - the memory API kept serving via the
+  # surviving primary, so the stack read Ready while HA was gone. This is the mirror
+  # of "Memory API server container stuck waiting" for the stateful HA members. Keyed
+  # on the container waiting REASON, not pod-not-ready, so a legitimate replica
+  # re-clone (Running through basebackup/catchup, which can exceed 10m on a large DB)
+  # does NOT fire - only a genuinely stuck container (crash loop, image/create error)
+  # does. The anchored -(pg|neo4j)-[0-9]+ selector matches the stable instance pods
+  # (mem-*-pg-N, mem-*-neo4j-N), not the transient -join-/basebackup clone pods.
+  # Critical: a member stuck 10m means HA is degraded (or a store is down) and the
+  # incident agent must act BEFORE the primary also fails and hard-gates the whole
+  # project (the circular-deadlock case). A downed replica leaves memory serving, so
+  # that agent can still run. (lightrag outages surface via the LightRAG/API rules.)
+  - name: "Memory postgres or neo4j container stuck waiting"
+    queries:
+      - expression: |
+          max(kube_pod_container_status_waiting_reason{namespace="tatara",pod=~"mem-.*-(pg|neo4j)-[0-9]+",reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerError|CreateContainerConfigError"}) by (pod,reason)
+    math_operator: ">"
+    threshold: 0
+    for: 10m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-memory stateful pod {{ index $labels \"pod\" }} (cnpg postgres or neo4j) container stuck ({{ index $labels \"reason\" }}) for 10m. A cnpg postgres member stuck = HA degraded while the primary keeps serving (this silently masked an 8h replica crash loop on 2026-07-06); a neo4j pod stuck = graph queries failing. Check the CNPG cluster (kubectl cnpg status mem-<project>-pg) / the neo4j StatefulSet."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "critical"

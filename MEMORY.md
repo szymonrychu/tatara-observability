@@ -2,6 +2,20 @@
 
 Past decisions + context. One dated line per entry.
 
+- 2026-07-12: Issue #50 - "Operator replica missing" warning false-fired on environment cold start /
+  Prometheus restart. `count(up{job="tatara-operator"} == 1) or vector(0) < 3` fabricated a literal 0
+  when every `up` series was transiently absent, and 0 < 3 held the false page for the whole 15m
+  `for:` window while all 3 replicas were healthy - same class as #33 (metric absence != zero
+  replicas). Fix (minimal, issue's option 1): dropped `or vector(0)` so an empty `up == 1` set is
+  NoData -> OK (default_no_data_state). `count(up == 1)` still excludes down targets (up=0), so a
+  genuine 1-2/3 degradation fires; a full 0/3 outage is deliberately NOT this warning's job (NoData ->
+  OK here) and stays covered by the CRITICAL "Operator scrape target down" (sum(up) or vector(0) < 1)
+  + "Operator pod not ready". Audited every other `math_operator: "<"` rule per the issue's 2nd
+  acceptance bullet: the remaining five (`scrape target down`, `deployment has no available replicas`,
+  `pod not ready`, `reconcile loop wedged`, `scan loop stalled`) all use threshold 1 = total-outage
+  detectors where `or vector(0)` fabricating a 0 on series-absence is the INTENDED behavior (they
+  should page when the operator is entirely gone). "Operator replica missing" (threshold 3, a subset
+  count) was the only partial-degradation rule carrying the anti-pattern; it appears nowhere else.
 - 2026-06-25: Repo created to make tatara Grafana alert rules agent-adjustable. They originally
   shipped in `infra/terraform/grafana` (gitlab.com), which the tatara agents do NOT enroll on, so
   the platform could not tune its own observability. Migrated the alert RULES here (github,

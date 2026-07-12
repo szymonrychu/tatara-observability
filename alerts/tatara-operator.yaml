@@ -497,6 +497,21 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "warning"
+  - name: "Operator task lost pod terminations"
+    queries:
+      - expression: |
+          sum(increase(operator_task_terminal_total{namespace="tatara",job="tatara-operator",reason="PodLost"}[1h]))
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator terminated {{ index $values \"C\" }} Task(s) in 1h with reason=PodLost - the wrapper pod was lost and the recreation budget was exhausted. Work in flight was destroyed without a live pod to retry against. Investigate pod evictions/node pressure/OOM-kill on the wrapper workload; distinct from the boot-crash-budget and agent-unreachable rules, which cover pods that never came up rather than pods that vanished mid-task."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
   # ----------------------------------------------------------------------------
   # Lifecycle progress: agents giving up on genuine-failure reasons park in
   # LifecycleState=Parked with an empty Phase, so the task-terminal Failed rule

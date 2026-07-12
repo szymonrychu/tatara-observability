@@ -49,16 +49,28 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "critical"
+  # Fires on PARTIAL HA degradation: 1-2 of the 3 replicas up (leader election
+  # still works but redundancy is reduced). NO `or vector(0)` fallback (issue #50,
+  # same class as #33): a fabricated 0 turned a transient scrape gap - every `up`
+  # series briefly absent on an environment cold start or a Prometheus restart -
+  # into a false 0 that satisfied `< 3` for the whole 15m `for:` window while all
+  # 3 replicas were healthy. Without it, an empty `up == 1` set is NoData -> OK
+  # (default_no_data_state), not a page. `count(up == 1)` already excludes down
+  # targets (they report up=0), so a genuine 1-2/3 degradation still fires.
+  # A full 0/3 outage is deliberately NOT this warning's job: series present-but-0
+  # or vanished -> empty count -> NoData -> OK here, and pages instead via the
+  # CRITICAL "Operator scrape target down" (sum(up) or vector(0) < 1) and "Operator
+  # pod not ready", which intentionally DO fabricate a 0 to page on total absence.
   - name: "Operator replica missing"
     queries:
       - expression: |
-          count(up{namespace="tatara",job="tatara-operator"} == 1) or vector(0)
+          count(up{namespace="tatara",job="tatara-operator"} == 1)
     math_operator: "<"
     threshold: 3
     for: 15m
     decimal_points: 0
     annotations:
-      summary: "Only {{ index $values \"C\" }}/3 tatara-operator replicas are up. Leader election and HA are degraded."
+      summary: "Only {{ index $values \"C\" }}/3 tatara-operator replicas are up. Leader election and HA are degraded. Partial-degradation only (1-2/3): a full 0/3 outage or a transient scrape gap is NoData -> OK here and pages via the CRITICAL down rules instead."
     labels:
       homelab: "true"
       system: "tatara"

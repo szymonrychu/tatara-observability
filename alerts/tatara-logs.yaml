@@ -5,7 +5,7 @@ rules:
   - name: "Tatara agent reported platform problem"
     queries:
       - expression: |
-          sum by (description, category, severity) (count_over_time({namespace="tatara", app="tatara-claude-code-wrapper"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | action="internal_issue_report" [5m]))
+          sum by (description, category, severity) (count_over_time({namespace="tatara", app="tatara-operator"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | action="agent_internal_issue" [5m]))
         datasource_uid: "efihqbqlmroqod"
         query_type: "loki"
     math_operator: ">"
@@ -17,7 +17,7 @@ rules:
     labels:
       homelab: "true"
       system: "tatara"
-      component: "wrapper"
+      component: "operator"
       severity: "warning"
   - name: "Tatara operator error log burst"
     queries:

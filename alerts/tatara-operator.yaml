@@ -296,6 +296,57 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "warning"
+  # Disarm path: an incomplete/hard-failed change (ChangeSummary.RemainingScope
+  # non-empty) must be disarmed (auto-merge disabled, label removed, PR closed)
+  # before the Task fails. These two results cover the disarm outcome, distinct
+  # from the skip_4xx writeback-404-loop rule above.
+  - name: "Operator failed to disarm an incomplete change"
+    queries:
+      - expression: |
+          sum(increase(operator_writeback_outcome_total{namespace="tatara",job="tatara-operator",result="disarm_failed"}[15m]))
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator failed to disarm (close/remove auto-merge label from) {{ index $values \"C\" }} incomplete-change PR(s) in 15m after exhausting its retry budget. The PR may still auto-merge with unreviewed/incomplete code; check ChangeSummary.RemainingScope and the disarm retry logs."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  - name: "Operator detected an incomplete change that already merged"
+    queries:
+      - expression: |
+          sum(increase(operator_writeback_outcome_total{namespace="tatara",job="tatara-operator",result="disarm_merged"}[15m]))
+    math_operator: ">"
+    threshold: 0
+    for: 1m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator found {{ index $values \"C\" }} incomplete-change PR(s) already merged in 15m before it could disarm them. Unreviewed/incomplete code has likely already shipped via the semver push-CD pipeline; needs immediate human attention to assess blast radius."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  # Sibling-PR-links sync sweep give-up: lower severity, informational/degraded-
+  # state (companion-PR cross-links may go stale), not a shipped-code risk.
+  - name: "Operator sibling-links sync permanently capped"
+    queries:
+      - expression: |
+          sum(increase(operator_writeback_outcome_total{namespace="tatara",job="tatara-operator",result="links_sync_capped"}[1h]))
+    math_operator: ">"
+    threshold: 0
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator permanently gave up syncing sibling-PR links {{ index $values \"C\" }} time(s) in 1h (links_sync_capped, retry cap reached). Cross-links between companion PRs across repos may be stale or missing; degraded but non-blocking."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
   # ----------------------------------------------------------------------------
   # Memory stacks + lightrag: a Failed per-project memory stack blocks its agents.
   # ----------------------------------------------------------------------------

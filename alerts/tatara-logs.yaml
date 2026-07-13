@@ -36,6 +36,27 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "warning"
+  # Contract K.3: the operator logs action=approval_verified / action=approval_refused to
+  # its own stdout precisely so the C.6 approval gate becomes alertable at Loki retention
+  # instead of the Task's TTL. Agent pods are NOT Loki-scraped; this selects the operator's
+  # stream and only the operator's stream.
+  - name: "Tatara approval refusals elevated"
+    queries:
+      - expression: |
+          sum by (reason) (count_over_time({namespace="tatara", app="tatara-operator"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | action="approval_refused" [15m]))
+        datasource_uid: "efihqbqlmroqod"
+        query_type: "loki"
+    math_operator: ">"
+    threshold: 5
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator refused {{ index $values \"C\" }} approval attempt(s) in 15m (reason={{ index $labels \"reason\" }}). The approval gate matches the most recent MAINTAINER comment's text against Project.spec.scm.approvalPhrases, with the bot structurally excluded and the evidence single-use. A burst means either a maintainer is repeatedly phrasing approval in a way the wordlist does not match, or something is trying to force the gate."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
   - name: "Tatara memory error log burst"
     queries:
       - expression: |
@@ -52,21 +73,4 @@ rules:
       homelab: "true"
       system: "tatara"
       component: "memory"
-      severity: "warning"
-  - name: "Tatara chat error log burst"
-    queries:
-      - expression: |
-          sum(count_over_time({namespace="tatara", app="tatara-chat"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | level="ERROR" [5m]))
-        datasource_uid: "efihqbqlmroqod"
-        query_type: "loki"
-    math_operator: ">"
-    threshold: 20
-    for: 5m
-    decimal_points: 0
-    annotations:
-      summary: "tatara-chat logged {{ index $values \"C\" }} ERROR lines in 5m (>20). Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-chat\"} | json | level=\"ERROR\"."
-    labels:
-      homelab: "true"
-      system: "tatara"
-      component: "chat"
       severity: "warning"

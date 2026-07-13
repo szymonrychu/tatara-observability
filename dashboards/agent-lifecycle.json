@@ -12,6 +12,7 @@
       }
     ]
   },
+  "description": "Task 9 (2026-07-12): the old issueLifecycle FSM (tatara_lifecycle_state/tatara_lifecycle_transition_total/tatara_lifecycle_seconds/tatara_mrci_wait_seconds/tatara_lifecycle_giveup_total/tatara_lifecycle_handover_total/tatara_lifecycle_idle_stop_total/tatara_lifecycle_implement_empty_retry_total) dies WITH the task-centric redesign (contract L.1) and none of it is on scripts/metrics_allowlist.txt. Every panel below is repointed onto the new Task stage machine (operator_task_stage, operator_task_stage_age_seconds, operator_task_parked_total, operator_agent_pod_ttl_expired_total) where a successor metric exists; three panels with no successor (transition rate, full-lifecycle latency, MRCI wait) were deleted outright rather than left querying a dead metric. CROSS-REPO DEPENDENCY D1 (operator_task_terminal_total surviving with stage+stageReason+kind replacing phase) is UNVERIFIED as of this edit - the operator worktree has not landed the swap (internal/obs/task_metrics.go:31-33 still declares kind,phase,reason). The Terminal Task Outcomes panels are written on the D1 assumption; re-verify against the merged operator before this ships.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -20,7 +21,7 @@
   "panels": [
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Current task count in each issueLifecycle state (tatara_lifecycle_state). Fleet-wide: the operator emits this with no project label. The state enum is dynamic (Triage, Conversation, Implement, MRCI, MainCI, Merge, Deploying, Done, Parked, Stopped); the terminal buckets Stopped and Parked normally dominate by orders of magnitude, so each state is shown as its own stat tile rather than a shared axis.",
+      "description": "Current Task count in each stage (operator_task_stage). Successor to tatara_lifecycle_state, which the task-centric redesign deletes along with the whole issueLifecycle FSM (contract L.1). The stage enum is the closed set in contract F.1 (triaging, brainstorming, clarifying, investigating, refining, approved, implementing, reviewing, merging, deploying, delivered, documenting, and the terminals rejected, failed, parked); terminal stages normally dominate by orders of magnitude, so each stage is shown as its own stat tile rather than a shared axis.",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "palette-classic"},
@@ -52,18 +53,18 @@
         {
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "editorMode": "code",
-          "expr": "sum by (state) (tatara_lifecycle_state)",
+          "expr": "sum by (stage) (operator_task_stage)",
           "instant": true,
-          "legendFormat": "{{state}}",
+          "legendFormat": "{{stage}}",
           "refId": "A"
         }
       ],
-      "title": "Current Tasks per Lifecycle State",
+      "title": "Current Tasks per Stage",
       "type": "stat"
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Active (non-terminal) lifecycle states over time. Excludes the Stopped, Parked and Done terminal buckets, which dominate the totals and would flatten the live funnel; this is a readability filter, not a hardcoded enum.",
+      "description": "Active (non-terminal) stages over time. Excludes the rejected, failed and parked terminals (contract F.1), which dominate the totals and would flatten the live funnel; this is a readability filter, not a hardcoded enum. Successor to the tatara_lifecycle_state active-states panel.",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "palette-classic"},
@@ -109,17 +110,17 @@
         {
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "editorMode": "code",
-          "expr": "sum by (state) (tatara_lifecycle_state{state!~\"Stopped|Parked|Done\"})",
-          "legendFormat": "{{state}}",
+          "expr": "sum by (stage) (operator_task_stage{stage!~\"rejected|failed|parked\"})",
+          "legendFormat": "{{stage}}",
           "refId": "A"
         }
       ],
-      "title": "Active Lifecycle States Over Time",
+      "title": "Active Stages Over Time",
       "type": "timeseries"
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Per-second rate of state transitions in the issueLifecycle FSM, keyed by from and to. An empty from is the initial entry into the funnel (to Triage, or to MRCI for a fast-path Task). Rate window 5m is safe against the 60s max scrape interval.",
+      "description": "Per-second rate of Task exception events over a 15m window: parked (any stageReason - the successor to the old give-up counter) and agent-pod TTL expiry broken out by outcome (agent_handoff, synthetic_handoff, force_deleted - contract G.7, the successor to the old handover counter). tatara_lifecycle_idle_stop_total and tatara_lifecycle_implement_empty_retry_total have no successor metric in the task-centric redesign (contract K.1) and are dropped rather than mapped onto something that isn't equivalent.",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "palette-classic"},
@@ -147,62 +148,6 @@
           "mappings": [],
           "min": 0,
           "unit": "cps",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [{"color": "green", "value": null}]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
-      "id": 3,
-      "options": {
-        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
-        "tooltip": {"mode": "multi", "sort": "desc"}
-      },
-      "pluginVersion": "11.0.0",
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "editorMode": "code",
-          "expr": "sum by (from, to) (rate(tatara_lifecycle_transition_total[5m]))",
-          "legendFormat": "{{from}} to {{to}}",
-          "refId": "A"
-        }
-      ],
-      "title": "Lifecycle Transition Rate (from to)",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Full-lifecycle latency: seconds from issue-open to Done (tatara_lifecycle_seconds histogram). p50 and p95 over a 1h rate window. An idle service yields NaN (no samples), rendered as a gap rather than a zero.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "palette-classic"},
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {"type": "linear"},
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {"group": "A", "mode": "none"},
-            "thresholdsStyle": {"mode": "off"}
-          },
-          "mappings": [],
-          "min": 0,
-          "unit": "s",
           "thresholds": {
             "mode": "absolute",
             "steps": [{"color": "green", "value": null}]
@@ -211,132 +156,6 @@
         "overrides": []
       },
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14},
-      "id": 4,
-      "options": {
-        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
-        "tooltip": {"mode": "multi", "sort": "desc"}
-      },
-      "pluginVersion": "11.0.0",
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "editorMode": "code",
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(tatara_lifecycle_seconds_bucket[1h])))",
-          "legendFormat": "p50",
-          "refId": "A"
-        },
-        {
-          "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(tatara_lifecycle_seconds_bucket[1h])))",
-          "legendFormat": "p95",
-          "refId": "B"
-        }
-      ],
-      "title": "Full-Lifecycle Latency (issue open to Done)",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Time a Task waits in the MRCI (merge-request CI) gate (tatara_mrci_wait_seconds histogram). p50 and p95 over a 15m rate window. NaN over an idle window renders as a gap.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "palette-classic"},
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {"type": "linear"},
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {"group": "A", "mode": "none"},
-            "thresholdsStyle": {"mode": "off"}
-          },
-          "mappings": [],
-          "min": 0,
-          "unit": "s",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [{"color": "green", "value": null}]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14},
-      "id": 5,
-      "options": {
-        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
-        "tooltip": {"mode": "multi", "sort": "desc"}
-      },
-      "pluginVersion": "11.0.0",
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "editorMode": "code",
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(tatara_mrci_wait_seconds_bucket[15m])))",
-          "legendFormat": "p50",
-          "refId": "A"
-        },
-        {
-          "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(tatara_mrci_wait_seconds_bucket[15m])))",
-          "legendFormat": "p95",
-          "refId": "B"
-        }
-      ],
-      "title": "MRCI Wait Latency",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Per-second rate of lifecycle exception events over a 15m window: give-up (task abandoned the funnel), handover (re-queued to a fresh pod), idle-stop (stopped for inactivity) and implement-empty-retry (Implement produced no PR and was re-prompted). Each is a distinct counter, aggregated fleet-wide.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "palette-classic"},
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {"type": "linear"},
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {"group": "A", "mode": "none"},
-            "thresholdsStyle": {"mode": "off"}
-          },
-          "mappings": [],
-          "min": 0,
-          "unit": "cps",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [{"color": "green", "value": null}]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 22},
       "id": 6,
       "options": {
         "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
@@ -347,38 +166,178 @@
         {
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "editorMode": "code",
-          "expr": "sum (rate(tatara_lifecycle_giveup_total[15m]))",
-          "legendFormat": "give-up",
+          "expr": "sum (rate(operator_task_parked_total[15m]))",
+          "legendFormat": "parked",
           "refId": "A"
         },
         {
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "editorMode": "code",
-          "expr": "sum (rate(tatara_lifecycle_handover_total[15m]))",
-          "legendFormat": "handover",
+          "expr": "sum by (outcome) (rate(operator_agent_pod_ttl_expired_total[15m]))",
+          "legendFormat": "pod ttl / {{outcome}}",
           "refId": "B"
-        },
-        {
-          "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "editorMode": "code",
-          "expr": "sum (rate(tatara_lifecycle_idle_stop_total[15m]))",
-          "legendFormat": "idle-stop",
-          "refId": "C"
-        },
-        {
-          "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "editorMode": "code",
-          "expr": "sum (rate(tatara_lifecycle_implement_empty_retry_total[15m]))",
-          "legendFormat": "empty-retry",
-          "refId": "D"
         }
       ],
-      "title": "Lifecycle Exceptions (rate/15m)",
+      "title": "Task Exceptions (rate/15m)",
       "type": "timeseries"
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Give-up rate broken out by reason label (e.g. maxIterations, duplicate-merged-change, refused-already-done). Surfaces which failure mode is driving abandonment out of the funnel.",
+      "description": "Park rate broken out by stageReason (contract F.5's closed set, e.g. turn-budget-exhausted, review-loop-exhausted, admission-starved). Successor to the give-up-by-reason panel; unfiltered, so it includes the benign backlog-sweep and awaiting-human reasons the 'Operator task park spike' alert deliberately excludes.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "min": 0,
+          "unit": "cps",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "green", "value": null}]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14},
+      "id": 7,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (stageReason) (rate(operator_task_parked_total[15m]))",
+          "legendFormat": "{{stageReason}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Parks by Reason (rate/15m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Terminal Task outcomes (operator_task_terminal_total) broken down by kind, stage (delivered|rejected|failed|parked, contract F.1) and stageReason (contract F.5). Cumulative counts since the operator last restarted. Filter with the Kind variable. This is the stage/stageReason count breakdown, distinct from the token-cost operator_task_terminal_tokens_total series on the Task Delivery dashboard. CROSS-REPO DEPENDENCY D1 (UNVERIFIED as of 2026-07-12): assumes operator_task_terminal_total survives with stage+stageReason+kind replacing the old kind,phase,reason label set.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "custom": {
+            "align": "auto",
+            "cellOptions": {"type": "auto"},
+            "filterable": true,
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "green", "value": null}]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "stage"},
+            "properties": [
+              {"id": "custom.width", "value": 110},
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "failed": {"color": "red", "index": 1, "text": "failed"},
+                      "rejected": {"color": "red", "index": 2, "text": "rejected"},
+                      "parked": {"color": "yellow", "index": 3, "text": "parked"},
+                      "delivered": {"color": "green", "index": 0, "text": "delivered"}
+                    },
+                    "type": "value"
+                  }
+                ]
+              },
+              {"id": "custom.cellOptions", "value": {"type": "color-background"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "kind"},
+            "properties": [{"id": "custom.width", "value": 150}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "Count"},
+            "properties": [
+              {"id": "unit", "value": "short"},
+              {"id": "custom.width", "value": 90},
+              {"id": "custom.cellOptions", "value": {"type": "color-background", "mode": "gradient"}}
+            ]
+          }
+        ]
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 22},
+      "id": 8,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {"countRows": false, "fields": ["Count"], "reducer": ["sum"], "show": true},
+        "showHeader": true,
+        "sortBy": [{"desc": true, "displayName": "Count"}]
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum by (kind, stage, stageReason) (operator_task_terminal_total{kind=~\"$kind\"})",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ],
+      "title": "Terminal Task Outcomes",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "container": true,
+              "endpoint": true,
+              "instance": true,
+              "job": true,
+              "namespace": true,
+              "pod": true,
+              "service": true
+            },
+            "includeByName": {},
+            "indexByName": {"kind": 0, "stage": 1, "stageReason": 2},
+            "renameByName": {"Value": "Count"}
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Per-second rate of Tasks reaching a terminal stage, split by kind and stage (delivered|rejected|failed|parked), over a 15m window. Filter with the Kind variable. A rising failed/rejected rate is the funnel-failure signal to watch. CROSS-REPO DEPENDENCY D1 (UNVERIFIED as of 2026-07-12) applies here the same as the table above.",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "palette-classic"},
@@ -414,158 +373,6 @@
         "overrides": []
       },
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 22},
-      "id": 7,
-      "options": {
-        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
-        "tooltip": {"mode": "multi", "sort": "desc"}
-      },
-      "pluginVersion": "11.0.0",
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "editorMode": "code",
-          "expr": "sum by (reason) (rate(tatara_lifecycle_giveup_total[15m]))",
-          "legendFormat": "{{reason}}",
-          "refId": "A"
-        }
-      ],
-      "title": "Give-ups by Reason (rate/15m)",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Terminal Task outcomes (operator_task_terminal_total) broken down by kind, phase (Succeeded/Failed) and reason. Cumulative counts since the operator last restarted. Filter with the Kind variable. This is the phase/reason count breakdown, distinct from the token-cost operator_task_terminal_tokens_total series on the Task Delivery dashboard.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "thresholds"},
-          "custom": {
-            "align": "auto",
-            "cellOptions": {"type": "auto"},
-            "filterable": true,
-            "inspect": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [{"color": "green", "value": null}]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {"id": "byName", "options": "phase"},
-            "properties": [
-              {"id": "custom.width", "value": 110},
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "Failed": {"color": "red", "index": 1, "text": "Failed"},
-                      "Succeeded": {"color": "green", "index": 0, "text": "Succeeded"}
-                    },
-                    "type": "value"
-                  }
-                ]
-              },
-              {"id": "custom.cellOptions", "value": {"type": "color-background"}}
-            ]
-          },
-          {
-            "matcher": {"id": "byName", "options": "kind"},
-            "properties": [{"id": "custom.width", "value": 150}]
-          },
-          {
-            "matcher": {"id": "byName", "options": "Count"},
-            "properties": [
-              {"id": "unit", "value": "short"},
-              {"id": "custom.width", "value": 90},
-              {"id": "custom.cellOptions", "value": {"type": "color-background", "mode": "gradient"}}
-            ]
-          }
-        ]
-      },
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 30},
-      "id": 8,
-      "options": {
-        "cellHeight": "sm",
-        "footer": {"countRows": false, "fields": ["Count"], "reducer": ["sum"], "show": true},
-        "showHeader": true,
-        "sortBy": [{"desc": true, "displayName": "Count"}]
-      },
-      "pluginVersion": "11.0.0",
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "editorMode": "code",
-          "expr": "sum by (kind, phase, reason) (operator_task_terminal_total{kind=~\"$kind\"})",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "__auto",
-          "refId": "A"
-        }
-      ],
-      "title": "Terminal Task Outcomes",
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "__name__": true,
-              "container": true,
-              "endpoint": true,
-              "instance": true,
-              "job": true,
-              "namespace": true,
-              "pod": true,
-              "service": true
-            },
-            "includeByName": {},
-            "indexByName": {"kind": 0, "phase": 1, "reason": 2},
-            "renameByName": {"Value": "Count"}
-          }
-        }
-      ],
-      "type": "table"
-    },
-    {
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Per-second rate of Tasks reaching a terminal phase, split by kind and phase (Succeeded/Failed), over a 15m window. Filter with the Kind variable. A rising Failed rate is the funnel-failure signal to watch.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "palette-classic"},
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {"type": "linear"},
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {"group": "A", "mode": "none"},
-            "thresholdsStyle": {"mode": "off"}
-          },
-          "mappings": [],
-          "min": 0,
-          "unit": "cps",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [{"color": "green", "value": null}]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 30},
       "id": 9,
       "options": {
         "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
@@ -576,8 +383,8 @@
         {
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "editorMode": "code",
-          "expr": "sum by (kind, phase) (rate(operator_task_terminal_total{kind=~\"$kind\"}[15m]))",
-          "legendFormat": "{{kind}} {{phase}}",
+          "expr": "sum by (kind, stage) (rate(operator_task_terminal_total{kind=~\"$kind\"}[15m]))",
+          "legendFormat": "{{kind}} {{stage}}",
           "refId": "A"
         }
       ],

@@ -49,3 +49,44 @@ Planned work not yet started. Move items out when shipped (note in MEMORY.md if 
   tatara-helmfile), confirm the exact scraped names for `claude_code_cost_usage` /
   `claude_code_api_error{status_code}` and fix the two OTel panels + the 429 alert rule if the
   collector's naming differs from the plan's assumed Prometheus-normalized form.
+- `shipped` (2026-07-12): the observability half of the task-centric redesign
+  (`docs/superpowers/plans/2026-07-12-task-centric-observability.md`). `tatara-cd.yaml` (6 rules) and
+  `tatara-operator.yaml` (52 rules) re-expressed on the stage/park metric surface; `tatara-chat.yaml` +
+  `dashboards/chat.json` + their terraform resource + the chat log-burst rule deleted;
+  `dashboards/operator.json` + `dashboards/agent-lifecycle.json` repointed;
+  `scripts/check_metric_provenance.py` + `scripts/metrics_allowlist.txt` +
+  `scripts/stage_values_allowlist.txt` wired into CI as a new build-failure guardrail. See MEMORY.md
+  2026-07-12 (the dead-alert class entry) for the full account.
+- `planned`, OPEN before the release train ships (D1, see MEMORY.md 2026-07-12): re-verify
+  `operator_task_terminal_total` survives the operator redesign with `phase` swapped for `stage` +
+  `stageReason` + `kind`. As of this PR the operator worktree still declares the OLD `{kind,phase,reason}`
+  label set (`internal/obs/task_metrics.go:31-33`) - several `tatara-cd.yaml`/`tatara-operator.yaml`
+  rules and both repointed dashboards are built on an UNVERIFIED assumption. Re-run Task 2 step 3's
+  grep against the actual merged operator branch before cutover; if the metric or its labels differ,
+  every rule built on it changes in the same PR (Task 6's documented fallback).
+- `planned`: threshold/config coupling not enforced by anything mechanical - the agent-pod saturation
+  threshold (`alerts/tatara-operator.yaml`, `5.999` = `2 x maxConcurrentAgents`) hardcodes
+  `tatara-helmfile`'s `maxConcurrentAgents: 3` on both Projects. Bumping `maxConcurrentAgents` in
+  helmfile REQUIRES bumping this threshold in the SAME change, or the rule silently stops meaning what
+  its summary claims. No CI check ties the two repos together on this value; consider one if
+  `maxConcurrentAgents` starts changing often.
+- `planned`: `alerts/tatara-quality.yaml` and `alerts/tatara-usage-gate.yaml` were not audited against
+  the task-centric redesign (Task 10 follow-up). They read token/model series, which are unchanged, but
+  nobody has confirmed the `tatara-quality` rubber-stamp rule still has a producer once the review
+  verdict moves to `submit_outcome` (contract). Audit both files against the merged operator branch in
+  the same pass as the D1 re-verification above.
+- `shipped` (2026-07-13): DASHBOARD-SIDE half of the metric-provenance guardrail.
+  `scripts/check_metric_provenance.py` now walks `dashboards/*.json` as well as `alerts/*.yaml`
+  (panel targets, row-collapsed sub-panel targets, and `templating.list[]` PromQL variables; loki
+  targets skipped by `datasource.type`), the closed-set label sweep is now metric-aware, the ~50
+  live dashboard-only metric names are backfilled into `scripts/metrics_allowlist.txt` per producing
+  service, and the dead-metric panels in `operator.json` / `task-delivery.json` / `wrapper.json` are
+  repointed or deleted. CI runs it on `dashboards/**` too. See MEMORY.md 2026-07-13.
+- `planned`: run the post-apply verification in
+  `docs/superpowers/plans/2026-07-12-task-centric-observability.md` ("Post-apply verification
+  (cutover step 8c, contract H.3)") after `tatara-helmfile` applies the new operator. Pure runtime
+  check via the Grafana MCP server (`grafana-debugging-start`) - no repo artefact to land, nothing to
+  build now: (1) every rule in `tatara-operator`/`tatara-cd`/`tatara-logs` must read `Normal` or
+  `Firing`, never silently `NoData`; (2) `Operator sweep heartbeat stale` must be `Normal`, not
+  `NoData`; (3) `sum(increase(operator_agent_contract_mismatch_total[1h]))` must be `0`. A `NoData`
+  hit on a K.1 metric means the operator PR is incomplete, not that this repo's alerts are wrong.

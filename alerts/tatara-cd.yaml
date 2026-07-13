@@ -1,43 +1,119 @@
 ---
+# Semver push-CD health, re-expressed on the task-centric stage machine (2026-07-12).
+#
+# The old rules read tatara_cd_cascade_failed / tatara_cd_cascade_stalled, gauges derived
+# from Task.status.cascadeStage. The redesign DELETES cascadeStage. Because every alert
+# file sets default_no_data_state: "OK", those rules would not have fired and would not
+# have gone stale - they would have reported OK forever, leaving the merge/deploy path to
+# a cluster-admin-scoped runner with zero alert coverage. See CROSS-REPO-CONTRACT K.
+#
+# The delivery path is now: implementing -> reviewing -> merging -> deploying -> delivered.
+# The operator merges each repo in Task.spec.mergeOrder sequentially against the reviewed
+# head SHA (contract C.5), persisting its position in status.mergeCursor. Stage budgets
+# (contract F.4): merging 4h -> parked(merge-timeout); deploying 2h -> parked(deploy-timeout).
+#
+# These rules page BEFORE the stage budget elapses, so a human sees a wedged deploy while it
+# is still a deploy and not yet a park. The park counter below is the backstop that catches
+# the case where they missed it.
 interval_seconds: 60
 default_no_data_state: "OK"
 rules:
-  # ----------------------------------------------------------------------------
-  # Semver push-CD cascade health. The operator (G5) emits these leader-only
-  # gauges to flag a deploy cascade that broke or wedged on its way from a merged
-  # component PR to a tatara-helmfile apply. A firing rule routes (system=tatara
-  # + critical) to the operator incident webhook, mirroring the internal-issue
-  # escalation: a CD cascade that is not delivering code to the cluster is a
-  # platform-level outage of the delivery path. Leader-only -> max() picks the
-  # leader's value; `or vector(0)` keeps the rule defined when the operator (and
-  # thus the series) is gone, deferring the full-outage page to the operator-down
-  # rules in tatara-operator.yaml.
-  # ----------------------------------------------------------------------------
-  - name: "Tatara CD cascade failed"
+  - name: "Tatara delivery parked on a merge or deploy timeout"
     queries:
       - expression: |
-          max(tatara_cd_cascade_failed{namespace="tatara",job="tatara-operator"}) or vector(0)
+          sum by (stageReason) (increase(operator_task_parked_total{namespace="tatara",job="tatara-operator",stageReason=~"merge-timeout|deploy-timeout"}[30m])) or vector(0)
     math_operator: ">"
     threshold: 0
     for: 5m
     decimal_points: 0
     annotations:
-      summary: "{{ index $values \"C\" }} semver push-CD cascade(s) are in a FAILED state. A deploy stage broke (red required check, failed build, wrapper build-guard rejection, un-mergeable bump PR, or a helmfile apply error) and bounded recovery has not cleared it. Merged component code is NOT reaching the cluster; check the operator cd-cascade Tasks and the tatara-helmfile cd/deploy-train PR."
+      summary: "{{ index $values \"C\" }} Task(s) parked with stageReason={{ index $labels \"stageReason\" }} in 30m. A merge or deploy stage blew its budget (merging 4h, deploying 2h) and the Task was parked. Merged component code is NOT reaching the cluster. Un-parking re-enters merging/deploying cursor-resumed (contract F.6), it never re-enters implementing - so check the owned MergeRequest CRs and the tatara-helmfile apply run, not the agent."
     labels:
       homelab: "true"
       system: "tatara"
       component: "cd"
       severity: "critical"
-  - name: "Tatara CD cascade stalled"
+  - name: "Tatara merge stage wedged"
     queries:
       - expression: |
-          max(tatara_cd_cascade_stalled{namespace="tatara",job="tatara-operator"}) or vector(0)
+          max by (task) (operator_task_stage_age_seconds{namespace="tatara",job="tatara-operator",stage="merging"})
     math_operator: ">"
-    threshold: 0
+    threshold: 7200
     for: 10m
     decimal_points: 0
     annotations:
-      summary: "{{ index $values \"C\" }} semver push-CD cascade(s) have STALLED past the Deploying deadline with no live watcher (cdScan backstop trip). The deploy train is wedged: a bump/merge/apply hop never completed and no agent is driving it. Merged component code is NOT reaching the cluster; inspect the stalled cd-cascade Task and the tatara-helmfile apply run."
+      summary: "Task {{ index $labels \"task\" }} has been in stage=merging for {{ index $values \"C\" }}s (>2h, half the 4h budget). The sequential merge over spec.mergeOrder has stopped advancing: a required check is red, the reviewed head SHA moved (409 -> stage reverts to reviewing), or the forge is refusing the merge. It parks at 4h."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "cd"
+      severity: "warning"
+  - name: "Tatara deploy stage wedged"
+    queries:
+      - expression: |
+          max by (task) (operator_task_stage_age_seconds{namespace="tatara",job="tatara-operator",stage="deploying"})
+    math_operator: ">"
+    threshold: 3600
+    for: 10m
+    decimal_points: 0
+    annotations:
+      summary: "Task {{ index $labels \"task\" }} has been in stage=deploying for {{ index $values \"C\" }}s (>1h, half the 2h budget). The merged code is not reaching the cluster: the component release job, the pin propagation, or the tatara-helmfile apply has not completed. It parks at 2h."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "cd"
+      severity: "critical"
+  - name: "Tatara merge cursor stalled"
+    queries:
+      - expression: |
+          max by (task, repo) (operator_merge_cursor_stalled_seconds{namespace="tatara",job="tatara-operator"})
+    math_operator: ">"
+    threshold: 3600
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "Task {{ index $labels \"task\" }} merge cursor has not advanced past repo {{ index $labels \"repo\" }} for {{ index $values \"C\" }}s (>1h). The sequential merge is blocked on ONE repo in spec.mergeOrder, so every repo behind it in the order is blocked too. There is no lexical default for mergeOrder (contract A.4): if the order is wrong, the dependency it encodes is wrong."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "cd"
+      severity: "warning"
+  # v6 addition (fix M3-9). reviewing <-> merging on a moved head is the FOURTH
+  # cycle in the F.4 cycle-cap table and the ONLY one that spawns a review pod
+  # every lap: merging -> reviewing on a moved head does NOT touch mergeReentries
+  # (only the parked path does), so nothing else in this file would catch it
+  # accruing cost. headMoveReentries caps at 3 -> failed(head-moving).
+  - name: "Tatara merge head kept moving"
+    queries:
+      - expression: |
+          sum(increase(operator_task_terminal_total{namespace="tatara",job="tatara-operator",stage="failed",stageReason="head-moving"}[1h])) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator failed {{ index $values \"C\" }} Task(s) in 1h with stageReason=head-moving - the reviewed PR's head kept moving across 3 reviewing<->merging laps, spawning a fresh review pod every time before giving up. Check for a human pushing to the branch or a flapping CI autocommit on the PR."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "cd"
+      severity: "warning"
+  # v6 / K.2 minimum alert set: "merge / deploy BLOCKED (WARNING)". K.2's own text
+  # names the query as operator_task_parked_total{stageReason=~"merge-blocked|
+  # deploy-blocked"} - that query can never fire. F.3 defines both reasons as
+  # FAILED terminals (mergeReentries/deployReentries > 3, fix H7); parked only
+  # ever carries merge-timeout/deploy-timeout (the F.4 budget table). Implemented
+  # here against operator_task_terminal_total instead - see the v6 + v7 delta section.
+  - name: "Tatara merge or deploy cycle exhausted"
+    queries:
+      - expression: |
+          sum by (stageReason) (increase(operator_task_terminal_total{namespace="tatara",job="tatara-operator",stage="failed",stageReason=~"merge-blocked|deploy-blocked"}[1h])) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "{{ index $values \"C\" }} Task(s) failed with stageReason={{ index $labels \"stageReason\" }} in 1h - the merge or deploy stage re-entered parked(merge-timeout|deploy-timeout) more than 3 times (fix H7) and gave up permanently. The delivery path to a cluster-admin-scoped runner has stopped, not just slowed."
     labels:
       homelab: "true"
       system: "tatara"

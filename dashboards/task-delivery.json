@@ -20,7 +20,7 @@
   "panels": [
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "All open issues tracked by the tatara operator. project=tatara -> GitHub; project=infrastructure -> GitLab. Click an issue number for the per-platform link.",
+      "description": "Every live Task, the stage it is in, and how long it has been sitting there (worst first). Replaces the old Open Issues table, which read tatara_issue_state - the per-issue gauge of the issueLifecycle machine, which the task-centric redesign deletes (contract L.1). CONTRACT GAP: K.1 labels operator_task_stage_age_seconds with {task,stage,kind} only - no project/repo/issue - so this board can no longer link a row to its SCM issue, nor filter by project. The Task name is the only handle it has.",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "thresholds"},
@@ -34,91 +34,48 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [{"color": "green", "value": null}]
-          }
+          },
+          "unit": "s"
         },
         "overrides": [
           {
-            "matcher": {"id": "byName", "options": "issue"},
-            "properties": [
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "targetBlank": true,
-                    "title": "GitHub",
-                    "url": "https://github.com/szymonrychu/${__data.fields.repo}/issues/${__data.fields.number}"
-                  },
-                  {
-                    "targetBlank": true,
-                    "title": "GitLab",
-                    "url": "https://gitlab.com/szymonrychu/${__data.fields.repo}/-/issues/${__data.fields.number}"
-                  }
-                ]
-              }
-            ]
-          },
-          {
-            "matcher": {"id": "byName", "options": "incident"},
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 90
-              },
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "false": {"color": "blue", "index": 0, "text": "no"},
-                      "true": {"color": "red", "index": 1, "text": "INCIDENT"}
-                    },
-                    "type": "value"
-                  }
-                ]
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {"type": "color-background"}
-              }
-            ]
-          },
-          {
-            "matcher": {"id": "byName", "options": "state"},
+            "matcher": {"id": "byName", "options": "stage"},
             "properties": [
               {
                 "id": "mappings",
                 "value": [
                   {
                     "options": {
-                      "awaiting-approval": {"color": "orange", "index": 1, "text": "awaiting-approval"},
-                      "implementing": {"color": "green", "index": 2, "text": "implementing"},
-                      "main-ci": {"color": "dark-blue", "index": 5, "text": "main-ci"},
-                      "merging": {"color": "purple", "index": 4, "text": "merging"},
-                      "mr-ci": {"color": "blue", "index": 3, "text": "mr-ci"},
-                      "reviewing": {"color": "cyan", "index": 6, "text": "reviewing"},
-                      "triage": {"color": "yellow", "index": 0, "text": "triage"}
+                      "approved": {"color": "green", "index": 5, "text": "approved"},
+                      "brainstorming": {"color": "yellow", "index": 1, "text": "brainstorming"},
+                      "clarifying": {"color": "yellow", "index": 2, "text": "clarifying"},
+                      "delivered": {"color": "dark-green", "index": 10, "text": "delivered"},
+                      "deploying": {"color": "dark-blue", "index": 9, "text": "deploying"},
+                      "documenting": {"color": "blue", "index": 11, "text": "documenting"},
+                      "failed": {"color": "red", "index": 13, "text": "failed"},
+                      "implementing": {"color": "green", "index": 6, "text": "implementing"},
+                      "investigating": {"color": "orange", "index": 3, "text": "investigating"},
+                      "merging": {"color": "purple", "index": 8, "text": "merging"},
+                      "parked": {"color": "red", "index": 14, "text": "parked"},
+                      "refining": {"color": "yellow", "index": 4, "text": "refining"},
+                      "rejected": {"color": "red", "index": 12, "text": "rejected"},
+                      "reviewing": {"color": "cyan", "index": 7, "text": "reviewing"},
+                      "triaging": {"color": "blue", "index": 0, "text": "triaging"}
                     },
                     "type": "value"
                   }
                 ]
               },
-              {
-                "id": "custom.cellOptions",
-                "value": {"type": "color-background"}
-              }
+              {"id": "custom.cellOptions", "value": {"type": "color-background"}}
             ]
           },
           {
             "matcher": {"id": "byName", "options": "kind"},
-            "properties": [
-              {"id": "custom.width", "value": 130}
-            ]
+            "properties": [{"id": "custom.width", "value": 130}]
           },
           {
-            "matcher": {"id": "byName", "options": "project"},
-            "properties": [
-              {"id": "custom.width", "value": 110}
-            ]
+            "matcher": {"id": "byName", "options": "task"},
+            "properties": [{"id": "custom.width", "value": 320}]
           }
         ]
       },
@@ -128,50 +85,29 @@
         "cellHeight": "sm",
         "footer": {"countRows": false, "fields": "", "reducer": ["sum"], "show": false},
         "showHeader": true,
-        "sortBy": [{"desc": false, "displayName": "state"}]
+        "sortBy": [{"desc": true, "displayName": "stage age"}]
       },
       "pluginVersion": "11.0.0",
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "editorMode": "code",
-          "expr": "tatara_issue_state{project=~\"$project\", state=~\"$state\"}",
+          "expr": "max by (task, stage, kind) (operator_task_stage_age_seconds{stage=~\"$stage\"})",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
           "refId": "A"
         }
       ],
-      "title": "Open Issues",
+      "title": "Open Tasks by Stage (age in stage, worst first)",
       "transformations": [
-        {
-          "id": "extractFields",
-          "options": {
-            "format": "regex",
-            "regExp": "[#!](?<number>\\d+)$",
-            "source": "issue",
-            "replace": false
-          }
-        },
         {
           "id": "organize",
           "options": {
-            "excludeByName": {
-              "Time": true,
-              "Value": true,
-              "__name__": true,
-              "number": true
-            },
+            "excludeByName": {"Time": true, "__name__": true},
             "includeByName": {},
-            "indexByName": {
-              "incident": 5,
-              "issue": 2,
-              "kind": 3,
-              "project": 0,
-              "repo": 1,
-              "state": 4
-            },
-            "renameByName": {}
+            "indexByName": {"Value": 3, "kind": 1, "stage": 2, "task": 0},
+            "renameByName": {"Value": "stage age"}
           }
         }
       ],
@@ -335,7 +271,7 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Number of in-flight Tasks by kind. Distinguishes incident, issueLifecycle (improvements/features), and review Tasks over time.",
+      "description": "Active (non-terminal, non-delivered) Tasks by origin kind, against the number of agent pods actually running. Replaces the old in-flight-Task gauge (tatara_tasks_inflight), which the redesign deletes: a Task is now long-lived and a running pod is the scarce resource, so a Task count and a pod count are different questions (contract K.2 says exactly this - re-express against operator_task_stage and the agent-pod count, never the Task count). Tasks well above pods means work is queued or parked, not running.",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "palette-classic"},
@@ -386,12 +322,19 @@
         {
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "editorMode": "code",
-          "expr": "sum by(kind) (tatara_tasks_inflight)",
-          "legendFormat": "{{kind}}",
+          "expr": "sum by(kind) (operator_task_stage{stage!~\"delivered|rejected|failed|parked\"})",
+          "legendFormat": "{{kind}} (tasks)",
           "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "editorMode": "code",
+          "expr": "sum(kube_pod_container_status_running{namespace=\"tatara\",container=\"wrapper\"}) or vector(0)",
+          "legendFormat": "agent pods running",
+          "refId": "B"
         }
       ],
-      "title": "Inflight Work by Kind",
+      "title": "Active Work by Kind, and Running Agent Pods",
       "type": "timeseries"
     },
     {
@@ -720,7 +663,7 @@
         "allValue": ".*",
         "current": {},
         "datasource": {"type": "prometheus", "uid": "prometheus"},
-        "definition": "label_values(tatara_issue_state, project)",
+        "definition": "label_values(operator_task_tokens_total, project)",
         "hide": 0,
         "includeAll": true,
         "label": "Project",
@@ -728,7 +671,7 @@
         "name": "project",
         "options": [],
         "query": {
-          "query": "label_values(tatara_issue_state, project)",
+          "query": "label_values(operator_task_tokens_total, project)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
@@ -740,15 +683,15 @@
         "allValue": ".*",
         "current": {},
         "datasource": {"type": "prometheus", "uid": "prometheus"},
-        "definition": "label_values(tatara_issue_state, state)",
+        "definition": "label_values(operator_task_stage_age_seconds, stage)",
         "hide": 0,
         "includeAll": true,
-        "label": "State",
+        "label": "Stage",
         "multi": true,
-        "name": "state",
+        "name": "stage",
         "options": [],
         "query": {
-          "query": "label_values(tatara_issue_state, state)",
+          "query": "label_values(operator_task_stage_age_seconds, stage)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,

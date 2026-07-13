@@ -814,7 +814,7 @@
       "collapsed": false,
       "gridPos": {"h": 1, "w": 24, "x": 0, "y": 54},
       "id": 20,
-      "title": "Session health: restarts, interjections, streams",
+      "title": "Session health: restarts and streams",
       "type": "row",
       "panels": []
     },
@@ -853,7 +853,7 @@
         },
         "overrides": []
       },
-      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 55},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 55},
       "id": 21,
       "options": {
         "legend": {"calcs": ["sum", "max"], "displayMode": "table", "placement": "right", "showLegend": true},
@@ -870,60 +870,6 @@
         }
       ],
       "title": "Claude Subprocess Restarts (by agent pod, 15m)",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Mid-turn interjections injected into the live session (ccw_interjections_total), increase over 15m. Interjections are operator/lifecycle nudges pushed into a running turn; a sustained rise means turns increasingly need steering to complete.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "palette-classic"},
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {"type": "linear"},
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {"group": "A", "mode": "none"},
-            "thresholdsStyle": {"mode": "off"}
-          },
-          "mappings": [],
-          "min": 0,
-          "noValue": "0",
-          "unit": "short",
-          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
-        },
-        "overrides": []
-      },
-      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 55},
-      "id": 22,
-      "options": {
-        "legend": {"calcs": ["sum", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},
-        "tooltip": {"mode": "multi", "sort": "desc"}
-      },
-      "pluginVersion": "11.0.0",
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "editorMode": "code",
-          "expr": "sum(increase(ccw_interjections_total{exported_pod=~\"$pod\"}[15m]))",
-          "legendFormat": "interjections",
-          "refId": "A"
-        }
-      ],
-      "title": "Mid-Turn Interjections (15m)",
       "type": "timeseries"
     },
     {
@@ -961,7 +907,7 @@
         },
         "overrides": []
       },
-      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 55},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 55},
       "id": 23,
       "options": {
         "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true},

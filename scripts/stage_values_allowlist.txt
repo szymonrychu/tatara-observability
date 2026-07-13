@@ -1,0 +1,104 @@
+# Closed-set label VALUE allowlist for scripts/check_metric_provenance.py.
+#
+# metrics_allowlist.txt validates metric NAMES only. A rule can select a metric
+# that IS emitted while filtering on a stageReason=/stage=/kind=/agent_kind= value
+# that is NOT a member of the contract's closed set - the series never appears,
+# and because every alert file sets default_no_data_state: "OK" the rule reports
+# OK forever. Same failure class as a dead metric name, one level down (fix V7-7:
+# this is exactly how a v6-era rule shipped a reference to the retired
+# "pod-not-ready" stageReason and would have passed a name-only provenance check).
+#
+# Sections below are `## <label name>` followed by one value per line. Regenerate
+# by re-reading the named contract section in
+# docs/superpowers/plans/2026-07-12-task-centric-CROSS-REPO-CONTRACT.md and
+# reconciling by hand; these are closed sets, not samples.
+
+## stage
+# contract F.1 - the Task stage enum. Terminal: rejected, failed, parked.
+triaging
+brainstorming
+clarifying
+investigating
+refining
+approved
+implementing
+reviewing
+merging
+deploying
+delivered
+documenting
+rejected
+failed
+parked
+
+## stageReason
+# contract F.5 - closed set. "pod-not-ready" is EXPLICITLY NOT a member (fix
+# V7-7): a never-Ready pod respawns, it does not terminate; the terminal is
+# pod-recreation-exhausted. "head-moving" IS a member (fix M3-9).
+backlog-sweep
+triage-stalled
+name-too-long
+stage-deadline
+awaiting-human
+identity-unverified
+implement-declined
+review-loop-exhausted
+review-post-refused
+merge-timeout
+merge-blocked
+merge-order-missing
+deploy-timeout
+deploy-blocked
+no-outcome
+turn-budget-exhausted
+pod-recreation-exhausted
+object-too-large
+fold-adoption-unverified
+admission-starved
+agent-contract-mismatch
+doc-timeout
+operator-error
+head-moving
+
+## kind
+# contract A.4 - Task.spec.kind (the ORIGIN kind, immutable, baked into the
+# Task name). This is NOT the running agent kind (that is agent_kind /
+# Status.AgentKind below) - "implement" is deliberately absent here.
+brainstorm
+incident
+clarify
+refine
+review
+documentation
+
+## agent_kind
+# contract F.2 - which agent kind each pod-spawning stage spawns. Derived from
+# the stage table (triaging/approved/merging/deploying/delivered/rejected/failed/
+# parked spawn no pod, so they have no agent_kind value).
+brainstorm
+clarify
+incident
+refine
+implement
+review
+documentation
+
+## kind:exempt-metrics
+# `kind` is an OVERLOADED label name. On the Task family it is the A.4 origin kind
+# (the closed set above); on the metrics below it means something else entirely, so
+# the closed-set sweep must not be applied to them. The default is to CHECK: a new
+# metric that overloads `kind` fails CI until someone lands it here deliberately.
+# Each entry names what its `kind` label actually carries, verified in the operator
+# worktree's internal/obs.
+#
+# scm_metrics.go: kind = the ACCESS CLASS of an SCM call ("write"|"read"), which is
+# how dashboards/operator.json splits the write path out of the SCM counter.
+operator_scm_writes_total
+# operator_metrics.go: kind = the reconciled CR kind (Task|Project|Repository|...).
+operator_reconcile_total
+# contract K.1: kind = the CR kind whose etcd object is being sized / rejected /
+# spilled / adopted, not the Task's origin kind.
+operator_object_size_bytes
+operator_object_too_large_total
+operator_comment_spill_total
+operator_orphan_adopted_total

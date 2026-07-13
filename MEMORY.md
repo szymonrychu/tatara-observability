@@ -313,3 +313,160 @@ Past decisions + context. One dated line per entry.
   window returns exactly `mem-tatara-pg-1`/`pg-3` reason=CrashLoopBackOff=1 for ~8h and nothing else, so
   the rule provably fires on the real incident with no false positives. Root cause (operator-default 2Gi
   WAL volume too small) fixed in tatara-operator#270 (default 2Gi->8Gi) + tatara-helmfile#140.
+- 2026-07-12: **The dead-alert class, and the guardrail that ends it.** The task-centric redesign
+  deletes `Task.status.phase` / `lifecycleState` / `cascadeStage` / `implementGiveUps` /
+  `linksSyncFailures`, plus `changeSummary`+`PROutcome`, `writebackSkip4xxAttempts`, `disarmFailures`
+  and the whole issueLifecycle machine (contract A.5, Global Constraint 9). Every alert file sets
+  `default_no_data_state: "OK"` and `grafana.tf:28` sets `default_exec_err_state = "OK"`, so a rule
+  whose metric vanishes does NOT fire and does NOT go stale - it reports OK forever. Counted this
+  repo's diff directly (both CD-cascade rules, `Operator scan loop stalled`, the four
+  `operator_writeback_outcome_total{result=...}` rules (404-loop + both disarm rules + sibling-links-
+  capped), `Operator tasks inflight pinned at cap`, `Operator task lost pod terminations`,
+  `Operator lifecycle give-up spike`, and two rules rewritten in place because a LABEL went dead while
+  the metric name survived - `Operator task failure spike` (`phase="Failed"`) and `Wrapper metrics
+  blind while agents running` (`operator_tasks_inflight`)): **12 rules**, not the contract's 8 nor the
+  plan draft's arithmetic of 13 (the plan's own census bullet list double-counts
+  `Operator sibling-links sync permanently capped` as both "one of the contract's 8" AND one of "five
+  more" - correct arithmetic is 8 + 4 new = 12). Two of the twelve were the CD-cascade rules, i.e. the
+  merge/deploy path to a cluster-admin-scoped runner would have had zero alert coverage while every
+  dashboard read green. Fix: `scripts/check_metric_provenance.py` + `scripts/metrics_allowlist.txt`
+  make "alert on a metric nobody emits" a CI failure, and (v7 addition) also validate
+  `stageReason=`/`stage=`/`kind=`/`agent_kind=` label VALUES against `scripts/stage_values_allowlist.txt`,
+  since a live metric filtered on a dead label value reports OK forever the same way. TRADEOFF
+  ACCEPTED: the allowlist is hand-maintained and must be updated in the same PR as the operator change
+  that adds or retires a metric. That coupling is the feature - it forces producer and consumer to
+  move together.
+- 2026-07-12: **`no_data_state: Alerting` on heartbeats only.** Exactly one rule
+  (`Operator sweep heartbeat stale`) overrides the file default, and it overrides `exec_err_state`
+  too. For a heartbeat, NoData IS the failure and a Prometheus outage reporting OK is the same failure
+  wearing a hat. For every other rule - gauges that legitimately disappear when the fleet is idle -
+  `OK` remains correct, and setting `Alerting` on them would page every quiet night. Do not
+  generalise this to any other rule.
+- 2026-07-12: **Concurrency gates pods, not Tasks.** `maxConcurrentTasks` became
+  `maxConcurrentAgents` and the admission unit is the pod-spawn. Tasks are now long-lived scaffolding:
+  one sitting in `clarifying` for 24h is healthy. Every alert that counted Tasks as a proxy for "work
+  in flight" now counts `kube_pod_container_status_running{namespace="tatara",container="wrapper"}`
+  instead. THRESHOLD COUPLING: the agent-pod saturation threshold hardcodes `5.999` = `2 x
+  maxConcurrentAgents`, and `tatara-helmfile` sets `maxConcurrentAgents: 3` on both Projects (fleet
+  ceiling 6 pods). Bumping `maxConcurrentAgents` in helmfile REQUIRES bumping this threshold in the
+  SAME change, or the saturation rule silently stops meaning what its summary says. Tracked as an open
+  item in ROADMAP.md too, because it is a cross-repo coupling nothing enforces mechanically.
+- 2026-07-12: **CROSS-REPO DEPENDENCY D1 is STILL OPEN, not verified.** Contract K.1 does not name
+  `operator_task_terminal_total`, but without a terminal-transition COUNTER there is no failure-rate
+  alert on the new surface (`operator_task_stage` is a gauge and a `failed` Task lingers 7 days, so a
+  level rule latches for a week after one bad hour). The design requires it to survive with `phase`
+  swapped for `stage` + `stageReason` + `kind`. As of this PR the operator worktree
+  (`.worktrees/feat/task-centric-redesign/tatara-operator` @ c5c1c40, per `scripts/metrics_allowlist.txt`'s
+  own header) has NOT been rewritten: `internal/obs/task_metrics.go:31-33` still declares
+  `{kind,phase,reason}`. Several alerts in `tatara-cd.yaml`/`tatara-operator.yaml` and both dashboards
+  are therefore written on an UNVERIFIED assumption about the merged operator's label set. Re-verify
+  against the actual merged operator branch BEFORE the release train ships (Task 2 step 3's grep, one
+  more time); if the operator PR drops the metric or ships a different label name, the Task 6
+  fallback applies and every rule built on it changes in the SAME PR. Recorded as an open item in
+  ROADMAP.md.
+- 2026-07-12: **One terraform edit, granted explicitly:** `dashboards.tf:37-41` (the chat dashboard
+  resource) had to go with `dashboards/chat.json`, or `terraform plan` fails on a `file()` against a
+  missing path. The "agents never edit terraform" rule stands for everything else; this carve-out is
+  now spent and does not reopen for any future change.
+- 2026-07-12: **`operator_task_stage_age_seconds` conflates the admission and work clocks, and two
+  alerts' thresholds were wrong for that (v6/v7 patch).** The 24h admission-starved clock is armed on
+  EVERY POD stage, not just `approved` (fix V6-1); pod-less stages do not run it at all (fix V7-8).
+  Stage AGE counts from `stageEnteredAt` regardless of which of the three F.4 clocks is armed, so it
+  cannot tell "queued 10h, healthy" from "working 10h, wedged" - and no metric exposes which clock is
+  armed. Rather than alert on a metric nobody emits, thresholds are set past each stage's worst-case
+  HEALTHY envelope: `Operator pod stage wedged` 9h -> 36h (24h admission + 3 x 5m readiness respawns +
+  <=6h work); the old shared `clarifying|approved` rule SPLIT in two because `clarifying` is a pod
+  stage (24h admission + 24h work ~= 48h healthy, so 60h) while `approved` is pod-less (24h work only,
+  so 36h stands) - a single shared 36h threshold false-fired on any clarify Task that queued 20h then
+  worked 20h. The readiness clock itself is 5m (`podReadyTimeout == agentBootDeadline`,
+  `task_controller.go:35`), not the 15m an earlier contract draft assumed, and a breach RESPAWNS the
+  pod rather than terminating the Task - `pod-not-ready` is explicitly NOT a stageReason (fix V7-7):
+  it never made it into `scripts/stage_values_allowlist.txt`, and this is the dead-alert class one
+  level below what the metric-name checker can see - a rule filtering on a label VALUE nothing emits
+  passes a name-only provenance check and reports OK forever. Pod-less thresholds in `tatara-cd.yaml`
+  (merging 4h, deploying 2h) are NOT harmonised upward with the raised pod-stage threshold: pod-less
+  stages never carry the 24h admission clock, so a `merging` Task past 4h is a real signal, never
+  queue noise.
+- 2026-07-12: **v6 patch: three metrics this plan's own census missed on the first pass.**
+  `operator_doc_task_abandoned_total`, `operator_unexpected_merge_total` and
+  `operator_queue_age_seconds` are all named in contract K.1 but were absent from this plan's original
+  allowlist and rule set - the exact defect class K.1 warns about twice, this time almost committed by
+  the plan meant to prevent it. Fixed: allowlist entries plus new/rewritten rules
+  (`Operator unexpected merge detected`, `Operator documentation batch abandoned`, and the
+  incident-starvation rule rewritten off a query - `stage="triaging"` - that per contract fix M20 could
+  never fire, since triaging's own budget is 5m).
+- 2026-07-12: **`Tatara merge or deploy cycle exhausted` does not use the query K.2 literally
+  suggests.** K.2's own text keys it on `operator_task_parked_total{stageReason=~
+  "merge-blocked|deploy-blocked"}`, but contract F.3 defines both reasons as FAILED terminals
+  (cycle-cap exhaustion, fix H7), never parked ones - that query would never fire. Implemented against
+  `operator_task_terminal_total` instead. Internal inconsistency in the contract's own K.2 vs F.3, not
+  an observability-side defect; flagged upstream.
+- 2026-07-12: **Cross-plan mismatch on `operator_queue_age_seconds`, RAISED AND CLOSED.** The
+  operator plan's Task 19 declared it with labels `class,state` and called K.1 silent on it
+  ("Ambiguity 8") while contract K.1 gives `class,priority,state`. Raised from this side; the operator
+  plan has since been corrected to emit `priority`, and contract M.2's metric sweep now reports zero
+  orphans in either direction. Kept here as the worked example: this repo's alerts are the CONSUMER of
+  a surface another repo produces, and the only thing that catches a drifted label set is somebody
+  reading both.
+- 2026-07-12: **Decided NOT to extend `check_metric_provenance.py` to `dashboards/*.json` in this PR,
+  after actually checking what it would take.** The structural gap is real: the checker only globs
+  `alerts/*.yaml`, so a dashboard panel on a dead metric renders EMPTY, SILENTLY, with no CI signal -
+  the exact same failure class this whole plan exists to kill, one surface over. Walking
+  `panels[].targets[].expr` (skipping `datasource.type == "loki"` targets, same as the alert-rule
+  `query_type` skip) is mechanically cheap. What is NOT cheap: doing it revealed two classes of finding
+  that do not belong in a docs close-out PR. (1) ~50 metric names used across `memory.json`,
+  `wrapper.json`, `ingester.json`, `quality-feedback.json` and `claude-usage-windows.json` are not on
+  `scripts/metrics_allowlist.txt` - spot-verified via grep against each producing service's own
+  `internal/obs`/`internal/metrics` package (`tatara-memory`, `tatara-memory-repo-ingester`,
+  `tatara-claude-code-wrapper`, `tatara-operator`) and all confirmed genuinely live; this is
+  mechanical allowlist backfill, not a bug, but it is ~50 lines of careful cross-repo verification.
+  (2) A real bug: `dashboards/operator.json` and `dashboards/task-delivery.json` - the two dashboards
+  Task 9 claims are "repointed onto the new metric surface" - still carry panels on
+  `tatara_issue_state`, `tatara_issue_outcome_total`, `tatara_tasks_inflight`, `operator_open_proposals`,
+  `tatara_cd_resolved_total`, `tatara_systemic_groups_led_total` and
+  `tatara_systemic_siblings_collapsed_total` (verified defined in `tatara-operator/internal/obs/
+  task_metrics.go` and `operator_metrics.go`, the SAME pre-redesign issue-lifecycle machine Global
+  Constraint 9 says the redesign deletes). Those panels will go blank the moment the operator redesign
+  lands, and fixing them means picking their K.1-surface replacements - a design call Task 9 already
+  made for the panels it did touch, not a mechanical add. Recorded in full in ROADMAP.md rather than
+  rushed here: landing a checker that is either disabled-by-default or immediately red on two just-
+  claimed-done dashboards is worse than not landing it this PR.
+
+## 2026-07-13 - the provenance checker now covers DASHBOARDS, and it immediately found three dead boards
+
+`scripts/check_metric_provenance.py` walks `dashboards/*.json` as well as `alerts/*.yaml`:
+`panels[].targets[].expr`, nested `panels[].panels[].targets[].expr` (row-collapsed panels), and
+`templating.list[]` query variables (`label_values(<expr>, <label>)` / `query_result(...)` are
+unwrapped to their PromQL; loki targets are skipped by `datasource.type`, exactly as alert rules are
+skipped by `query_type`). Wired into `.github/workflows/alert-rules-lint.yml` on `dashboards/**`.
+WHY: an alert on a metric nobody emits reports OK forever (`default_no_data_state: "OK"`); a DASHBOARD
+panel on one renders empty, silently, forever, with not even a NoData state to mis-configure. Same
+silent-green class, one surface over, and the 2026-07-12 close-out proved it live - `operator.json` and
+`task-delivery.json` had been declared "repointed" while still querying `tatara_issue_state`,
+`tatara_issue_outcome_total`, `tatara_tasks_inflight`, `tatara_cd_resolved_total`,
+`tatara_scan_duration_seconds` and the two systemic-group counters. `task-delivery.json` was never even
+in the plan's file list: a PLAN GAP, not just a missed edit.
+
+Three things the sweep turned up that the close-out's own survey did not:
+1. `tatara_scan_duration_seconds` (operator.json "Scan duration p95") is ALSO dead - the B.4 sweep
+   replaces the scan loop, and K.1 retires the `tatara_scan_*` family. Repointed onto the sweep
+   heartbeat (`time() - operator_sweep_last_success_timestamp_seconds`).
+2. `ccw_interjections_total` (wrapper.json "Mid-Turn Interjections") is dead: the wrapper's
+   task-centric branch DELETES the whole cross-pod-continuity surface and
+   `cmd/wrapper/guard_no_s3_test.go` BANS the identifier from returning. Panel deleted. A blanket
+   "it's live today, allowlist it" backfill would have rubber-stamped a metric whose producer is
+   already gone in the sibling worktree - always check the WORKTREE, not just the pinned submodule.
+3. `operator_open_proposals` is LIVE, not dead (`maxOpenProposals` is a live field on
+   `BrainstormActivity`/`HealthCheckActivity`, `project_types.go:301,332`). Panel kept.
+
+The closed-set label sweep had to become METRIC-AWARE to do this: `kind` is an overloaded label
+(`operator_scm_writes_total{kind="write"}` is an access class, `operator_reconcile_total{kind}` is a CR
+kind), and a metric-blind sweep flags those as illegal Task kinds. `stage_values_allowlist.txt` grew a
+`## kind:exempt-metrics` section; the default stays CHECK, so a new metric that overloads a closed-set
+label fails CI until someone exempts it deliberately.
+
+CONTRACT GAPS found while repointing (recorded, not worked around):
+- K.1 declares no sweep-DURATION histogram. The sweep's liveness is observable, its latency is not.
+- K.1 labels `operator_task_stage_age_seconds` `{task,stage,kind}` only - no `project`/`repo`/`issue` -
+  so the delivery board's per-issue table cannot be reconstructed: "Open Issues" becomes "Open Tasks by
+  Stage", with no SCM deep-link and no project filter. The Task name is the only handle left.

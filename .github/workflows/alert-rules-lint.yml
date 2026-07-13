@@ -5,20 +5,35 @@ name: alert-rules-lint
 # Complementary to, and deliberately NOT folded into, the terraform apply workflow: this
 # check needs no AWS/Grafana secrets and is the false-POSITIVE guard (issue #18 is the
 # false-negative / dark-rule guard).
+#
+# It also runs check_metric_provenance.py, which is the false-NEGATIVE guard and covers
+# BOTH alerts/*.yaml and dashboards/*.json: an alert on a metric nobody emits reports OK
+# forever, and a dashboard panel on one renders empty forever. Both read green while the
+# thing they watch is dark.
 
 on:
   pull_request:
     paths:
       - "alerts/**"
+      - "dashboards/**"
       - "scripts/lint_alert_rules.py"
       - "scripts/test_lint_alert_rules.py"
+      - "scripts/check_metric_provenance.py"
+      - "scripts/test_check_metric_provenance.py"
+      - "scripts/metrics_allowlist.txt"
+      - "scripts/stage_values_allowlist.txt"
       - ".github/workflows/alert-rules-lint.yml"
   push:
     branches: [main]
     paths:
       - "alerts/**"
+      - "dashboards/**"
       - "scripts/lint_alert_rules.py"
       - "scripts/test_lint_alert_rules.py"
+      - "scripts/check_metric_provenance.py"
+      - "scripts/test_check_metric_provenance.py"
+      - "scripts/metrics_allowlist.txt"
+      - "scripts/stage_values_allowlist.txt"
       - ".github/workflows/alert-rules-lint.yml"
 
 permissions:
@@ -42,3 +57,9 @@ jobs:
 
       - name: lint alert rules
         run: python3 scripts/lint_alert_rules.py
+
+      # Covers alerts/*.yaml AND dashboards/*.json. A dashboard panel on a deleted metric
+      # renders empty, silently, forever, with no CI signal at all - the same silent-green
+      # failure class as a dark alert rule, one surface over.
+      - name: check metric provenance (alerts + dashboards)
+        run: python3 scripts/check_metric_provenance.py

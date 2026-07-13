@@ -155,21 +155,6 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "critical"
-  - name: "Operator scan loop stalled"
-    queries:
-      - expression: |
-          (sum(increase(tatara_scan_items_total{namespace="tatara",job="tatara-operator"}[3h])) or vector(0)) + (sum(increase(tatara_scan_tasks_created_total{namespace="tatara",job="tatara-operator"}[3h])) or vector(0))
-    math_operator: "<"
-    threshold: 1
-    for: 30m
-    decimal_points: 0
-    annotations:
-      summary: "tatara-operator scan loop flat for 3h (scan items + tasks created increase={{ index $values \"C\" }}). The hourly mr/issue/brainstorm scans have stalled; no new work is being picked up."
-    labels:
-      homelab: "true"
-      system: "tatara"
-      component: "operator"
-      severity: "warning"
   - name: "Operator reconcile error ratio high"
     queries:
       - expression: |
@@ -281,72 +266,6 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "warning"
-  - name: "Operator writeback 404 loop"
-    queries:
-      - expression: |
-          sum(increase(operator_writeback_outcome_total{namespace="tatara",job="tatara-operator",result="skip_4xx"}[30m]))
-    math_operator: ">"
-    threshold: 20
-    for: 15m
-    decimal_points: 0
-    annotations:
-      summary: "tatara-operator skipped {{ index $values \"C\" }} writebacks on 4xx in 30m. A PR/MR addressing bug is likely looping (per the GitLab writeback-404 incident class)."
-    labels:
-      homelab: "true"
-      system: "tatara"
-      component: "operator"
-      severity: "warning"
-  # Disarm path: an incomplete/hard-failed change (ChangeSummary.RemainingScope
-  # non-empty) must be disarmed (auto-merge disabled, label removed, PR closed)
-  # before the Task fails. These two results cover the disarm outcome, distinct
-  # from the skip_4xx writeback-404-loop rule above.
-  - name: "Operator failed to disarm an incomplete change"
-    queries:
-      - expression: |
-          sum(increase(operator_writeback_outcome_total{namespace="tatara",job="tatara-operator",result="disarm_failed"}[15m]))
-    math_operator: ">"
-    threshold: 0
-    for: 5m
-    decimal_points: 0
-    annotations:
-      summary: "tatara-operator failed to disarm (close/remove auto-merge label from) {{ index $values \"C\" }} incomplete-change PR(s) in 15m after exhausting its retry budget. The PR may still auto-merge with unreviewed/incomplete code; check ChangeSummary.RemainingScope and the disarm retry logs."
-    labels:
-      homelab: "true"
-      system: "tatara"
-      component: "operator"
-      severity: "critical"
-  - name: "Operator detected an incomplete change that already merged"
-    queries:
-      - expression: |
-          sum(increase(operator_writeback_outcome_total{namespace="tatara",job="tatara-operator",result="disarm_merged"}[15m]))
-    math_operator: ">"
-    threshold: 0
-    for: 1m
-    decimal_points: 0
-    annotations:
-      summary: "tatara-operator found {{ index $values \"C\" }} incomplete-change PR(s) already merged in 15m before it could disarm them. Unreviewed/incomplete code has likely already shipped via the semver push-CD pipeline; needs immediate human attention to assess blast radius."
-    labels:
-      homelab: "true"
-      system: "tatara"
-      component: "operator"
-      severity: "critical"
-  # Sibling-PR-links sync sweep give-up: lower severity, informational/degraded-
-  # state (companion-PR cross-links may go stale), not a shipped-code risk.
-  - name: "Operator sibling-links sync permanently capped"
-    queries:
-      - expression: |
-          sum(increase(operator_writeback_outcome_total{namespace="tatara",job="tatara-operator",result="links_sync_capped"}[1h]))
-    math_operator: ">"
-    threshold: 0
-    for: 15m
-    decimal_points: 0
-    annotations:
-      summary: "tatara-operator permanently gave up syncing sibling-PR links {{ index $values \"C\" }} time(s) in 1h (links_sync_capped, retry cap reached). Cross-links between companion PRs across repos may be stale or missing; degraded but non-blocking."
-    labels:
-      homelab: "true"
-      system: "tatara"
-      component: "operator"
-      severity: "warning"
   # ----------------------------------------------------------------------------
   # Memory stacks + lightrag: a Failed per-project memory stack blocks its agents.
   # ----------------------------------------------------------------------------
@@ -403,31 +322,54 @@ rules:
   # ----------------------------------------------------------------------------
   # Task throughput + queue: saturated lanes and terminal failures stall the loop.
   # ----------------------------------------------------------------------------
-  - name: "Operator tasks inflight pinned at cap"
+  # Concurrency now gates AGENT PODS, not Tasks (contract A.6: maxConcurrentAgents).
+  # Tasks are long-lived scaffolding - one sitting in clarifying for 24h is HEALTHY and
+  # costs nothing. Counting Tasks as "work in flight" would false-fire permanently, which
+  # is why operator_tasks_inflight is gone. Count the pods.
+  # Threshold 5.999 = 2 projects x maxConcurrentAgents: 3 (tatara-helmfile
+  # values/project-{tatara,infrastructure}/common.yaml). BUMPING maxConcurrentAgents THERE
+  # REQUIRES BUMPING THIS THRESHOLD IN THE SAME CHANGE.
+  # Gated on a non-empty queue: a full pod pool with nothing waiting is throughput, not
+  # starvation.
+  - name: "Operator agent pod pool saturated with queued work"
     queries:
       - expression: |
-          max(operator_tasks_inflight{namespace="tatara",job="tatara-operator"})
+          (sum(kube_pod_container_status_running{namespace="tatara",container="wrapper"}) or vector(0)) and (sum(operator_queue_depth{namespace="tatara",job="tatara-operator"}) > 0)
     math_operator: ">"
-    threshold: 7.999
+    threshold: 5.999
     for: 30m
     decimal_points: 0
     annotations:
-      summary: "tatara-operator has {{ index $values \"C\" }} Tasks in flight (>=8) pinned for 30m. The concurrency lane is saturated; new work is starved."
+      summary: "{{ index $values \"C\" }} agent pods running (at the 2 x maxConcurrentAgents=3 ceiling) with QueuedEvents still waiting, for 30m. The pod lane is saturated and new work is starved. Incidents hold a reserved slot (AlertCapacity >= 1), so this is not an incident outage - but every webhook and sweep event is queueing."
     labels:
       homelab: "true"
       system: "tatara"
       component: "operator"
       severity: "warning"
+  # CROSS-REPO DEPENDENCY D1 (contract Global Constraint 7): operator_task_terminal_total
+  # must survive with phase swapped for stage+stageReason+kind. As of this rewrite the
+  # operator worktree has NOT landed the swap yet (internal/obs/task_metrics.go:31-33
+  # still declares {kind,phase,reason}) - see scripts/metrics_allowlist.txt's census note.
+  # Both rules below are written on the D1 assumption per plan Task 6. RE-VERIFY against
+  # the merged operator (grep internal/obs/*.go for stageReason) before this ships. If D1
+  # is refused, replace both with the Task 6 fallback: a single gauge-level rule on
+  # sum(operator_task_stage{namespace="tatara",job="tatara-operator",stage="failed"}),
+  # threshold 3, for 30m - accepting that it latches for the 7-day failed retention.
+  #
+  # phase is GONE (contract A.5). Terminal transitions are now stage=failed|rejected with a
+  # stageReason from the closed set in F.5. Splitting by stageReason is what makes the alert
+  # actionable: turn-budget-exhausted is a cost problem, pod-recreation-exhausted is an
+  # infrastructure problem, agent-contract-mismatch is a skewed release train.
   - name: "Operator task failure spike"
     queries:
       - expression: |
-          sum(increase(operator_task_terminal_total{namespace="tatara",job="tatara-operator",phase="Failed"}[1h]))
+          sum by (stageReason) (increase(operator_task_terminal_total{namespace="tatara",job="tatara-operator",stage="failed"}[1h])) or vector(0)
     math_operator: ">"
-    threshold: 5
+    threshold: 3
     for: 15m
     decimal_points: 0
     annotations:
-      summary: "tatara-operator saw {{ index $values \"C\" }} Tasks reach phase Failed in 1h (>5). Agents are failing terminally at an elevated rate."
+      summary: "{{ index $values \"C\" }} Task(s) reached stage=failed with stageReason={{ index $labels \"stageReason\" }} in 1h (>3). Agents are failing terminally at an elevated rate. Failed Tasks are kept for 7 days as debugging artifacts (contract B.6), so the CRs are still there: kubectl get tasks -n tatara."
     labels:
       homelab: "true"
       system: "tatara"
@@ -548,36 +490,22 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "warning"
-  - name: "Operator task lost pod terminations"
+  # Was reason="PodLost" on the phase-keyed metric. The stage machine's equivalent is
+  # stageReason=pod-recreation-exhausted: the pod vanished mid-stage and the recreation
+  # budget (maxPodRecreations, default 3) is spent, so the stage fails. Work in flight is
+  # destroyed. Distinct from the boot-crash-budget and agent-unreachable rules, which cover
+  # pods that never came up rather than pods that vanished mid-task. Also depends on D1 -
+  # see the comment above "Operator task failure spike".
+  - name: "Operator task pod-recreation budget exhausted"
     queries:
       - expression: |
-          sum(increase(operator_task_terminal_total{namespace="tatara",job="tatara-operator",reason="PodLost"}[1h]))
+          sum(increase(operator_task_terminal_total{namespace="tatara",job="tatara-operator",stage="failed",stageReason="pod-recreation-exhausted"}[1h])) or vector(0)
     math_operator: ">"
     threshold: 0
     for: 5m
     decimal_points: 0
     annotations:
-      summary: "tatara-operator terminated {{ index $values \"C\" }} Task(s) in 1h with reason=PodLost - the wrapper pod was lost and the recreation budget was exhausted. Work in flight was destroyed without a live pod to retry against. Investigate pod evictions/node pressure/OOM-kill on the wrapper workload; distinct from the boot-crash-budget and agent-unreachable rules, which cover pods that never came up rather than pods that vanished mid-task."
-    labels:
-      homelab: "true"
-      system: "tatara"
-      component: "operator"
-      severity: "warning"
-  # ----------------------------------------------------------------------------
-  # Lifecycle progress: agents giving up on genuine-failure reasons park in
-  # LifecycleState=Parked with an empty Phase, so the task-terminal Failed rule
-  # never sees them. Benign give-up reasons are deliberately excluded.
-  # ----------------------------------------------------------------------------
-  - name: "Operator lifecycle give-up spike"
-    queries:
-      - expression: |
-          sum(increase(tatara_lifecycle_giveup_total{namespace="tatara",job="tatara-operator",reason=~"maxIterations|implement-failed|triage-failed|deadline|refused-no-explanation"}[3h]))
-    math_operator: ">"
-    threshold: 3
-    for: 30m
-    decimal_points: 0
-    annotations:
-      summary: "tatara-operator recorded {{ index $values \"C\" }} genuine-failure lifecycle give-ups in 3h (>3; reasons maxIterations/implement-failed/triage-failed/deadline/refused-no-explanation). Agents are unable to deliver (env/tooling breakage, refusal loops, iteration exhaustion). These park in LifecycleState=Parked with an empty Phase, so operator_task_terminal_total{phase=Failed} misses them. Benign give-ups (duplicate-merged-change, refused-already-done, refused-declined, not-bot-authored, no-pr-number) are excluded."
+      summary: "tatara-operator failed {{ index $values \"C\" }} Task(s) in 1h with stageReason=pod-recreation-exhausted - the agent pod was lost mid-stage and the recreation budget ran out. Investigate pod evictions, node pressure and OOM-kills on the wrapper workload."
     labels:
       homelab: "true"
       system: "tatara"
@@ -639,21 +567,22 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "warning"
-  # Fleet-wide backstop: aggregate across all 3 replicas. Each replica runs its
-  # own in-memory receiver so pushed runs are LB-distributed, while only the
-  # leader sets tasks_inflight. Per-instance matching would false-fire on the
-  # leader whenever the LB routes zero pushes to it. The value emitted is the
-  # in-flight Task count when the whole fleet is metric-dark, else empty/0.
+  # Fleet-wide backstop: aggregate across all 3 replicas. Each replica runs its own
+  # in-memory receiver so pushed runs are LB-distributed. Per-instance matching would
+  # false-fire on any replica the LB routes zero pushes to.
+  # "Agents running" is now the AGENT POD COUNT (kube-state-metrics), not the Task count:
+  # Tasks are long-lived and podless for most of their life (contract A.6/F.4), so
+  # operator_tasks_inflight both disappeared and would have been the wrong signal.
   - name: "Wrapper metrics blind while agents running"
     queries:
       - expression: |
-          (sum(operator_tasks_inflight{namespace="tatara",job="tatara-operator"}) > 0) * (sum(operator_pushed_runs{namespace="tatara",job="tatara-operator"}) == bool 0)
+          ((sum(kube_pod_container_status_running{namespace="tatara",container="wrapper"}) or vector(0)) > 0) * (sum(operator_pushed_runs{namespace="tatara",job="tatara-operator"}) == bool 0)
     math_operator: ">"
     threshold: 0
     for: 15m
     decimal_points: 0
     annotations:
-      summary: "tatara-operator holds {{ index $values \"C\" }} Task(s) in flight but the entire fleet pushed zero wrapper metric runs for 15m. The ccw_* metric-push pipeline is dark while agents are running, so every wrapper alert (turns erroring, commit/push fail, http 5xx, panics) is silently blind."
+      summary: "{{ index $values \"C\" }} agent pod(s) are running but the entire operator fleet pushed zero wrapper metric runs for 15m. The ccw_* metric-push pipeline is dark while agents are running, so every wrapper alert (turns erroring, commit/push fail, http 5xx, panics) is silently blind."
     labels:
       homelab: "true"
       system: "tatara"
@@ -693,6 +622,408 @@ rules:
     decimal_points: 2
     annotations:
       summary: "Project {{ index $labels \"project\" }} token-budget used ratio {{ index $values \"C\" }} has reached its own configured emergency spawn-pause threshold for 15m. Further agent spawns for the project are being paused. Distinct from the account-wide usage-gate alerts and the fleet $/s runaway rule."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # ----------------------------------------------------------------------------
+  # Stage machine (contract F.4). THE INVARIANT: no stage may be entered without a
+  # deadline that leaves it. These rules do NOT enforce a business SLA - the operator's
+  # own deadline machinery does that, moving the Task to parked or failed. They fire when
+  # a Task sits PAST its budget, which means the deadline machinery itself is broken. That
+  # is the silent-permanent-wedge class the 2026-07-11 hardening killed one edge at a time;
+  # this is the general form.
+  # Budgets: triaging 5m, brainstorming/investigating/refining/documenting 2h,
+  # reviewing 4h, implementing 6h, clarifying/approved 24h.
+  # ----------------------------------------------------------------------------
+  # The incident-starvation rule keys on the admission queue itself, not on
+  # stage="triaging": triaging's own budget is 5m -> failed(triage-stalled) (F.4), so a
+  # Task literally cannot SIT in triaging for 15m and a stage-age rule there could never
+  # fire (fix M20). operator_queue_age_seconds carries class,priority,state (K.1
+  # addendum 8); class=alert is the incident pool (B.7). The priority filter is left open
+  # pending verification of the actual priority values the operator emits - tighten to the
+  # incident priority value once confirmed against the merged operator.
+  - name: "Operator incident starved in triage"
+    queries:
+      - expression: |
+          max(operator_queue_age_seconds{namespace="tatara",job="tatara-operator",class="alert",state="Queued"}) or vector(0)
+    math_operator: ">"
+    threshold: 300
+    for: 2m
+    decimal_points: 0
+    annotations:
+      summary: "The oldest queued alert-class event has been waiting {{ index $values \"C\" }}s (>5m) in state=Queued. Incidents are priority class 0 and AlertCapacity reserves a pod slot for them (contract B.7/B3), so an incident CANNOT be waiting on the normal pool. Either priority admission is broken or the whole triage path is wedged - a firing production alert is not being worked."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  - name: "Operator triage stage wedged"
+    queries:
+      - expression: |
+          max by (task) (operator_task_stage_age_seconds{namespace="tatara",job="tatara-operator",stage="triaging"})
+    math_operator: ">"
+    threshold: 900
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "Task {{ index $labels \"task\" }} has been in stage=triaging for {{ index $values \"C\" }}s. The budget is 5m and the exit is failed(triage-stalled), so past 15m the F.4 deadline machinery is not running. Nothing else in the stage machine can be trusted while this fires."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  # fix V6-1: admission-starved (clock 1, 24h from stageEnteredAt) is armed on EVERY
+  # POD stage, not just approved - and a Task entering one of these stages straight
+  # from triaging can sit unadmitted for up to 24h before its own deadline machinery
+  # parks it, which is NORMAL steady state at maxOpenTasks: 6 / maxConcurrentAgents: 3.
+  # operator_task_stage_age_seconds counts from stageEnteredAt regardless of which of
+  # the three clocks (admission/readiness/work) is currently armed, so it cannot
+  # distinguish "queued 10h, healthy" from "working 10h, wedged". The threshold is
+  # therefore raised past the worst-case HEALTHY envelope instead of trying to select
+  # on a clock the metric does not expose:
+  #   24h admission (clock 1)
+  # + 3 x 5m readiness (clock 2 = podReadyTimeout = agentBootDeadline = 5m, and a
+  #   breach RESPAWNS rather than failing - up to maxPodRecreations=3 laps, fix V7-7)
+  # + <= 6h work (clock 3, the largest per-stage budget)
+  # about 30.25h. 36h clears it with room and still catches a genuine wedge same-day.
+  #
+  # THIS REGEX IS POD STAGES ONLY, AND THAT IS LOAD-BEARING (fix V7-8). Pod-less
+  # stages (triaging, approved, merging, deploying) do NOT run clock 1 - they run
+  # clock 3 from stageEnteredAt against their own budget - so their wedge alerts key
+  # on the real budget and are NOT raised: triaging 5m (above), merging 4h and
+  # deploying 2h (alerts/tatara-cd.yaml). A merging Task past 4h is a real signal,
+  # never queue noise. Do not "harmonise" those thresholds with this one.
+  - name: "Operator pod stage wedged"
+    queries:
+      - expression: |
+          max by (task, stage) (operator_task_stage_age_seconds{namespace="tatara",job="tatara-operator",stage=~"brainstorming|investigating|refining|documenting|implementing|reviewing"})
+    math_operator: ">"
+    threshold: 129600
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "Task {{ index $labels \"task\" }} has been in stage={{ index $labels \"stage\" }} for {{ index $values \"C\" }}s (>36h). These are POD stages: worst-case healthy is a 24h admission wait + up to 3 x 5m pod-readiness respawns + a work budget of 6h or less (F.4 clocks 1-3), about 30h. Past 36h none of the three deadlines is being enforced: the Task is holding a pod slot (or a queue slot) with no exit."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # SPLIT in the v7 pass (fixes V6-1 + V7-8, which land on opposite sides of this
+  # rule). clarifying and approved BOTH have a 24h budget, but they are not the same
+  # shape of stage and a single threshold cannot serve both:
+  #   clarifying is a POD stage -> it runs clock 1 (24h admission) AND THEN clock 3
+  #     (24h work). Healthy worst case is about 48h, so a shared 36h threshold would
+  #     FALSE-FIRE on a clarify Task that queued 20h and then worked 20h.
+  #   approved is POD-LESS -> clock 3 ONLY, from stageEnteredAt, 24h (fix V7-8). It
+  #     never carries an admission wait on top, so 36h is right for it and raising it
+  #     would just blunt the alert.
+  - name: "Operator human-wait stage wedged"
+    queries:
+      - expression: |
+          max by (task) (operator_task_stage_age_seconds{namespace="tatara",job="tatara-operator",stage="clarifying"})
+    math_operator: ">"
+    threshold: 216000
+    for: 30m
+    decimal_points: 0
+    annotations:
+      summary: "Task {{ index $labels \"task\" }} has been in stage=clarifying for {{ index $values \"C\" }}s (>60h). clarifying is a POD stage with a 24h work budget exiting to parked(awaiting-human), and it can carry up to a 24h admission wait ahead of that (F.4 clock 1), so healthy worst case is about 48h. Past 60h neither deadline is firing."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  - name: "Operator approved stage starved"
+    queries:
+      - expression: |
+          max by (task) (operator_task_stage_age_seconds{namespace="tatara",job="tatara-operator",stage="approved"})
+    math_operator: ">"
+    threshold: 129600
+    for: 30m
+    decimal_points: 0
+    annotations:
+      summary: "Task {{ index $labels \"task\" }} has been in stage=approved for {{ index $values \"C\" }}s (>36h). approved is POD-LESS: it runs the work clock only, from stageEnteredAt, budget 24h, exiting to parked(admission-starved) (F.4, fix V7-8). Past 36h the deadline is not firing. The one legitimate exception is a PAUSED project (maxConcurrentAgents == 0), which holds Tasks in approved deliberately and SKIPS the starve-park - check that first."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  - name: "Operator illegal stage transition"
+    queries:
+      - expression: |
+          sum by (from, to) (increase(operator_illegal_stage_transition_total{namespace="tatara",job="tatara-operator"}[15m])) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator attempted {{ index $values \"C\" }} illegal stage transition(s) from={{ index $labels \"from\" }} to={{ index $labels \"to\" }} in 15m. ANY non-zero value is a code bug in the F.3 transition table, not an operational condition."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # Successor to the retired lifecycle-giveup alert (tatara_lifecycle_giveup_total went
+  # with the issueLifecycle machine). The park counter is where a give-up now lands.
+  - name: "Operator task park spike"
+    queries:
+      - expression: |
+          sum by (stageReason) (increase(operator_task_parked_total{namespace="tatara",job="tatara-operator",stageReason!~"backlog-sweep|awaiting-human"}[3h])) or vector(0)
+    math_operator: ">"
+    threshold: 3
+    for: 30m
+    decimal_points: 0
+    annotations:
+      summary: "{{ index $values \"C\" }} Task(s) parked with stageReason={{ index $labels \"stageReason\" }} in 3h (>3). Successor to the lifecycle give-up alert. backlog-sweep is excluded (it is the zero-cost mint path that OWNS a backlog issue and spawns no pod) and awaiting-human is excluded (a human not having replied yet is not a platform failure). Everything else here is the platform failing to deliver."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # ----------------------------------------------------------------------------
+  # Release-train integrity + the etcd object budget. Both are CRITICAL on ANY value.
+  # ----------------------------------------------------------------------------
+  # The operator injects TATARA_CONTRACT_VERSION=2; the cli refuses to boot on a mismatch
+  # and the operator fails the Task with stageReason=agent-contract-mismatch BEFORE turn-0
+  # (contract G.10). The wrapper image is pinned in a DIFFERENT helm release
+  # (project-tatara) than the operator, and helmfile applies releases CONCURRENTLY, so
+  # new-operator + old-agent IS reachable. This is the alert that catches a skewed train.
+  - name: "Operator agent contract version mismatch"
+    queries:
+      - expression: |
+          sum by (expected, got, image) (increase(operator_agent_contract_mismatch_total{namespace="tatara",job="tatara-operator"}[5m])) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 1m
+    decimal_points: 0
+    annotations:
+      summary: "{{ index $values \"C\" }} agent pod(s) reported contract version {{ index $labels \"got\" }} where the operator expects {{ index $labels \"expected\" }} (image {{ index $labels \"image\" }}). The four-release train is SKEWED: the agent image pin in the project-tatara release did not land with the operator. Every Task that spawns a pod fails instantly. Fix the pin in tatara-helmfile values/project-*/common.yaml agent.image; do not restart the operator."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  # K.2 minimum alert set: "UNEXPECTED MERGE (CRITICAL)". C.9's accepted-risk detector:
+  # an MR found merged with no corresponding mergeCursor advance, i.e. something other
+  # than the operator's own sequential merge (C.5) put code on a cluster-admin-scoped
+  # deploy path.
+  - name: "Operator unexpected merge detected"
+    queries:
+      - expression: |
+          sum by (repo) (increase(operator_unexpected_merge_total{namespace="tatara",job="tatara-operator"}[15m])) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "{{ index $values \"C\" }} unexpected merge(s) on repo {{ index $labels \"repo\" }} in 15m - an MR merged without the operator's mergeCursor advancing. Something other than the operator's own sequential merge (contract C.5) put code on a cluster-admin-scoped deploy path. Investigate who merged it and what shipped, immediately."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  # A.7: the pre-write byte guard marshals every object before Update and evicts oldest
+  # comments/notes until it fits under 800,000 bytes. This fires when it COULD NOT evict
+  # enough. A 413 is not retried by RetryOnConflict, so every writer fails, the Task
+  # becomes permanently unwritable, and its Issues/MRs stay pinned by ownership forever -
+  # the worst failure mode in the whole design.
+  - name: "Operator object too large to write"
+    queries:
+      - expression: |
+          sum by (kind, name) (increase(operator_object_too_large_total{namespace="tatara",job="tatara-operator"}[15m])) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator could not fit {{ index $labels \"kind\" }}/{{ index $labels \"name\" }} under the 800,000-byte object budget after evicting everything evictable ({{ index $values \"C\" }} attempt(s) in 15m). That object is now PERMANENTLY UNWRITABLE and any Issue/MergeRequest it owns is pinned open forever. Manual intervention required."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  # B.2 rule 5: an Issue/MR must NEVER have zero controller owners. An artifact with plain
+  # owners and no controller owner is worked by nobody and re-minted by nobody (the orphan
+  # predicate sees an owned Issue). The operator repairs it by promoting the oldest
+  # surviving owner - this alert says the repair guard had to fire, i.e. an ownership
+  # invariant broke somewhere in the fold (B.3) or reap (B.5) path.
+  - name: "Operator artifact left with no controller owner"
+    queries:
+      - expression: |
+          sum(increase(operator_orphan_no_controller_total{namespace="tatara",job="tatara-operator"}[1h])) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator's ownership repair guard fired {{ index $values \"C\" }} time(s) in 1h: an Issue or MergeRequest was found with plain owners and NO controller owner. The fold or reap controller-handover path has a bug. The guard repaired it by promoting the oldest surviving owner, but the invariant broke."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  - name: "Operator GC blocked"
+    queries:
+      - expression: |
+          sum by (reason) (increase(operator_gc_blocked_total{namespace="tatara",job="tatara-operator"}[1h])) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator could not garbage-collect {{ index $values \"C\" }} object(s) in 1h, reason={{ index $labels \"reason\" }} (no_controller_owner | fold_in_flight | doc_reference). Tasks and their Issue/MergeRequest CRs are accumulating in etcd. A fold_in_flight that never clears means a refine umbrella died mid-adoption."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # ----------------------------------------------------------------------------
+  # The sweep. This is the ONLY heartbeat in the tatara alert set, and it is the ONLY rule
+  # that overrides no_data_state / exec_err_state.
+  #
+  # Every alert file sets default_no_data_state: "OK" and grafana.tf sets
+  # default_exec_err_state = "OK". For a gauge that legitimately vanishes when the fleet is
+  # idle that is correct. For a HEARTBEAT it is catastrophic: NoData IS the failure, and OK
+  # is the failure being reported as health. If the operator stops sweeping - or stops
+  # existing - this rule must PAGE, not go quiet.
+  # Successor to "Operator scan loop stalled" (tatara_scan_*, deleted with the scan).
+  # ----------------------------------------------------------------------------
+  - name: "Operator sweep heartbeat stale"
+    queries:
+      - expression: |
+          time() - operator_sweep_last_success_timestamp_seconds{namespace="tatara",job="tatara-operator"}
+    math_operator: ">"
+    threshold: 7200
+    for: 10m
+    decimal_points: 0
+    no_data_state: "Alerting"
+    exec_err_state: "Alerting"
+    annotations:
+      summary: "tatara-operator sweep activity={{ index $labels \"activity\" }} last succeeded {{ index $values \"C\" }}s ago (>2h). No orphan Issues are being minted into Tasks and no backlog is being mirrored. NoData on this rule is ALSO a failure and is configured to fire: an absent series means the operator is not sweeping at all."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  - name: "Operator sweep erroring"
+    queries:
+      - expression: |
+          sum by (activity, reason) (increase(operator_sweep_errors_total{namespace="tatara",job="tatara-operator"}[1h])) or vector(0)
+    math_operator: ">"
+    threshold: 5
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator sweep activity={{ index $labels \"activity\" }} errored {{ index $values \"C\" }} time(s) in 1h (reason={{ index $labels \"reason\" }}). The heartbeat may still be green if SOME passes succeed; this catches the partially-failing sweep."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  - name: "Operator task mint burst"
+    queries:
+      - expression: |
+          sum(increase(operator_tasks_minted_per_sweep_sum{namespace="tatara",job="tatara-operator"}[1h])) or vector(0)
+    math_operator: ">"
+    threshold: 20
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator minted {{ index $values \"C\" }} Tasks in 1h (>20). The sweep is capped at maxNewTasksPerSweep (5) per pass, so this is either a mint/reap loop (an issue being re-minted because ownership is not sticking) or a genuine backlog drain. Check operator_task_stage{stage=\"parked\"}: a healthy backlog drain mints parked(backlog-sweep) Tasks that spawn ZERO pods."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  - name: "Operator sweep creation budget chronically capped"
+    queries:
+      - expression: |
+          sum by (project, cap) (increase(operator_sweep_mint_cap_hit_total{namespace="tatara",job="tatara-operator"}[3h])) or vector(0)
+    math_operator: ">"
+    threshold: 6
+    for: 30m
+    decimal_points: 0
+    annotations:
+      summary: "The sweep for project {{ index $labels \"project\" }} hit its {{ index $labels \"cap\" }} budget {{ index $values \"C\" }} times in 3h. Orphan Issues are being discovered faster than the creation budget lets them be minted. Expected for a few hours after cutover (a 150-issue backlog takes about 30 passes at 5/pass); sustained past a day it means maxOpenTasks is starving the sweep."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # K.2 minimum alert set: "docs never written (WARNING)" (fixes M21/L29). The nightly
+  # documenting batch starved and never ran. Every Task eligible for docs stays
+  # permanently undocumented - documentedBy never re-arms once empty (F.3's delivered row).
+  - name: "Operator documentation batch abandoned"
+    queries:
+      - expression: |
+          sum by (reason) (increase(operator_doc_task_abandoned_total{namespace="tatara",job="tatara-operator",reason="never_ran"}[25h])) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator's nightly documentation batch did not run in the last 25h ({{ index $values \"C\" }} Task(s) abandoned). Every delivered Task eligible for docs (fix F2) is now permanently undocumented until the next batch picks up NEW eligible Tasks - documentedBy never retries the ones it missed."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # ----------------------------------------------------------------------------
+  # Pod TTL, SCM egress, and the bundle byte budget.
+  # ----------------------------------------------------------------------------
+  # G.7 stop sequence: drain the in-flight turn, submit the handoff turn, hard cap, then a
+  # SYNTHETIC operator handoff note, then force-delete. outcome=agent_handoff and
+  # outcome=synthetic_handoff both END WITH A NOTE - the Task keeps its continuation state.
+  # outcome=force_deleted is the one where the pod died holding un-noted context. Notes ARE
+  # the continuation state (A.4), so this is silent work loss.
+  - name: "Operator agent pod force-deleted at TTL"
+    queries:
+      - expression: |
+          sum by (agent_kind) (increase(operator_agent_pod_ttl_expired_total{namespace="tatara",job="tatara-operator",outcome="force_deleted"}[1h])) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "{{ index $values \"C\" }} {{ index $labels \"agent_kind\" }} agent pod(s) were FORCE-DELETED at TTL in 1h - the G.7 stop sequence got neither an agent handoff nor a synthetic one. Notes are the continuation state, so the next pod for that Task resumes from a bundle that is missing the last turn's work. Silent work loss; the Task will look healthy."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # C.8: doPagedGET now carries the rate-limit handling that previously existed only on the
+  # write path, plus a per-project egress token bucket (about 20 req/s). A rate-limited read
+  # means the mirror is going stale, which means every agent bundle is going stale.
+  - name: "Operator SCM rate limited"
+    queries:
+      - expression: |
+          sum by (provider, limit_type) (increase(operator_scm_ratelimited_total{namespace="tatara",job="tatara-operator"}[10m])) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator was rate-limited by {{ index $labels \"provider\" }} {{ index $values \"C\" }} time(s) in 10m (limit_type={{ index $labels \"limit_type\" }}). GitHub's secondary limit is 80 content-creating requests/min and 500/hour. The Issue/MergeRequest mirror is falling behind, so every context bundle rendered from it is stale."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # E.5 / D1: the bundle has a HARD byte budget (maxBundleBytes, default 400 KB). Oldest
+  # comments elide first, behind an explicit <comments total= rendered= elided=> marker - the
+  # agent is never lied to about completeness. Elision firing at all means an Issue thread has
+  # outgrown the budget and agents are now working from a partial thread.
+  - name: "Operator context bundle over budget"
+    queries:
+      - expression: |
+          sum by (agent_kind) (increase(operator_bundle_elided_total{namespace="tatara",job="tatara-operator"}[1h])) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "{{ index $values \"C\" }} context bundle(s) for {{ index $labels \"agent_kind\" }} agents exceeded maxBundleBytes in 1h and had their oldest comments elided. The agent is told (the <comments elided=> marker is explicit), but it is working from a partial thread. At a 400 KB budget against an 8192-byte comment cap this should essentially never fire."
     labels:
       homelab: "true"
       system: "tatara"

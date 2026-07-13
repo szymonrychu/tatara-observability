@@ -34,12 +34,6 @@ resource "grafana_dashboard" "memory" {
   overwrite   = true
 }
 
-resource "grafana_dashboard" "chat" {
-  folder      = grafana_folder.tatara.uid
-  config_json = file("${path.module}/dashboards/chat.json")
-  overwrite   = true
-}
-
 resource "grafana_dashboard" "ingester" {
   folder      = grafana_folder.tatara.uid
   config_json = file("${path.module}/dashboards/ingester.json")

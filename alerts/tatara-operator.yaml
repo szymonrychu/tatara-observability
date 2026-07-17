@@ -781,6 +781,33 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "warning"
+  # kind=review is the ONE outcome kind whose commit does not itself advance the Task's
+  # stage: the advance is deferred to MergeRequestReconciler -> DrainPendingReview ->
+  # advanceAfterReview, a SECOND reconciler racing the pod-liveness caps. A 5m handoff
+  # deadline (tatarav1alpha1.HandoffDeadline) bounds that race: if the drain has not
+  # advanced the Task within 5m of the outcome landing, it parks stageReason=handoff-stalled.
+  # ANY occurrence matters (threshold 0, mirrors pod-recreation-exhausted above) because
+  # the review already landed - the PR is approved and posted - and this Task's only
+  # recovery path left is a backlog-sweep re-mint. Two causes: a dead drain (the
+  # MergeRequest CR was deleted, the workqueue item was dropped, or leader election
+  # changed over) versus a drain that was merely slow because the forge was degraded for
+  # more than 5m (false positive - the work is fine, just late). Correlate with SCM/webhook
+  # error-ratio alerts in the same window to tell the two apart.
+  - name: "Operator handoff drain stalled"
+    queries:
+      - expression: |
+          sum(increase(operator_task_terminal_total{namespace="tatara",job="tatara-operator",stage="parked",stageReason="handoff-stalled"}[1h])) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator parked {{ index $values \"C\" }} Task(s) in 1h with stage=parked, stageReason=handoff-stalled. A review outcome was accepted and the PR review already landed, but the cross-reconciler drain (MergeRequestReconciler -> DrainPendingReview -> advanceAfterReview) did not advance the Task within the 5m handoff deadline, so it parked instead of progressing. Check whether the MergeRequest CR was deleted, the workqueue item was dropped, or leader election changed over (dead drain, needs a fix or a manual nudge) versus an SCM/forge degradation lasting over 5m that only slowed the drain down (false positive, work is fine). Recovery today is a backlog-sweep re-mint; a human should confirm which case this is before waiting on that."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
   # ----------------------------------------------------------------------------
   # Release-train integrity + the etcd object budget. Both are CRITICAL on ANY value.
   # ----------------------------------------------------------------------------

@@ -59,6 +59,7 @@ agent-contract-mismatch
 doc-timeout
 operator-error
 head-moving
+handoff-stalled
 
 ## kind
 # contract A.4 - Task.spec.kind (the ORIGIN kind, immutable, baked into the

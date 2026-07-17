@@ -465,6 +465,21 @@ kind), and a metric-blind sweep flags those as illegal Task kinds. `stage_values
 `## kind:exempt-metrics` section; the default stays CHECK, so a new metric that overloads a closed-set
 label fails CI until someone exempts it deliberately.
 
+2026-07-17: Added `Operator handoff drain stalled` (`alerts/tatara-operator.yaml`) for the new
+`stageReason=handoff-stalled` terminal park the operator's companion PR
+(`fix/review-outcome-claim-lease-and-handoff-guard`) introduces: `kind=review` is the one outcome
+kind whose commit doesn't itself advance the Task's stage (that's deferred to
+`MergeRequestReconciler -> DrainPendingReview -> advanceAfterReview`), and a 5m handoff deadline
+now bounds that second-reconciler race. Threshold 0 / for 5m, mirrors the existing
+`pod-recreation-exhausted` single-reason rule: this park means a Task whose review already landed
+is now stuck with no automatic recovery but a backlog-sweep re-mint, so any occurrence pages.
+Also added `handoff-stalled` to `scripts/stage_values_allowlist.txt`'s stageReason closed set -
+`check_metric_provenance.py` failed on the new value until that landed, exactly the guard it exists
+for. Verified `operator_task_terminal_total{kind,stage,stageReason}` and
+`operator_task_parked_total{stage,stageReason}` label names against the operator worktree
+(`internal/obs/task_metrics.go`) before writing the rule, not against the task's suggested
+`{from,reason}` shape, which does not match current code.
+
 CONTRACT GAPS found while repointing (recorded, not worked around):
 - K.1 declares no sweep-DURATION histogram. The sweep's liveness is observable, its latency is not.
 - K.1 labels `operator_task_stage_age_seconds` `{task,stage,kind}` only - no `project`/`repo`/`issue` -

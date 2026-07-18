@@ -1,11 +1,25 @@
 ---
 interval_seconds: 60
-default_no_data_state: "OK"
+default_no_data_state: "Alerting"
+default_exec_err_state: "Alerting"
+# This file's rules are Loki-log-based, not gauge/counter-based like the rest of the
+# platform's alert files. For every OTHER file here, an absent series legitimately means
+# "nothing to report" and default_no_data_state: OK (this file's old default, and
+# grafana.tf's repo-wide default_exec_err_state: OK) is correct. For a Loki QUERY, NoData
+# and ExecErr both also fire when the Loki BACKEND itself is degraded or unreachable (e.g.
+# a Postgres connection-pool exhaustion event, "too many clients") - and OK is exactly the
+# wrong thing to report then: it is blindness dressed up as health (tatara-operator#381
+# gap 2). Flipping to Alerting means a genuine Loki outage now pages instead of going
+# quiet. Every count_over_time(...) expression below carries an `or vector(0)` guard
+# for exactly this reason: without it, a real "zero matching lines" result is ALSO an
+# empty vector, and this flip would turn every quiet period into a false page. The two
+# changes MUST land together - `or vector(0)` alone (old default OK) or the state flip
+# alone (no `or vector(0)`) each break one side of this.
 rules:
   - name: "Tatara agent reported platform problem"
     queries:
       - expression: |
-          sum by (description, category, severity) (count_over_time({namespace="tatara", app="tatara-operator"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | action="agent_internal_issue" [5m]))
+          sum by (description, category, severity) (count_over_time({namespace="tatara", app="tatara-operator"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | action="agent_internal_issue" [5m])) or on() vector(0)
         datasource_uid: "efihqbqlmroqod"
         query_type: "loki"
     math_operator: ">"
@@ -22,7 +36,7 @@ rules:
   - name: "Tatara operator error log burst"
     queries:
       - expression: |
-          sum(count_over_time({namespace="tatara", app="tatara-operator"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | level="ERROR" [5m]))
+          sum(count_over_time({namespace="tatara", app="tatara-operator"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | level="ERROR" [5m])) or vector(0)
         datasource_uid: "efihqbqlmroqod"
         query_type: "loki"
     math_operator: ">"
@@ -43,7 +57,7 @@ rules:
   - name: "Tatara approval refusals elevated"
     queries:
       - expression: |
-          sum by (reason) (count_over_time({namespace="tatara", app="tatara-operator"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | action="approval_refused" [15m]))
+          sum by (reason) (count_over_time({namespace="tatara", app="tatara-operator"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | action="approval_refused" [15m])) or on() vector(0)
         datasource_uid: "efihqbqlmroqod"
         query_type: "loki"
     math_operator: ">"
@@ -60,7 +74,7 @@ rules:
   - name: "Tatara memory error log burst"
     queries:
       - expression: |
-          sum(count_over_time({namespace="tatara", app="tatara-memory"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | level="ERROR" [5m]))
+          sum(count_over_time({namespace="tatara", app="tatara-memory"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | level="ERROR" [5m])) or vector(0)
         datasource_uid: "efihqbqlmroqod"
         query_type: "loki"
     math_operator: ">"
@@ -73,4 +87,55 @@ rules:
       homelab: "true"
       system: "tatara"
       component: "memory"
+      severity: "warning"
+  # Chronic ERROR trickle (tatara-operator#381 gap 3): "Tatara operator error log burst"
+  # above only catches a SPIKE (>20 ERROR lines in 5m). A steady low-rate ERROR (e.g.
+  # ~1 line/50min) never crosses that bar and stays invisible indefinitely. Grouping by
+  # msg lets each distinct error message cross its own much lower bar without one noisy
+  # message masking a quiet one - verified safe to group by msg: only 11 distinct ERROR
+  # msg values over a live 24h window (2026-07-19, via grafana MCP against datasource
+  # efihqbqlmroqod), so cardinality is bounded and does not need topk/coarsening.
+  - name: "Tatara operator error recurring"
+    queries:
+      - expression: |
+          sum by (msg) (count_over_time({namespace="tatara", app="tatara-operator"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | level="ERROR" [1h])) or on() vector(0)
+        datasource_uid: "efihqbqlmroqod"
+        query_type: "loki"
+    math_operator: ">="
+    threshold: 2
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator logged {{ index $values \"C\" }} ERROR line(s) with msg=\"{{ index $labels \"msg\" }}\" in the last 1h (>=2). Below the 20-in-5m burst threshold but recurring - a chronic trickle. Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\"} | json | level=\"ERROR\" | msg=\"{{ index $labels \"msg\" }}\"."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # callback_authn_failed (tatara-operator#381 gap 3) is logged at INFO level on the
+  # operator's own turn-complete callback receiver, so it never crosses any
+  # level="ERROR" filter above - a sustained run of rejected wrapper callbacks (expired/
+  # rotated OIDC credential, misconfigured Project secret, wrapper pointed at the wrong
+  # endpoint) would otherwise go unnoticed while every rejected callback drops a
+  # completed agent turn (including any report_internal_issue payload) on the floor.
+  # Mirrors "Tatara approval refusals elevated" above (also an INFO-level action label,
+  # same 15m window / 5m for). Currently dormant (0 events over a live 24h window,
+  # 2026-07-19) - wired-but-quiet, same precedent as "Operator orphan reap delete errors"
+  # in alerts/tatara-operator.yaml.
+  - name: "Tatara operator callback auth failures"
+    queries:
+      - expression: |
+          sum (count_over_time({namespace="tatara", app="tatara-operator"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | action="callback_authn_failed" [15m])) or vector(0)
+        datasource_uid: "efihqbqlmroqod"
+        query_type: "loki"
+    math_operator: ">"
+    threshold: 5
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator logged {{ index $values \"C\" }} callback_authn_failed event(s) in 15m (>5). Logged at INFO level (invisible to the ERROR-log-burst rule) on the operator's turn-complete callback receiver. Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\"} | json | action=\"callback_authn_failed\"."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
       severity: "warning"

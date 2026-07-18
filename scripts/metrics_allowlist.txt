@@ -259,6 +259,10 @@ semantic_chunk_extractions_total
 # (issue #57 reconciliation, 2026-07-18): it is the same not-yet-deployed OTel
 # metric, not one this section's producer (tatara-operator) will ever emit. ---
 tatara_account_usage_poll_health
+# poller_enabled==1 guard added 2026-07-18 (issue #339): disambiguates
+# "USAGE_ENABLED=false" (permanent in claudeSubscription mode) from a real
+# poll-health failure so the alert stops false-firing.
+tatara_account_usage_poller_enabled
 tatara_account_usage_utilization
 tatara_account_overage_percent
 # dashboard-only (2026-07-13 backfill), verified in the operator worktree's

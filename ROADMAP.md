@@ -90,3 +90,8 @@ Planned work not yet started. Move items out when shipped (note in MEMORY.md if 
   `Firing`, never silently `NoData`; (2) `Operator sweep heartbeat stale` must be `Normal`, not
   `NoData`; (3) `sum(increase(operator_agent_contract_mismatch_total[1h]))` must be `0`. A `NoData`
   hit on a K.1 metric means the operator PR is incomplete, not that this repo's alerts are wrong.
+- `shipped` (2026-07-18, issue #57): reverse-drift metric provenance reconciliation.
+  `scripts/reconcile_metric_provenance.py` shallow-clones the 4 producer repos nightly + on PR/push and
+  fails when the allowlist carries a name none of them emit any more - the hole `check_metric_
+  provenance.py` never covered (it only validates alerts/dashboards against the allowlist, not the
+  allowlist against reality). See MEMORY.md 2026-07-18.

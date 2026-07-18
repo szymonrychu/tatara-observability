@@ -10,6 +10,15 @@ name: alert-rules-lint
 # BOTH alerts/*.yaml and dashboards/*.json: an alert on a metric nobody emits reports OK
 # forever, and a dashboard panel on one renders empty forever. Both read green while the
 # thing they watch is dark.
+#
+# reconcile_metric_provenance.py (issue #57) closes the REMAINING hole: check_metric_
+# provenance.py only validates alerts/dashboards against the allowlist, never the
+# allowlist against reality. A metric removed from a producer repo's Go source stays on
+# the allowlist forever unless someone happens to hand-reconcile it, so any rule still
+# selecting it keeps reporting OK / rendering empty, undetected, indefinitely. This
+# script shallow-clones the 4 producer repos at main and fails on any allowlist entry
+# they no longer emit. A metric removal never touches this repo's paths-filtered
+# triggers below, so it also runs on a nightly schedule.
 
 on:
   pull_request:
@@ -20,6 +29,8 @@ on:
       - "scripts/test_lint_alert_rules.py"
       - "scripts/check_metric_provenance.py"
       - "scripts/test_check_metric_provenance.py"
+      - "scripts/reconcile_metric_provenance.py"
+      - "scripts/test_reconcile_metric_provenance.py"
       - "scripts/metrics_allowlist.txt"
       - "scripts/stage_values_allowlist.txt"
       - ".github/workflows/alert-rules-lint.yml"
@@ -32,9 +43,17 @@ on:
       - "scripts/test_lint_alert_rules.py"
       - "scripts/check_metric_provenance.py"
       - "scripts/test_check_metric_provenance.py"
+      - "scripts/reconcile_metric_provenance.py"
+      - "scripts/test_reconcile_metric_provenance.py"
       - "scripts/metrics_allowlist.txt"
       - "scripts/stage_values_allowlist.txt"
       - ".github/workflows/alert-rules-lint.yml"
+  schedule:
+    # Nightly reverse-drift sweep: a metric removed from a producer repo never touches
+    # this repo's paths above, so the PR/push triggers stay blind to it until someone
+    # happens to edit an alert or dashboard. 03:23 UTC is an arbitrary off-peak minute,
+    # not tied to any other schedule in this repo.
+    - cron: "23 3 * * *"
 
 permissions:
   contents: read
@@ -63,3 +82,11 @@ jobs:
       # failure class as a dark alert rule, one surface over.
       - name: check metric provenance (alerts + dashboards)
         run: python3 scripts/check_metric_provenance.py
+
+      # Reverse-drift gate (issue #57): the check above only validates alerts/dashboards
+      # against the allowlist. This validates the allowlist against the 4 producer repos'
+      # live source, and fails on any entry none of them emit any more. Clone failures
+      # (network blip, GitHub outage) are a neutral skip inside the script itself, never
+      # a hard failure here.
+      - name: reconcile metric provenance against producer repos
+        run: python3 scripts/reconcile_metric_provenance.py

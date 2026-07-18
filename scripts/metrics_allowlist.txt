@@ -55,6 +55,17 @@ kube_job_status_start_time
 kubelet_volume_stats_available_bytes
 kubelet_volume_stats_capacity_bytes
 
+# --- external: forward-looking, not yet deployed by any producer repo ---
+# scripts/reconcile_metric_provenance.py (issue #57) treats "external" sections as exempt
+# from reverse-drift reconciliation - it never clones a repo for these, so a name here is
+# never flagged stale no matter what the 4 producer repos' source says. claude_code_api_error
+# _total belongs here, not under usage-gate, because it will NEVER be grep-derivable from
+# tatara-operator/tatara-claude-code-wrapper/tatara-memory/tatara-memory-repo-ingester Go
+# source: it is Claude Code's native OTel export, landing via a separate OTLP->Prometheus
+# collector deploy through tatara-helmfile (see alerts/tatara-usage-gate.yaml's "Claude Code
+# API 429 rate ... - PENDING OTel deployment" rule and dashboards/claude-usage-windows.json).
+claude_code_api_error_total
+
 # --- operator: new (CROSS-REPO-CONTRACT K.1) ---
 operator_task_stage
 operator_task_stage_age_seconds
@@ -132,10 +143,15 @@ operator_admission_blocked_total
 # live field on BrainstormActivity and HealthCheckActivity (project_types.go:301,332) and
 # the redesign does not remove it - the proposal cap survives (contract, "the proposal cap").
 operator_open_proposals
-# operator_brainstorm_outcome_total{result} (operator_metrics.go:248) is LIVE: A.5 deletes
-# Task.status.brainstormOutcome (the FIELD), but the brainstorming stage still resolves to
-# submit_outcome(propose|skip) (F.3), which is what this counter meters.
-operator_brainstorm_outcome_total
+# operator_brainstorm_outcome_total REMOVED 2026-07-18 (issue #57 reconciliation): the
+# "is LIVE" claim above was wrong by the time it was written - the task-centric redesign
+# commit (0fde318 / 0c84b01, "task-centric redesign") deleted the metric entirely; zero
+# matches for brainstorm_outcome/BrainstormOutcome anywhere under tatara-operator/internal
+# as of that commit. There is no direct successor (submit_outcome's accept/reject counters,
+# operator_rest_outcome_accepted_total / operator_rest_outcome_rejected_total, meter REST
+# call verdicts across all submit_outcome calls, not brainstorm-stage propose|skip results
+# specifically). dashboards/operator.json's "Brainstorm outcomes by result" panel, which
+# selected this metric, is deleted in the same change - see MEMORY.md.
 operator_task_turns_total
 # D1-UNVERIFIED, same as operator_task_terminal_total below: this sibling counter is
 # labelled {project,repo,outcome,model,type} with outcome=delivered|churned|abandoned
@@ -227,11 +243,13 @@ semantic_chunk_extractions_total
 # --- usage-gate: unchanged by this redesign (alerts/tatara-usage-gate.yaml).
 # claude_code_cost_usage / claude_code.api_error are named in the file's header
 # comment as forward-looking (Phase D OTel collector) but no rule selects them
-# yet - not added; the rule that lands with the collector adds them together. ---
+# yet - not added; the rule that lands with the collector adds them together.
+# claude_code_api_error_total moved to the external/forward-looking section
+# (issue #57 reconciliation, 2026-07-18): it is the same not-yet-deployed OTel
+# metric, not one this section's producer (tatara-operator) will ever emit. ---
 tatara_account_usage_poll_health
 tatara_account_usage_utilization
 tatara_account_overage_percent
-claude_code_api_error_total
 # dashboard-only (2026-07-13 backfill), verified in the operator worktree's
 # internal/obs/accountusage_metrics.go.
 tatara_account_usage_resets_at_seconds

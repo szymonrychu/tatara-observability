@@ -916,18 +916,28 @@ rules:
   # existing - this rule must PAGE, not go quiet.
   # Successor to "Operator scan loop stalled" (tatara_scan_*, deleted with the scan).
   # ----------------------------------------------------------------------------
+  # threshold MUST exceed the sweep cadence, not sit under it. The B.4 sweep runs
+  # on the project issueScan cron - 0 */4 * * *, every 4h (14400s) for both live
+  # projects - so a HEALTHY heartbeat sawtooths 0 -> ~14400s and back on every
+  # pass. A 2h (7200s) threshold sat BELOW that peak, so it crossed >7200 for ~2h
+  # of every 4h cycle and paged a perfectly healthy operator (issue #342). 18000s
+  # (5h) clears the 4h peak by a 1h margin, so it fires only when a full sweep
+  # cycle has been genuinely missed. The operator now re-seeds this gauge from
+  # Project.status.lastSweepSuccess on leader startup, so a rollover no longer
+  # blanks it into NoData; the 30m `for` rides over the brief seed/scrape gap at
+  # failover while still keeping the "operator is gone" NoData page (see below).
   - name: "Operator sweep heartbeat stale"
     queries:
       - expression: |
           time() - operator_sweep_last_success_timestamp_seconds{namespace="tatara",job="tatara-operator"}
     math_operator: ">"
-    threshold: 7200
-    for: 10m
+    threshold: 18000
+    for: 30m
     decimal_points: 0
     no_data_state: "Alerting"
     exec_err_state: "Alerting"
     annotations:
-      summary: "tatara-operator sweep activity={{ index $labels \"activity\" }} last succeeded {{ index $values \"C\" }}s ago (>2h). No orphan Issues are being minted into Tasks and no backlog is being mirrored. NoData on this rule is ALSO a failure and is configured to fire: an absent series means the operator is not sweeping at all."
+      summary: "tatara-operator sweep activity={{ index $labels \"activity\" }} last succeeded {{ index $values \"C\" }}s ago (>5h, i.e. a full 4h sweep cycle has been missed). No orphan Issues are being minted into Tasks and no backlog is being mirrored. NoData on this rule is ALSO a failure and is configured to fire: an absent series means the operator is not sweeping at all."
     labels:
       homelab: "true"
       system: "tatara"

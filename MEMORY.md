@@ -2,6 +2,17 @@
 
 Past decisions + context. One dated line per entry.
 
+- 2026-07-18: Issue #342 - "Operator sweep heartbeat stale" false-fired on every 4h cycle and every
+  operator rollout. Root cause A: `threshold: 7200` (2h) sat BELOW the sweep cadence (issueScan cron
+  `0 */4 * * *` = 4h/14400s), so a HEALTHY heartbeat sawtooths 0->~14400s and crossed >7200 for ~2h of
+  every 4h period (refires were exactly 4h apart). Root cause B: the gauge is process-local and
+  `no_data_state: Alerting`, so every leader rollover blanked it into a NoData page until the next 4h
+  sweep. Fix: threshold 7200->18000 (5h, clears the 4h peak by 1h so it fires only on a genuinely
+  missed cycle) and `for` 10m->30m (rides over the brief failover NoData/scrape gap). Kept
+  `no_data_state: Alerting` deliberately (a truly-absent operator must still PAGE) - the operator side
+  (tatara-operator #342) now re-seeds the gauge from `Project.status.lastSweepSuccess` on leader
+  startup so a rollover no longer produces benign NoData. Same class as #50/#33 (a raw gauge age /
+  metric-absence read paging a healthy fleet).
 - 2026-07-12: Issue #50 - "Operator replica missing" warning false-fired on environment cold start /
   Prometheus restart. `count(up{job="tatara-operator"} == 1) or vector(0) < 3` fabricated a literal 0
   when every `up` series was transiently absent, and 0 < 3 held the false page for the whole 15m

@@ -485,3 +485,33 @@ CONTRACT GAPS found while repointing (recorded, not worked around):
 - K.1 labels `operator_task_stage_age_seconds` `{task,stage,kind}` only - no `project`/`repo`/`issue` -
   so the delivery board's per-issue table cannot be reconstructed: "Open Issues" becomes "Open Tasks by
   Stage", with no SCM deep-link and no project filter. The Task name is the only handle left.
+
+2026-07-18 (issue #57): `check_metric_provenance.py` only ever validated one direction (alert/dashboard
+-> allowlist). Added `scripts/reconcile_metric_provenance.py`, run as a new CI step alongside it, which
+shallow-clones the 4 producer repos (tatara-operator, tatara-claude-code-wrapper, tatara-memory,
+tatara-memory-repo-ingester - NOT 6: the allowlist's "quality"/"usage-gate" sections are
+operator-emitted, not separate repos) and fails when an allowlist entry is no longer emitted by any of
+them. Nightly cron added (03:23 UTC) since a metric removal never touches this repo's paths-filtered
+PR/push triggers.
+- Derivation anchors on the Prometheus constructor call (`prometheus.New*(`/`promauto.*.New*(`/
+  `NewDesc(`), not a bare `(Name|name): *"..."` grep: verified the bare grep run repo-wide pulls in
+  Kubernetes manifest struct literals (`corev1.ContainerPort{Name: "http"}` etc.) as false positives.
+  The anchored form found 0 false positives against the real tatara-operator/tatara-memory clones.
+- Only the reverse direction (allowlist entry nobody emits) is a hard fail. The forward direction
+  (repo emits a name off the allowlist) is job-summary-only, never fails: proven against the live repos
+  that ~50 legitimately-unlisted metrics exist per component (things with no alert yet, or - per the
+  existing K.1-retirement comment block - metrics deliberately kept off the list because a not-yet-
+  landed operator PR will delete them). Hard-failing that direction would make the job permanently red.
+- `claude_code_api_error_total` moved from the usage-gate section into a new
+  `# --- external: forward-looking, not yet deployed ---` block (reuses the existing kube-metrics
+  exempt-section mechanism): it comes from a future OTel collector, never from any of the 4 repos' Go
+  source, and the reconciler would otherwise flag it stale forever.
+- Found one REAL stale entry, live today: `operator_brainstorm_outcome_total` was deleted from
+  tatara-operator by the task-centric-redesign commit (`0fde318`/`0c84b01`) but stayed on the allowlist
+  (comment claimed "is LIVE") and was still selected by `dashboards/operator.json`'s "Brainstorm
+  outcomes by result" panel - a real silent-green dead panel, undetected until this reconciliation.
+  No direct successor metric exists (`operator_rest_outcome_accepted_total`/`_rejected_total` meter all
+  submit_outcome REST calls, not brainstorm-stage propose|skip specifically), so the panel is deleted,
+  not repointed; the freed grid row goes to the neighboring "Open proposals by repo" panel (w:12->24).
+- Verified clean end-to-end against the real repos at `main` post-fix: `python3
+  scripts/reconcile_metric_provenance.py` exits 0, zero stale entries.

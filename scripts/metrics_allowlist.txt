@@ -229,6 +229,10 @@ semantic_chunk_extractions_total
 # comment as forward-looking (Phase D OTel collector) but no rule selects them
 # yet - not added; the rule that lands with the collector adds them together. ---
 tatara_account_usage_poll_health
+# poller_enabled==1 guard added 2026-07-18 (issue #339): disambiguates
+# "USAGE_ENABLED=false" (permanent in claudeSubscription mode) from a real
+# poll-health failure so the alert stops false-firing.
+tatara_account_usage_poller_enabled
 tatara_account_usage_utilization
 tatara_account_overage_percent
 claude_code_api_error_total

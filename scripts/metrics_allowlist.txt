@@ -123,6 +123,17 @@ operator_repository_last_ingest_timestamp_seconds
 operator_repository_ingest_failing
 operator_review_outcome_total
 
+# --- operator: metric-wiring audit (tatara-operator#370), no alert/panel yet ---
+# operator_review_post_total (merge_metrics.go): C.5.3 phase-2 review posts by
+# result, driven by the MergeRequest reconciler. Confirmed correctly wired and
+# firing in prior pod generations via 7-day Prometheus history.
+operator_review_post_total
+# operator_stage_drift_total (stage_metrics.go): informer-cache-lag early
+# warning, sibling of operator_illegal_stage_transition_total. A trickle is
+# normal; a sustained rate on one stage means a wedged watch. Pre-seeded per
+# stage as of the audit so it carries a zero baseline from operator startup.
+operator_stage_drift_total
+
 # --- operator: surviving, DASHBOARD-ONLY (2026-07-13 backfill). No alert selects these;
 # every one was verified against its declaration in the operator worktree's internal/obs
 # (or internal/pushmetrics) and none is retired by contract K.1. ---

@@ -486,6 +486,7 @@ CONTRACT GAPS found while repointing (recorded, not worked around):
   so the delivery board's per-issue table cannot be reconstructed: "Open Issues" becomes "Open Tasks by
   Stage", with no SCM deep-link and no project filter. The Task name is the only handle left.
 
+2026-07-18 (fix/metric-wiring-audit, companion to tatara-operator#376/tatara-operator#370) Added `operator_review_post_total` and `operator_stage_drift_total` to the metric-provenance allowlist - both correctly wired operator-side (confirmed firing across prior pod generations via 7-day Prometheus history during the operator's metric-wiring audit), just never had an alert/dashboard/allowlist entry here. No alert or dashboard panel added yet: a per-activity brainstorm/documentation scan-cron heartbeat alert and a sustained-stage-drift alert are real alerting design (opt-in gating, threshold tuning), tracked in tatara-operator's ROADMAP.md as follow-ups, not folded into this small allowlist-only PR. Branched off origin/main directly since streams B (#59) and E (#60) were both still open (not yet merged) at PR time - this diff is additive only (two new allowlist lines) and should rebase cleanly over either landing first.
 2026-07-18 (issue #57): `check_metric_provenance.py` only ever validated one direction (alert/dashboard
 -> allowlist). Added `scripts/reconcile_metric_provenance.py`, run as a new CI step alongside it, which
 shallow-clones the 4 producer repos (tatara-operator, tatara-claude-code-wrapper, tatara-memory,

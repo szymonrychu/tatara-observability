@@ -95,3 +95,10 @@ Planned work not yet started. Move items out when shipped (note in MEMORY.md if 
   fails when the allowlist carries a name none of them emit any more - the hole `check_metric_
   provenance.py` never covered (it only validates alerts/dashboards against the allowlist, not the
   allowlist against reality). See MEMORY.md 2026-07-18.
+- `planned`: audit the remaining `alerts/*.yaml` files (`tatara-cd.yaml`, `tatara-ingester.yaml`,
+  `tatara-memory.yaml`, `tatara-operator.yaml`, `tatara-quality.yaml`, `tatara-usage-gate.yaml`,
+  `tatara-wrapper.yaml`) for the same OK/OK NoData+ExecErr blindness `tatara-logs.yaml` just fixed
+  (tatara-operator#381 stream 1, see MEMORY.md 2026-07-19) - flip `default_no_data_state`/
+  `default_exec_err_state` to `Alerting` per file where a Loki-backend-outage should page rather than
+  go quiet, and add `or vector(0)` guards to whichever count-style expressions need them in the same
+  change. Deferred out of this PR for diff reviewability - one file at a time, not a repo-wide sweep.

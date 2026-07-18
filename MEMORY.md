@@ -516,3 +516,22 @@ PR/push triggers.
   not repointed; the freed grid row goes to the neighboring "Open proposals by repo" panel (w:12->24).
 - Verified clean end-to-end against the real repos at `main` post-fix: `python3
   scripts/reconcile_metric_provenance.py` exits 0, zero stale entries.
+- 2026-07-19: Hardened `alerts/tatara-logs.yaml` against Loki-outage blindness
+  (tatara-operator#381 stream 1, handoff gap 2: the "Tatara agent reported platform problem" rule
+  stayed NoData->OK during a live Loki backend outage - Postgres connection-pool exhaustion, "too many
+  clients"). Flipped the file's `default_no_data_state` OK->Alerting and added
+  `default_exec_err_state: "Alerting"` (this file had none before; the repo-wide `grafana.tf` default
+  stays OK for every other file). Because the flip turns an empty Loki result into a page, appended
+  `or vector(0)` to all 4 pre-existing `count_over_time` expressions IN THE SAME CHANGE so a genuine
+  zero-match sample (a real 0, crosses no threshold) is not conflated with the Loki backend being down
+  (empty vector -> now Alerting). Also closed gap 3 (the operator's own ERROR logs had no coverage
+  beyond the generic 20-in-5m burst rule) with two new rules: "Tatara operator error recurring"
+  (chronic ERROR trickle below the burst threshold, grouped by msg - cardinality verified bounded via
+  the grafana MCP: 11 distinct msg values over a live 24h window) and "Tatara operator callback auth
+  failures" (`callback_authn_failed` logs at INFO level on the operator's turn-complete callback
+  receiver, invisible to any ERROR-level filter; currently dormant, 0 events/24h, wired-but-quiet like
+  the existing "Operator orphan reap delete errors" precedent). Scoped this PR to `tatara-logs.yaml`
+  only for diff reviewability; the same audit on every other `alerts/*.yaml` file is a ROADMAP.md
+  follow-up. Neither new rule needed a `scripts/metrics_allowlist.txt` entry -
+  `check_metric_provenance.py` and `lint_alert_rules.py` both skip Loki `query_type` rules by design
+  (they validate Prometheus metric names/label values and `*http_requests_total` families only).

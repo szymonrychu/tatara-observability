@@ -921,7 +921,7 @@ rules:
       - expression: |
           time() - operator_sweep_last_success_timestamp_seconds{namespace="tatara",job="tatara-operator"}
     math_operator: ">"
-    threshold: 7200
+    threshold: 21600
     for: 10m
     decimal_points: 0
     no_data_state: "Alerting"

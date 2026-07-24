@@ -535,3 +535,19 @@ PR/push triggers.
   follow-up. Neither new rule needed a `scripts/metrics_allowlist.txt` entry -
   `check_metric_provenance.py` and `lint_alert_rules.py` both skip Loki `query_type` rules by design
   (they validate Prometheus metric names/label values and `*http_requests_total` families only).
+- 2026-07-24: Widened every `model="claude-opus-4-8"` cost-formula matcher to
+  `model=~"claude-opus-4-8|claude-opus-5"` - the token-spend runaway rule
+  (`alerts/tatara-operator.yaml`, 4 terms) and both dashboard cost panels
+  (`dashboards/task-delivery.json` x2, `dashboards/claude-usage-windows.json` x1, 4 terms
+  each). ADDED alongside, never replaced: a plain swap would drop the historical
+  opus-4-8 series from the cost panels and could silence the runaway alert across the
+  whole migration window (any task still tagged opus-4-8 in existing series would stop
+  matching). Regex-over-duplication is exact, not an approximation, because opus-5 and
+  opus-4-8 share every price multiplier ($5/$25/$0.50/$6.25 per MTok for
+  input/output/cache_read/cache_creation) - one rate/weight pair covers both IDs. No
+  `scripts/metrics_allowlist.txt`/`stage_values_allowlist.txt` entry needed: `model` is
+  not in `check_metric_provenance.py`'s closed-set label list, and the script already
+  splits `=~"a|b"` alternations when checking selectors. `alerts/tatara-quality.yaml`
+  inspected and left untouched on purpose: its one rule (lines 19, 21, 22, and the rule
+  label at 34) keys exclusively on `model="claude-sonnet-5"`, names no opus ID, and the
+  sonnet tier did not move.

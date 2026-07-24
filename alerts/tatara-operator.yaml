@@ -431,10 +431,10 @@ rules:
     queries:
       - expression: |
           sum(
-              rate(operator_task_tokens_total{type="input",          model="claude-opus-4-8"}[15m]) * 5e-6
-           or rate(operator_task_tokens_total{type="output",         model="claude-opus-4-8"}[15m]) * 25e-6
-           or rate(operator_task_tokens_total{type="cache_read",     model="claude-opus-4-8"}[15m]) * 0.5e-6
-           or rate(operator_task_tokens_total{type="cache_creation", model="claude-opus-4-8"}[15m]) * 6.25e-6
+              rate(operator_task_tokens_total{type="input",          model=~"claude-opus-4-8|claude-opus-5"}[15m]) * 5e-6
+           or rate(operator_task_tokens_total{type="output",         model=~"claude-opus-4-8|claude-opus-5"}[15m]) * 25e-6
+           or rate(operator_task_tokens_total{type="cache_read",     model=~"claude-opus-4-8|claude-opus-5"}[15m]) * 0.5e-6
+           or rate(operator_task_tokens_total{type="cache_creation", model=~"claude-opus-4-8|claude-opus-5"}[15m]) * 6.25e-6
            or rate(operator_task_tokens_total{type="input",          model="claude-sonnet-5"}[15m]) * 3e-6
            or rate(operator_task_tokens_total{type="output",         model="claude-sonnet-5"}[15m]) * 15e-6
            or rate(operator_task_tokens_total{type="cache_read",     model="claude-sonnet-5"}[15m]) * 0.3e-6

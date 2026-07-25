@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Lint tatara alert rules for the benign/transient classification convention.
+"""Lint tatara alert rules for the benign/transient classification convention
+PLUS the structural alert-shape checks documented in CONVENTIONS.md.
 
 Enforces the "filter-or-justify" rule from CONVENTIONS.md: any alert rule whose
 PromQL selects a server-error status on an *http_requests_total metric family
@@ -71,18 +72,19 @@ ANNOTATION_KEY = "tatara_probe_exclusion"
 
 
 class Violation:
-    def __init__(self, path: str, rule: str, metric: str):
+    """One rule (or one file-level default) that breaks an alert-shape convention.
+
+    `rule` is the rule name, or a "<file ...>" placeholder for a file-scope
+    finding. `message` completes the sentence 'rule "<name>" ...'.
+    """
+
+    def __init__(self, path: str, rule: str, message: str):
         self.path = path
         self.rule = rule
-        self.metric = metric
+        self.message = message
 
     def __str__(self) -> str:
-        return (
-            f"{self.path}: rule \"{self.rule}\" selects server errors on "
-            f"`{self.metric}` but neither excludes probe routes in the selector "
-            f"(e.g. route!~\"/readyz|/healthz|/metrics\") nor sets a non-empty "
-            f"`{ANNOTATION_KEY}` annotation. See CONVENTIONS.md."
-        )
+        return f'{self.path}: rule "{self.rule}" {self.message}'
 
 
 def _selects_server_error(selector: str) -> bool:
@@ -114,7 +116,55 @@ def lint_rule(path: str, rule: dict) -> Violation | None:
     annotations = rule.get("annotations") or {}
     if str(annotations.get(ANNOTATION_KEY, "")).strip():
         return None  # justified
-    return Violation(path, rule.get("name", "<unnamed>"), metric)
+    return Violation(
+        path,
+        rule.get("name", "<unnamed>"),
+        f"selects server errors on `{metric}` but neither excludes probe routes in "
+        f"the selector (e.g. route!~\"/readyz|/healthz|/metrics\") nor sets a "
+        f"non-empty `{ANNOTATION_KEY}` annotation. See CONVENTIONS.md.",
+    )
+
+
+def _joined_expressions(rule: dict) -> str:
+    queries = rule.get("queries") or []
+    return "\n".join(q.get("expression", "") or "" for q in queries)
+
+
+# --- Check 1: fabricated-zero deadman on a foreign exporter's metric ---------
+#
+# `or vector(0)` (and its `or on() vector(0)` form) substitutes a literal zero
+# when the vector is empty. Paired with a `<` threshold on a metric produced by a
+# DIFFERENT exporter than the system being alerted on, that turns "the exporter is
+# unscrapeable" into "the alerted system is down" - tatara-observability#67, where
+# a kube-state-metrics gap paged that the operator was down while
+# up{job="tatara-operator"}=1 throughout. Use absent()/absent_over_time(), an
+# independent cross-exporter gate, or noDataState instead.
+_OR_VECTOR_ZERO = re.compile(r"\bor\b(?:\s+on\s*\([^)]*\))?\s+vector\s*\(\s*0\s*\)")
+_FOREIGN_METRIC = re.compile(r"(?<![A-Za-z0-9_:])kube_[a-z0-9_]+")
+DEADMAN_ANNOTATION_KEY = "tatara_absence_fires"
+
+
+def lint_fabricated_zero(path: str, rule: dict) -> Violation | None:
+    joined = _joined_expressions(rule)
+    if not _OR_VECTOR_ZERO.search(joined):
+        return None
+    if str(rule.get("math_operator", ">")).strip() not in ("<", "<="):
+        return None
+    m = _FOREIGN_METRIC.search(joined)
+    if m is None:
+        return None
+    annotations = rule.get("annotations") or {}
+    if str(annotations.get(DEADMAN_ANNOTATION_KEY, "")).strip():
+        return None
+    return Violation(
+        path,
+        rule.get("name", "<unnamed>"),
+        f"pairs `or vector(0)` with a `{rule.get('math_operator')}` threshold on "
+        f"`{m.group(0)}`, a metric from a different exporter than the system this "
+        f"rule alerts on: an exporter gap fabricates a zero and pages for the wrong "
+        f"system. Gate the rule on that exporter being up, use absent(), or set a "
+        f"non-empty `{DEADMAN_ANNOTATION_KEY}` annotation. See CONVENTIONS.md.",
+    )
 
 
 def lint_file(path: str) -> list[Violation]:
@@ -123,9 +173,10 @@ def lint_file(path: str) -> list[Violation]:
         return []
     out = []
     for rule in data.get("rules") or []:
-        v = lint_rule(path, rule)
-        if v is not None:
-            out.append(v)
+        for check in (lint_rule, lint_fabricated_zero):
+            v = check(path, rule)
+            if v is not None:
+                out.append(v)
     return out
 
 
@@ -152,16 +203,12 @@ def main(argv: list[str]) -> int:
         print(f"lint_alert_rules: {exc}", file=sys.stderr)
         return 2
     if violations:
-        print(f"FAIL: {len(violations)} alert rule(s) violate the benign/transient convention:\n")
+        print(f"FAIL: {len(violations)} alert rule(s) violate the tatara alert conventions:\n")
         for v in violations:
             print(f"  - {v}")
-        print(
-            "\nFix: add a probe-route exclusion to the selector, OR set a "
-            f"`{ANNOTATION_KEY}` annotation citing where probes are excluded "
-            "(producer-side) or the tracked follow-up. See CONVENTIONS.md."
-        )
+        print("\nEach message names its own fix. See CONVENTIONS.md.")
         return 1
-    print(f"OK: {len(paths)} alert file(s) pass the benign/transient convention lint.")
+    print(f"OK: {len(paths)} alert file(s) pass the tatara alert conventions lint.")
     return 0
 
 

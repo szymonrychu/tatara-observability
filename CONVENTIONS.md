@@ -166,3 +166,47 @@ pip install pyyaml
 python3 scripts/check_metric_provenance.py            # alerts/*.yaml AND dashboards/*.json
 python3 -m unittest discover scripts -p 'test_*.py'    # linter self-tests (both checkers)
 ```
+
+## 6. Structural alert-shape checks
+
+`scripts/lint_alert_rules.py` enforces three more conventions beyond section 3's
+filter-or-justify. All three are deterministic from rule text alone, so they have
+no false failures. Each is justify-able with a named annotation, so a deliberate
+exception is greppable rather than remembered.
+
+### 6.1 No fabricated zero on a foreign exporter's metric
+
+`or vector(0)` substitutes a literal zero when the vector is empty. On a metric
+produced by a DIFFERENT exporter than the system being alerted on, paired with a
+`<` (or `<=`) threshold, that turns "the exporter is unscrapeable" into "the
+alerted system is down". This is tatara-observability#67: a kube-state-metrics
+gap paged that the operator was down while `up{job="tatara-operator"}=1`
+throughout.
+
+The check fires when an expression contains `or vector(0)` (or `or on() vector(0)`)
+AND `math_operator` is `<`/`<=` AND a `kube_*` metric appears in the expression.
+
+Correct alternatives, in preference order:
+
+1. Gate the rule on that exporter being up:
+   `... < 1 and on() (up{job="kube-state-metrics"} == 1)`, plus a separate
+   `absent(up{job="<exporter>"} == 1)` rule so the exporter outage itself is not a
+   blind spot.
+2. `absent()` / `absent_over_time()` on the series you actually care about.
+3. Let `noDataState` do its job. Note that `or vector(0)` makes `noDataState`
+   structurally dead code - a rule written that way can only ever be
+   Normal/Alerting/Error, never NoData.
+
+`or vector(0)` paired with a `>` threshold is the SAFE direction and is not
+flagged: a fabricated zero crosses no `>` threshold. `or vector(0)` on the alerted
+system's OWN `up` series is also correct and not flagged, because a vanished
+self-scrape genuinely is the failure.
+
+To keep a deliberate fabricated zero, set a non-empty `tatara_absence_fires`
+annotation stating why absence must page:
+
+```yaml
+annotations:
+  summary: "..."
+  tatara_absence_fires: "The fabricated zero IS the condition: <reason>."
+```

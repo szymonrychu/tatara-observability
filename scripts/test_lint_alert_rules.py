@@ -130,6 +130,125 @@ rules:
         self.assertEqual(self._violations(body), [])
 
 
+class FabricatedZeroDeadman(unittest.TestCase):
+    """Check 1: `or vector(0)` + a `<` threshold + a foreign exporter's metric
+    fabricates a zero and pages for the wrong system (tatara-observability#67)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = pathlib.Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _violations(self, body: str):
+        return lint.lint_file(_write(self.tmp, body))
+
+    def test_kube_metric_with_vector_zero_and_lt_is_violation(self):
+        body = """
+rules:
+  - name: "Operator pod not ready"
+    queries:
+      - expression: |
+          sum(kube_pod_status_ready{namespace="tatara",condition="true"}) or vector(0)
+    math_operator: "<"
+    threshold: 1
+"""
+        v = self._violations(body)
+        self.assertEqual(len(v), 1)
+        self.assertEqual(v[0].rule, "Operator pod not ready")
+
+    def test_lte_operator_is_also_a_violation(self):
+        body = """
+rules:
+  - name: "lte variant"
+    queries:
+      - expression: |
+          sum(kube_pod_status_ready{namespace="tatara"}) or vector(0)
+    math_operator: "<="
+    threshold: 1
+"""
+        self.assertEqual(len(self._violations(body)), 1)
+
+    def test_justify_annotation_passes(self):
+        body = """
+rules:
+  - name: "justified deadman"
+    queries:
+      - expression: |
+          sum(kube_pod_status_ready{namespace="tatara"}) or vector(0)
+    math_operator: "<"
+    threshold: 1
+    annotations:
+      tatara_absence_fires: "the fabricated zero IS the intent here, see CONVENTIONS.md"
+"""
+        self.assertEqual(self._violations(body), [])
+
+    def test_empty_justify_annotation_is_violation(self):
+        body = """
+rules:
+  - name: "blank justification"
+    queries:
+      - expression: |
+          sum(kube_pod_status_ready{namespace="tatara"}) or vector(0)
+    math_operator: "<"
+    threshold: 1
+    annotations:
+      tatara_absence_fires: "   "
+"""
+        self.assertEqual(len(self._violations(body)), 1)
+
+    def test_own_exporter_up_deadman_passes(self):
+        # sum(up) or vector(0) < 1 is the CORRECT deadman: it reads the alerted
+        # system's own scrape series, so a fabricated zero is the real failure.
+        body = """
+rules:
+  - name: "Operator scrape target down"
+    queries:
+      - expression: |
+          sum(up{namespace="tatara",job="tatara-operator"}) or vector(0)
+    math_operator: "<"
+    threshold: 1
+"""
+        self.assertEqual(self._violations(body), [])
+
+    def test_gt_threshold_with_kube_metric_passes(self):
+        body = """
+rules:
+  - name: "Operator agent pod pool saturated with queued work"
+    queries:
+      - expression: |
+          (sum(kube_pod_container_status_running{namespace="tatara",container="wrapper"}) or vector(0)) and (sum(operator_queue_depth{namespace="tatara"}) > 0)
+    math_operator: ">"
+    threshold: 5.999
+"""
+        self.assertEqual(self._violations(body), [])
+
+    def test_kube_metric_without_vector_zero_passes(self):
+        body = """
+rules:
+  - name: "Operator deployment has no available replicas"
+    queries:
+      - expression: |
+          max(kube_deployment_status_replicas_available{namespace="tatara"}) and (max(kube_deployment_spec_replicas{namespace="tatara"}) >= 1)
+    math_operator: "<"
+    threshold: 1
+"""
+        self.assertEqual(self._violations(body), [])
+
+    def test_or_on_vector_zero_form_is_also_matched(self):
+        body = """
+rules:
+  - name: "or on() vector(0) variant"
+    queries:
+      - expression: |
+          sum(kube_pod_status_ready{namespace="tatara"}) or on() vector(0)
+    math_operator: "<"
+    threshold: 1
+"""
+        self.assertEqual(len(self._violations(body)), 1)
+
+
 class RealAlertFilesPass(unittest.TestCase):
     def test_all_committed_alert_files_pass(self):
         paths = sorted(str(p) for p in ALERTS_DIR.glob("*.yaml"))

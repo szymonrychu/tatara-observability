@@ -184,7 +184,9 @@ gap paged that the operator was down while `up{job="tatara-operator"}=1`
 throughout.
 
 The check fires when an expression contains `or vector(0)` (or `or on() vector(0)`)
-AND `math_operator` is `<`/`<=` AND a `kube_*` metric appears in the expression.
+AND `math_operator` is `<`/`<=` AND a `kube_*` metric appears in the expression. It only
+recognises `kube_*` as a foreign exporter today - a fabricated zero on some other foreign
+exporter's metric (`node_*`, `container_*`, etc.) is not currently detected.
 
 Correct alternatives, in preference order:
 
@@ -233,7 +235,10 @@ The check ties the guard to the histogrammed metric's own family by name only
 (text matching, not label matching) - it does not verify the guard's label
 selectors match the histogram's, and a `histogram_quantile(` call whose own
 arguments carry no recognisable `<metric>_bucket` selector (e.g. a recording
-rule as input) is treated as unguarded rather than silently passed.
+rule as input) is treated as unguarded rather than silently passed. Within one
+`histogram_quantile(` call, only the FIRST `<metric>_bucket` selector found in
+that call's own arguments is taken as its family - a second, different
+`_bucket` reference later in the same call's arguments is not considered.
 
 To keep an unguarded quantile, set a non-empty `tatara_idle_quantile` annotation
 saying why that histogram is never idle.
@@ -256,7 +261,13 @@ set as the file's `default_exec_err_state`. It is justified by a non-empty
 
 A rule that merely INHERITS an already-justified file default needs nothing extra.
 A rule that opts INTO `Alerting` against an `OK`/`Error` file default needs its own
-annotation.
+annotation. This also applies when the rule REDECLARES `exec_err_state: Alerting`
+explicitly and the file default is ALREADY `Alerting` and already justified: the
+rule-level check looks only at whether the rule itself sets `Alerting`, not at
+whether that value happens to match the inherited default, so a redundant
+re-declaration is flagged and needs its own rule-level annotation too - inheriting
+(leaving `exec_err_state` unset) is the only way to ride on the file-level
+justification alone.
 
 The top-level file key is safe: Terraform's object-type conversion in
 `modules/grafana_alert/variables.tf` silently drops attributes the type does not

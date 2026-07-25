@@ -2480,7 +2480,7 @@
           "refId": "A"
         }
       ],
-      "title": "Sweep freshness by activity (time since last success)",
+      "title": "Sweep freshness by project and activity (time since last success)",
       "type": "timeseries"
     },
     {

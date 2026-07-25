@@ -421,6 +421,23 @@ rules:
         self.assertEqual(len(v), 1)
         self.assertEqual(v[0].rule, "two quantiles, one unguarded")
 
+    def test_fractional_threshold_is_not_an_idle_guard(self):
+        # `> 0.2` is the alert's OWN ratio threshold, not an idle guard. The guard
+        # regex must not treat the leading "0" of "0.2" as a bare `> 0` idle check
+        # (fix #71-5).
+        body = """
+rules:
+  - name: "ratio alert misread as guarded"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(x_bucket[5m])) by (le)) / sum(rate(x_count[5m])) > 0.2
+    math_operator: ">"
+    threshold: 0.2
+"""
+        v = self._violations(body)
+        self.assertEqual(len(v), 1)
+        self.assertEqual(v[0].rule, "ratio alert misread as guarded")
+
     def test_multiple_quantile_calls_both_guarded_passes(self):
         body = """
 rules:

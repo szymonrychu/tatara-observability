@@ -598,7 +598,7 @@ PR/push triggers.
   its `promql/series` check explicitly whitelists `or vector(0)` ("the intention
   of adding `or vector(0)` is to provide a fallback value"), it has no
   histogram-quantile guard, and it has no plugin mechanism, so it can express
-  none of the three conventions. This PR was merged AFTER
+  none of the three conventions. This PR must be merged AFTER
   tatara-operator#441's, because `reconcile_metric_provenance.py` hard-fails on
   an allowlist entry no producer repo emits.
 - 2026-07-25: Two sharper edges on the three new structural lint checks, found
@@ -623,3 +623,42 @@ PR/push triggers.
   outage this file's rules exist to catch (see the 2026-07-19 entry above); the
   new `tatara_exec_err_justification` key now encodes in a greppable, CI-checked
   place the argument the file's header comment previously only made in prose.
+- 2026-07-25 (final-fixes wave, fix #71): the whole-branch review caught a real defect in
+  the just-migrated "Tatara agent reported platform problem" rule (fix #71-1): `increase()`
+  cannot see a counter's own birth. `agent_internal_issue_total` is deliberately NOT
+  pre-seeded, so a child series is created BY its first `Inc()` with its first exported
+  sample already =1 - within the 5m window Prometheus sees a flat "1,1,...", delta=0,
+  `increase()`=0 (or no result at all with a single sample). Series identity includes
+  `pod`, three operator replicas serve turn-complete callbacks, and pods restart near-daily,
+  so the dropped set was one event per (category, severity, pod) per pod lifetime -
+  plausibly most reports. The migration had shipped LESS detection than the Loki rule it
+  replaced, which fired on the very first line. Fixed with a per-series (not aggregate)
+  manual subtraction, `clamp_min(x - (x offset 5m or 0*x), 0)` summed by category: `or`
+  supplies a zero for any series absent 5m ago (the birth case), a vanished series is
+  excluded from the sum entirely by PromQL's inner-join vector-matching (not zeroed, so a
+  rolled-over pod cannot produce a spurious negative aggregate), and `clamp_min` additionally
+  guards against a same-window in-memory counter reset (process crash-restart on the same
+  pod) producing a negative per-series term that could silently absorb a genuine positive
+  delta from a different pod's series in the same sum. Verified against live Prometheus via
+  the grafana MCP against structural analogs `operator_reconcile_total`/
+  `operator_task_terminal_total` (both lazily-created counters with a `pod` label,
+  same shape as `agent_internal_issue_total` which itself has zero live series today,
+  nothing to report): the subtraction's steady-state output matches `increase()` within
+  extrapolation rounding, the empty-selector case runs clean with an empty result (no
+  NoData regression), and the vanished-series exclusion and clamp_min no-op were both
+  confirmed against live data. No pod restarted during the live check, so the brand-new-
+  series branch rests on PromQL's documented `or`/vector-matching semantics rather than an
+  observed live birth. Also in this wave: dropped a misleading "or no pods exist at all"
+  claim from "Operator pod not ready"'s summary (that coverage lives in "Operator deployment
+  has no available replicas" + "Operator scrape target down" since the `or vector(0)`
+  removal, not here); fixed the sweep-freshness dashboard panel title to say "by project and
+  activity" (query/legend already did); dropped `lint_alert_rules.py`'s dead
+  `file_default` parameter on `lint_rule_exec_err_state`; closed the idle-quantile guard
+  regex on a fractional threshold (`(?![.\d])` so `> 0.2` is no longer misread as a bare
+  `> 0` idle guard - a ratio alert's own condition, not a guard); deduplicated `lint_rule`'s
+  inline queries-join onto the existing `_joined_expressions` helper; documented three
+  CONVENTIONS.md gaps found in review (6.1 only recognises `kube_*` as foreign, not
+  `node_*`/`container_*`; 6.2's within-call guard only reads the FIRST `_bucket` selector;
+  6.3's redundant-Alerting-redeclaration-under-an-already-justified-Alerting-default case is
+  flagged, not exempt); and shortened `tatara-logs.yaml`'s header comment to defer to the
+  `tatara_exec_err_justification` key instead of re-arguing the same case in prose.

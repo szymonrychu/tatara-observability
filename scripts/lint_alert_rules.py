@@ -106,8 +106,7 @@ def _error_http_metric(joined_exprs: str) -> str | None:
 
 
 def lint_rule(path: str, rule: dict) -> Violation | None:
-    queries = rule.get("queries") or []
-    joined = "\n".join(q.get("expression", "") or "" for q in queries)
+    joined = _joined_expressions(rule)
     metric = _error_http_metric(joined)
     if metric is None:
         return None  # not an http error-ratio rule; out of scope for this lint
@@ -233,7 +232,11 @@ def lint_idle_quantile(path: str, rule: dict) -> Violation | None:
                 f"or set a non-empty `{QUANTILE_ANNOTATION_KEY}` annotation. "
                 "See CONVENTIONS.md.",
             )
-        guard = re.compile(rf"{re.escape(family)}_count\b.*?>\s*0", re.S)
+        # (?![.\d]) keeps a fractional threshold like `> 0.2` from matching as an idle
+        # guard: a ratio alert's own condition (e.g.
+        # histogram_quantile(...) / sum(rate(x_count[5m])) > 0.2) is not an idle guard,
+        # it is the alert's threshold, and `> 0` alone would match its leading digits.
+        guard = re.compile(rf"{re.escape(family)}_count\b.*?>\s*0(?![.\d])", re.S)
         if guard.search(joined):
             continue
         if justified:
@@ -282,7 +285,7 @@ def lint_file_exec_err_state(path: str, data: dict) -> Violation | None:
     )
 
 
-def lint_rule_exec_err_state(path: str, rule: dict, file_default: str) -> Violation | None:
+def lint_rule_exec_err_state(path: str, rule: dict) -> Violation | None:
     own = rule.get("exec_err_state")
     if own is None:
         # Inherits the file default. If that default is Alerting and unjustified,
@@ -312,13 +315,12 @@ def lint_file(path: str) -> list[Violation]:
     v = lint_file_exec_err_state(path, data)
     if v is not None:
         out.append(v)
-    file_default = str(data.get("default_exec_err_state", "") or "")
     for rule in data.get("rules") or []:
         for check in (lint_rule, lint_fabricated_zero, lint_idle_quantile):
             v = check(path, rule)
             if v is not None:
                 out.append(v)
-        v = lint_rule_exec_err_state(path, rule, file_default)
+        v = lint_rule_exec_err_state(path, rule)
         if v is not None:
             out.append(v)
     return out

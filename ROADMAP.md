@@ -110,4 +110,9 @@ Planned work not yet started. Move items out when shipped (note in MEMORY.md if 
   03:00 the following day; (3) "Operator sweep heartbeat stale" reads Normal through a full day
   including the ~18h window that previously fired; (4) tatara-operator#446's open question - whether
   two Projects genuinely missed a 12:00 brainstorm slot - is now answerable, because the series is
-  per-Project. Pure runtime check via the grafana MCP server, no repo artefact to land.
+  per-Project. Pure runtime check via the grafana MCP server, no repo artefact to land. (5) Confirm
+  "Tatara agent reported platform problem" actually FIRES on a real agent-reported issue after the
+  operator rollout: its per-series subtraction fix (fix #71-1, see MEMORY.md 2026-07-25 final-fixes
+  entry) could only be validated live against structural analogs (`agent_internal_issue_total` itself
+  has zero live series today), so this is the one rule in the set whose live firing behaviour cannot
+  be proven from the repo alone.

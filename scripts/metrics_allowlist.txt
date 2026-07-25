@@ -134,6 +134,20 @@ operator_review_post_total
 # stage as of the audit so it carries a zero baseline from operator startup.
 operator_stage_drift_total
 
+# --- operator: cadence-aware heartbeat + agent-issue counter (2026-07-25,
+# tatara-operator#441 / tatara-observability#63/#65) ---
+# operator_sweep_next_expected_timestamp_seconds is the producer-computed next
+# expected run per (project, activity), the kube-state-metrics
+# kube_cronjob_next_schedule_time pattern; it replaces the flat staleness
+# threshold in "Operator sweep heartbeat stale".
+# agent_internal_issue_total{category,severity} takes "Tatara agent reported
+# platform problem" off Loki.
+# BOTH require tatara-operator's fix/sweep-heartbeat-and-alert-false-positives to
+# be on main first - reconcile_metric_provenance.py hard-fails on an allowlist
+# entry no producer repo emits.
+operator_sweep_next_expected_timestamp_seconds
+agent_internal_issue_total
+
 # --- operator: surviving, DASHBOARD-ONLY (2026-07-13 backfill). No alert selects these;
 # every one was verified against its declaration in the operator worktree's internal/obs
 # (or internal/pushmetrics) and none is retired by contract K.1. ---

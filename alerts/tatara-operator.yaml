@@ -121,21 +121,53 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "critical"
+  # `or vector(0)` REMOVED (tatara-observability#67). On a FOREIGN exporter's
+  # metric with a `<` comparison it fabricates a zero and pages that the operator
+  # is down while up{job="tatara-operator"}=1 throughout: kube-state-metrics being
+  # unscrapeable is not the operator being unready. The `and on()` gate makes the
+  # rule evaluate only while kube-state-metrics is demonstrably reporting; without
+  # a gate an absent series would be NoData -> the file default OK, which is a
+  # silent blind spot, so "Kube-state-metrics down" below covers that half.
+  # Total absence of the operator itself stays covered by "Operator scrape target
+  # down", which reads the operator's OWN up series - a fabricated zero THERE is
+  # correct, because a vanished self-scrape genuinely is the failure.
   - name: "Operator pod not ready"
     queries:
       - expression: |
-          sum(kube_pod_status_ready{namespace="tatara",pod=~"tatara-operator-.*",condition="true"}) or vector(0)
+          sum(kube_pod_status_ready{namespace="tatara",pod=~"tatara-operator-.*",condition="true"}) < 1
+            and on() (up{job="kube-state-metrics"} == 1)
     math_operator: "<"
     threshold: 1
     for: 10m
     decimal_points: 0
     annotations:
-      summary: "No tatara-operator pod is Ready (sum ready={{ index $values \"C\" }}). Readiness probe failing across the Deployment, or no pods exist at all (the `or vector(0)` fallback fires when the readiness series has vanished)."
+      summary: "No tatara-operator pod is Ready (sum ready={{ index $values \"C\" }}), while kube-state-metrics is confirmed up. The readiness probe is failing across the Deployment, or no pods exist at all."
     labels:
       homelab: "true"
       system: "tatara"
       component: "operator"
       severity: "critical"
+  # The companion to the gate above. Gating "Operator pod not ready" on
+  # kube-state-metrics converts a KSM outage from a false page into a silent blind
+  # spot unless the outage itself is alerted - upstream kubernetes-mixin has this
+  # exact gap and ships no such rule; we do not want to inherit it. absent() is 1
+  # exactly when no `up{job="kube-state-metrics"} == 1` series exists, and empty
+  # otherwise -> NoData -> the file default OK.
+  - name: "Kube-state-metrics down"
+    queries:
+      - expression: |
+          absent(up{job="kube-state-metrics"} == 1)
+    math_operator: ">"
+    threshold: 0
+    for: 10m
+    decimal_points: 0
+    annotations:
+      summary: "kube-state-metrics is not reporting. Every kube_* -derived tatara alert is blind while this fires, including \"Operator pod not ready\", which is gated on this exporter being up."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
   # ----------------------------------------------------------------------------
   # Control-loop liveness: the leader emits business metrics only. A wedged or
   # stalled loop shows up as flat scan/reconcile counters across all replicas.
@@ -906,43 +938,93 @@ rules:
       component: "operator"
       severity: "warning"
   # ----------------------------------------------------------------------------
-  # The sweep. This is the ONLY heartbeat in the tatara alert set, and it is the ONLY rule
-  # that overrides no_data_state / exec_err_state.
+  # The sweep. This is the ONLY heartbeat in the tatara alert set.
   #
   # Every alert file sets default_no_data_state: "OK" and grafana.tf sets
   # default_exec_err_state = "OK". For a gauge that legitimately vanishes when the fleet is
   # idle that is correct. For a HEARTBEAT it is catastrophic: NoData IS the failure, and OK
   # is the failure being reported as health. If the operator stops sweeping - or stops
-  # existing - this rule must PAGE, not go quiet.
+  # existing - this rule must PAGE, not go quiet. With no `or vector(0)` on this expression
+  # an absent series produces a genuinely empty result, so NoData is REACHABLE here (an
+  # `or vector(0)` would make noDataState dead code).
+  #
+  # exec_err_state is "Error", NOT "Alerting" (tatara-observability#65): a failed query is
+  # not a stalled sweep. Grafana changed this same default in 9.2.0 (PR #55345, issue
+  # #46398) for exactly this reason. "An absent series means the operator is not sweeping"
+  # is an argument for noDataState, which is a different knob and is still Alerting.
+  #
+  # CADENCE LIVES IN THE PRODUCER (tatara-operator#441). The rule reads
+  # operator_sweep_next_expected_timestamp_seconds, which the operator computes per
+  # (project, activity) from that activity's own cron in the Project CR, and carries a
+  # single GRACE PERIOD. The previous flat 21600s threshold was breached for roughly 18
+  # hours of every 24 by the 0 3 * * * / 0 6 * * * nightly crons. One rule covers every
+  # activity of every Project, and a new activity or Project needs no rule change.
+  #
+  # Grace is 3h, not the 30m a naive reading suggests: refine_barrier_timeout can
+  # legitimately hold a scan for up to 2h (tatara-operator
+  # internal/controller/repository_controller.go:49) and the scan still stamps when the
+  # timeout releases, so a shorter grace reintroduces the false fires this rule exists to
+  # remove. A fully-missed nightly batch pages ~3h late instead of being invisible.
   # Successor to "Operator scan loop stalled" (tatara_scan_*, deleted with the scan).
   # ----------------------------------------------------------------------------
   - name: "Operator sweep heartbeat stale"
     queries:
       - expression: |
-          time() - operator_sweep_last_success_timestamp_seconds{namespace="tatara",job="tatara-operator"}
+          time() - operator_sweep_next_expected_timestamp_seconds{namespace="tatara",job="tatara-operator"}
     math_operator: ">"
-    threshold: 21600
+    threshold: 10800
     for: 10m
     decimal_points: 0
     no_data_state: "Alerting"
-    exec_err_state: "Alerting"
+    exec_err_state: "Error"
     annotations:
-      summary: "tatara-operator sweep activity={{ index $labels \"activity\" }} last succeeded {{ index $values \"C\" }}s ago (>2h). No orphan Issues are being minted into Tasks and no backlog is being mirrored. NoData on this rule is ALSO a failure and is configured to fire: an absent series means the operator is not sweeping at all."
+      summary: "tatara-operator project {{ index $labels \"project\" }} activity={{ index $labels \"activity\" }} is {{ index $values \"C\" }}s past its own next expected run (>3h grace). The next-expected timestamp is computed by the operator from that activity's cron and its last success, so this is a genuinely missed run, not a cadence mismatch. NoData on this rule is ALSO a failure and is configured to fire: an absent series means the operator published no next expected run for any activity at all."
     labels:
       homelab: "true"
       system: "tatara"
       component: "operator"
       severity: "critical"
+  # Regrouped by project (tatara-operator#441): operator_sweep_errors_total carries
+  # `project` first now, so without it in the grouping three Projects' errors sum into one
+  # series. The `or vector(0)` guard pairs with a `>` threshold on the operator's OWN
+  # metric, which is the safe direction, and stays.
   - name: "Operator sweep erroring"
     queries:
       - expression: |
-          sum by (activity, reason) (increase(operator_sweep_errors_total{namespace="tatara",job="tatara-operator"}[1h])) or vector(0)
+          sum by (project, activity, reason) (increase(operator_sweep_errors_total{namespace="tatara",job="tatara-operator"}[1h])) or vector(0)
     math_operator: ">"
     threshold: 5
     for: 15m
     decimal_points: 0
     annotations:
-      summary: "tatara-operator sweep activity={{ index $labels \"activity\" }} errored {{ index $values \"C\" }} time(s) in 1h (reason={{ index $labels \"reason\" }}). The heartbeat may still be green if SOME passes succeed; this catches the partially-failing sweep."
+      summary: "tatara-operator sweep project={{ index $labels \"project\" }} activity={{ index $labels \"activity\" }} errored {{ index $values \"C\" }} time(s) in 1h (reason={{ index $labels \"reason\" }}). The heartbeat may still be green if SOME passes succeed; this catches the partially-failing sweep."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # Migrated off Loki (tatara-observability#63). The old rule ran a
+  # `pattern | line_format | json` LogQL pipeline that took ~9.6s over ~50 lines, and its
+  # exec_err_state: Alerting made it page on its own query timeout. The operator DECIDES
+  # this condition in its own code, so hard rule 13 says it exports a counter and the
+  # alert reads that; logs stay the drill-down path and keep the free-text description,
+  # which is deliberately not a metric label.
+  #
+  # Grouped by category ONLY, not by (category, severity): Grafana merges query-result
+  # labels with the rule's configured labels and the CONFIGURED one wins, so two instances
+  # differing only in the metric's `severity` would collapse under this rule's routing
+  # label severity="warning". The counter keeps both labels producer-side.
+  - name: "Tatara agent reported platform problem"
+    queries:
+      - expression: |
+          sum by (category) (increase(agent_internal_issue_total{namespace="tatara",job="tatara-operator"}[5m]))
+    math_operator: ">"
+    threshold: 0
+    for: 1m
+    decimal_points: 0
+    exec_err_state: "Error"
+    annotations:
+      summary: "Tatara agents reported {{ index $values \"C\" }} internal issue(s) of category={{ index $labels \"category\" }} in 5m. Drill down in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\"} | json | action=\"agent_internal_issue\" for the free-text descriptions."
     labels:
       homelab: "true"
       system: "tatara"

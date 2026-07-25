@@ -102,3 +102,12 @@ Planned work not yet started. Move items out when shipped (note in MEMORY.md if 
   `default_exec_err_state` to `Alerting` per file where a Loki-backend-outage should page rather than
   go quiet, and add `or vector(0)` guards to whichever count-style expressions need them in the same
   change. Deferred out of this PR for diff reviewability - one file at a time, not a repo-wide sweep.
+- `shipped` (2026-07-25, #63/#65/#67/#72): cadence-aware sweep heartbeat, absence-vs-zero fixes, and
+  three new structural lint checks. See MEMORY.md 2026-07-25. Follow-on, still `planned`: the
+  post-apply verification for this change - (1) `operator_sweep_last_success_timestamp_seconds`
+  returns one series per (project, activity) with none moving backward; (2)
+  `operator_sweep_next_expected_timestamp_seconds{project="tatara",activity="documentation"}` equals
+  03:00 the following day; (3) "Operator sweep heartbeat stale" reads Normal through a full day
+  including the ~18h window that previously fired; (4) tatara-operator#446's open question - whether
+  two Projects genuinely missed a 12:00 brainstorm slot - is now answerable, because the series is
+  per-Project. Pure runtime check via the grafana MCP server, no repo artefact to land.

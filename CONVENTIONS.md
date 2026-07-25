@@ -113,7 +113,7 @@ When you add or change instrumentation or an alert, before opening the PR:
   expected-absent remote state, incremental work): give it a label that
   separates transient from error (pattern 3) and alert only on the error value.
 - Adding a quantile/latency alert: guard against idle NaN, e.g.
-  `... and on() (sum(rate(<metric>_count[w])) > 0)`.
+  `... and on() (sum(rate(<metric>_count[w])) > 0)`. This is linted - see 6.2.
 
 ## 5. The CI provenance check: no alert AND NO PANEL on a metric nobody emits
 
@@ -210,3 +210,22 @@ annotations:
   summary: "..."
   tatara_absence_fires: "The fabricated zero IS the condition: <reason>."
 ```
+
+### 6.2 Guard every quantile against the idle NaN
+
+`histogram_quantile` over a bucket set with no samples yields NaN. An idle
+service is not a slow service (section 1's "idle quantiles" entry). This was
+documented in the section 4 author checklist since 2026-07-12 and left to author
+memory; it is now linted.
+
+The check fires when an expression contains `histogram_quantile(` and does not
+also contain a `_count ... > 0` guard. The reference shape is
+`alerts/tatara-operator.yaml`'s "Operator turn submit p95 latency high":
+
+```yaml
+      - expression: |
+          histogram_quantile(0.95, sum(rate(<metric>_bucket{...}[15m])) by (le)) and on() (sum(rate(<metric>_count{...}[15m])) > 0)
+```
+
+To keep an unguarded quantile, set a non-empty `tatara_idle_quantile` annotation
+saying why that histogram is never idle.

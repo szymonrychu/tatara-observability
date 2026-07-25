@@ -249,6 +249,100 @@ rules:
         self.assertEqual(len(self._violations(body)), 1)
 
 
+class IdleQuantileGuard(unittest.TestCase):
+    """Check 2: histogram_quantile over an empty bucket set is NaN; an idle
+    service is not a slow service (CONVENTIONS.md section 1)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = pathlib.Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _violations(self, body: str):
+        return lint.lint_file(_write(self.tmp, body))
+
+    def test_unguarded_quantile_is_violation(self):
+        body = """
+rules:
+  - name: "Unguarded p95"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(operator_turn_submit_duration_seconds_bucket{namespace="tatara"}[15m])) by (le))
+    math_operator: ">"
+    threshold: 30
+"""
+        v = self._violations(body)
+        self.assertEqual(len(v), 1)
+        self.assertEqual(v[0].rule, "Unguarded p95")
+
+    def test_count_guard_passes(self):
+        body = """
+rules:
+  - name: "Operator turn submit p95 latency high"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(operator_turn_submit_duration_seconds_bucket{namespace="tatara"}[15m])) by (le)) and on() (sum(rate(operator_turn_submit_duration_seconds_count{namespace="tatara"}[15m])) > 0)
+    math_operator: ">"
+    threshold: 30
+"""
+        self.assertEqual(self._violations(body), [])
+
+    def test_justify_annotation_passes(self):
+        body = """
+rules:
+  - name: "justified quantile"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(x_bucket[15m])) by (le))
+    math_operator: ">"
+    threshold: 30
+    annotations:
+      tatara_idle_quantile: "this histogram is never idle, it has a synthetic 1/min probe"
+"""
+        self.assertEqual(self._violations(body), [])
+
+    def test_empty_justify_annotation_is_violation(self):
+        body = """
+rules:
+  - name: "blank quantile justification"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(x_bucket[15m])) by (le))
+    math_operator: ">"
+    threshold: 30
+    annotations:
+      tatara_idle_quantile: "  "
+"""
+        self.assertEqual(len(self._violations(body)), 1)
+
+    def test_non_quantile_rule_ignored(self):
+        body = """
+rules:
+  - name: "plain rate rule"
+    queries:
+      - expression: |
+          sum(rate(operator_reconcile_total{result="error"}[10m]))
+    math_operator: ">"
+    threshold: 0
+"""
+        self.assertEqual(self._violations(body), [])
+
+    def test_count_guard_without_gt_zero_is_violation(self):
+        # A _count reference that is not compared against zero is not a guard.
+        body = """
+rules:
+  - name: "count present but ungated"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(x_bucket[15m])) by (le)) / clamp_min(sum(rate(x_count[15m])), 1)
+    math_operator: ">"
+    threshold: 30
+"""
+        self.assertEqual(len(self._violations(body)), 1)
+
+
 class RealAlertFilesPass(unittest.TestCase):
     def test_all_committed_alert_files_pass(self):
         paths = sorted(str(p) for p in ALERTS_DIR.glob("*.yaml"))

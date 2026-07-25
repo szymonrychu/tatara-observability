@@ -167,13 +167,45 @@ def lint_fabricated_zero(path: str, rule: dict) -> Violation | None:
     )
 
 
+# --- Check 2: idle-NaN quantile guard ---------------------------------------
+#
+# histogram_quantile over a bucket set with no samples yields NaN, and an idle
+# service is not a slow service (CONVENTIONS.md section 1). The compliant shape,
+# and the reference example, is alerts/tatara-operator.yaml's
+# "Operator turn submit p95 latency high":
+#   histogram_quantile(0.95, ...) and on() (sum(rate(<metric>_count[w])) > 0)
+_HISTOGRAM_QUANTILE = re.compile(r"\bhistogram_quantile\s*\(")
+_COUNT_GT_ZERO_GUARD = re.compile(r"_count\b.*?>\s*0", re.S)
+QUANTILE_ANNOTATION_KEY = "tatara_idle_quantile"
+
+
+def lint_idle_quantile(path: str, rule: dict) -> Violation | None:
+    joined = _joined_expressions(rule)
+    if not _HISTOGRAM_QUANTILE.search(joined):
+        return None
+    if _COUNT_GT_ZERO_GUARD.search(joined):
+        return None
+    annotations = rule.get("annotations") or {}
+    if str(annotations.get(QUANTILE_ANNOTATION_KEY, "")).strip():
+        return None
+    return Violation(
+        path,
+        rule.get("name", "<unnamed>"),
+        "uses histogram_quantile() with no idle guard: an empty bucket set yields "
+        "NaN and an idle service is not a slow service. Add "
+        "`and on() (sum(rate(<metric>_count[w])) > 0)` (see "
+        "alerts/tatara-operator.yaml's \"Operator turn submit p95 latency high\") "
+        f"or set a non-empty `{QUANTILE_ANNOTATION_KEY}` annotation. See CONVENTIONS.md.",
+    )
+
+
 def lint_file(path: str) -> list[Violation]:
     data = yaml.safe_load(pathlib.Path(path).read_text())
     if not data or not isinstance(data, dict):
         return []
     out = []
     for rule in data.get("rules") or []:
-        for check in (lint_rule, lint_fabricated_zero):
+        for check in (lint_rule, lint_fabricated_zero, lint_idle_quantile):
             v = check(path, rule)
             if v is not None:
                 out.append(v)

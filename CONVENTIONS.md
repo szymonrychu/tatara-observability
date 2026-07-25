@@ -237,3 +237,28 @@ rule as input) is treated as unguarded rather than silently passed.
 
 To keep an unguarded quantile, set a non-empty `tatara_idle_quantile` annotation
 saying why that histogram is never idle.
+
+### 6.3 No self-firing rules
+
+`exec_err_state: Alerting` makes a rule page on its OWN query failure: a timed-out
+or malformed query is reported as the condition the rule watches for. Grafana
+changed this same default from `Alerting` to `Error` in 9.2.0 (PR #55345, issue
+#46398) for exactly this reason. "An absent series means the system is broken" is
+an argument for `no_data_state`, which is a DIFFERENT knob and can stay
+`Alerting` on a genuine heartbeat.
+
+The check fires when `exec_err_state: Alerting` is in effect - set on the rule, or
+set as the file's `default_exec_err_state`. It is justified by a non-empty
+`tatara_exec_err_justification` AT THE SAME SCOPE:
+
+- rule-level setting -> a rule annotation of that name;
+- file-level default -> a top-level key of that name in the alert file.
+
+A rule that merely INHERITS an already-justified file default needs nothing extra.
+A rule that opts INTO `Alerting` against an `OK`/`Error` file default needs its own
+annotation.
+
+The top-level file key is safe: Terraform's object-type conversion in
+`modules/grafana_alert/variables.tf` silently drops attributes the type does not
+declare, so the key never reaches Grafana and never appears in a plan.
+`alerts/tatara-logs.yaml` carries the live example.

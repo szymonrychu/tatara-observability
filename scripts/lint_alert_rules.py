@@ -251,16 +251,76 @@ def lint_idle_quantile(path: str, rule: dict) -> Violation | None:
     return None
 
 
+# --- Check 3: self-firing rule ----------------------------------------------
+#
+# exec_err_state: Alerting makes a rule page on its OWN query failure - a timed-out
+# or malformed query is reported as the condition the rule watches for
+# (tatara-observability#63: a ~9.6s LogQL pipeline paging on its own timeout).
+# Grafana changed this same default from Alerting to Error in 9.2.0 (PR #55345,
+# issue #46398). "An absent series means the system is broken" is an argument for
+# noDataState, which is a DIFFERENT knob.
+#
+# Alerting is justified by a non-empty tatara_exec_err_justification key AT THE
+# SAME SCOPE it is set: a rule-level annotation for a rule-level setting, a
+# top-level file key for a file-level default. Terraform's object-type conversion
+# silently drops the top-level key, so it never reaches Grafana.
+EXEC_ERR_ANNOTATION_KEY = "tatara_exec_err_justification"
+
+
+def lint_file_exec_err_state(path: str, data: dict) -> Violation | None:
+    if str(data.get("default_exec_err_state", "")).strip() != "Alerting":
+        return None
+    if str(data.get(EXEC_ERR_ANNOTATION_KEY, "")).strip():
+        return None
+    return Violation(
+        path,
+        "<file default_exec_err_state>",
+        "sets a file-level `default_exec_err_state: Alerting`, so every rule in "
+        "the file pages on its own query failure, with no non-empty top-level "
+        f"`{EXEC_ERR_ANNOTATION_KEY}` key saying why. Use \"Error\" unless a query "
+        "failure genuinely IS the condition. See CONVENTIONS.md.",
+    )
+
+
+def lint_rule_exec_err_state(path: str, rule: dict, file_default: str) -> Violation | None:
+    own = rule.get("exec_err_state")
+    if own is None:
+        # Inherits the file default. If that default is Alerting and unjustified,
+        # lint_file_exec_err_state reports it ONCE at file scope; do not repeat it
+        # per rule.
+        return None
+    if str(own).strip() != "Alerting":
+        return None
+    annotations = rule.get("annotations") or {}
+    if str(annotations.get(EXEC_ERR_ANNOTATION_KEY, "")).strip():
+        return None
+    return Violation(
+        path,
+        rule.get("name", "<unnamed>"),
+        "sets `exec_err_state: Alerting`, so it pages on its own query failure, "
+        f"with no non-empty `{EXEC_ERR_ANNOTATION_KEY}` annotation saying why. Use "
+        "\"Error\" unless a query failure genuinely IS the condition; noDataState "
+        "is the knob for \"an absent series is the failure\". See CONVENTIONS.md.",
+    )
+
+
 def lint_file(path: str) -> list[Violation]:
     data = yaml.safe_load(pathlib.Path(path).read_text())
     if not data or not isinstance(data, dict):
         return []
     out = []
+    v = lint_file_exec_err_state(path, data)
+    if v is not None:
+        out.append(v)
+    file_default = str(data.get("default_exec_err_state", "") or "")
     for rule in data.get("rules") or []:
         for check in (lint_rule, lint_fabricated_zero, lint_idle_quantile):
             v = check(path, rule)
             if v is not None:
                 out.append(v)
+        v = lint_rule_exec_err_state(path, rule, file_default)
+        if v is not None:
+            out.append(v)
     return out
 
 

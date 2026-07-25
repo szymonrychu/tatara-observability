@@ -434,6 +434,138 @@ rules:
         self.assertEqual(self._violations(body), [])
 
 
+class SelfFiringRule(unittest.TestCase):
+    """Check 3: exec_err_state Alerting makes a rule page on its own query
+    failure. Grafana itself changed this default to Error in 9.2.0."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = pathlib.Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _violations(self, body: str):
+        return lint.lint_file(_write(self.tmp, body))
+
+    def test_rule_level_alerting_without_justification_is_violation(self):
+        body = """
+rules:
+  - name: "self-firing rule"
+    queries:
+      - expression: |
+          sum(operator_queue_depth{namespace="tatara"})
+    math_operator: ">"
+    threshold: 0
+    exec_err_state: "Alerting"
+"""
+        v = self._violations(body)
+        self.assertEqual(len(v), 1)
+        self.assertEqual(v[0].rule, "self-firing rule")
+
+    def test_rule_level_alerting_with_justification_passes(self):
+        body = """
+rules:
+  - name: "justified self-firing rule"
+    queries:
+      - expression: |
+          sum(operator_queue_depth{namespace="tatara"})
+    math_operator: ">"
+    threshold: 0
+    exec_err_state: "Alerting"
+    annotations:
+      tatara_exec_err_justification: "an exec error here means the backend is down, which IS the condition"
+"""
+        self.assertEqual(self._violations(body), [])
+
+    def test_file_level_alerting_without_justification_is_violation(self):
+        body = """
+default_exec_err_state: "Alerting"
+rules:
+  - name: "inheriting rule"
+    queries:
+      - expression: |
+          sum(operator_queue_depth{namespace="tatara"})
+    math_operator: ">"
+    threshold: 0
+"""
+        v = self._violations(body)
+        self.assertEqual(len(v), 1)
+        self.assertIn("file", v[0].rule)
+
+    def test_file_level_alerting_with_file_justification_passes(self):
+        body = """
+default_exec_err_state: "Alerting"
+tatara_exec_err_justification: "Loki queries: NoData and ExecErr both also fire when the backend is degraded"
+rules:
+  - name: "inheriting rule"
+    queries:
+      - expression: |
+          sum(operator_queue_depth{namespace="tatara"})
+    math_operator: ">"
+    threshold: 0
+"""
+        self.assertEqual(self._violations(body), [])
+
+    def test_file_justification_does_not_excuse_a_rule_level_override(self):
+        body = """
+default_exec_err_state: "OK"
+tatara_exec_err_justification: "irrelevant, the file default is OK"
+rules:
+  - name: "rule opts into Alerting"
+    queries:
+      - expression: |
+          sum(operator_queue_depth{namespace="tatara"})
+    math_operator: ">"
+    threshold: 0
+    exec_err_state: "Alerting"
+"""
+        v = self._violations(body)
+        self.assertEqual(len(v), 1)
+        self.assertEqual(v[0].rule, "rule opts into Alerting")
+
+    def test_rule_overriding_an_alerting_file_default_to_error_passes(self):
+        body = """
+default_exec_err_state: "Alerting"
+tatara_exec_err_justification: "justified at file scope"
+rules:
+  - name: "opts back out to Error"
+    queries:
+      - expression: |
+          sum(operator_queue_depth{namespace="tatara"})
+    math_operator: ">"
+    threshold: 0
+    exec_err_state: "Error"
+"""
+        self.assertEqual(self._violations(body), [])
+
+    def test_no_exec_err_state_anywhere_passes(self):
+        body = """
+rules:
+  - name: "plain rule"
+    queries:
+      - expression: |
+          sum(operator_queue_depth{namespace="tatara"})
+    math_operator: ">"
+    threshold: 0
+"""
+        self.assertEqual(self._violations(body), [])
+
+    def test_empty_file_justification_is_violation(self):
+        body = """
+default_exec_err_state: "Alerting"
+tatara_exec_err_justification: "   "
+rules:
+  - name: "inheriting rule"
+    queries:
+      - expression: |
+          sum(operator_queue_depth{namespace="tatara"})
+    math_operator: ">"
+    threshold: 0
+"""
+        self.assertEqual(len(self._violations(body)), 1)
+
+
 class RealAlertFilesPass(unittest.TestCase):
     def test_all_committed_alert_files_pass(self):
         paths = sorted(str(p) for p in ALERTS_DIR.glob("*.yaml"))

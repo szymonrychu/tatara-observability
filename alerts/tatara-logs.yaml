@@ -2,6 +2,15 @@
 interval_seconds: 60
 default_no_data_state: "Alerting"
 default_exec_err_state: "Alerting"
+tatara_exec_err_justification: >-
+  Loki-log-based rules only. For a Loki QUERY, NoData and ExecErr both also fire when the
+  Loki BACKEND is degraded or unreachable (a Postgres connection-pool exhaustion event,
+  "too many clients"), so reporting OK then is blindness dressed up as health
+  (tatara-operator#381 gap 2). Every count_over_time(...) expression below carries an
+  `or vector(0)` guard so a genuine zero-match sample is not conflated with the backend
+  being down - the two must stay together. Terraform drops this key during object-type
+  conversion; it never reaches Grafana and exists to make this decision greppable and
+  CI-enforced (scripts/lint_alert_rules.py check 3).
 # This file's rules are Loki-log-based, not gauge/counter-based like the rest of the
 # platform's alert files. For every OTHER file here, an absent series legitimately means
 # "nothing to report" and default_no_data_state: OK (this file's old default, and

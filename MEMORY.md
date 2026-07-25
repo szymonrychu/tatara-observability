@@ -551,3 +551,114 @@ PR/push triggers.
   inspected and left untouched on purpose: its one rule (lines 19, 21, 22, and the rule
   label at 34) keys exclusively on `model="claude-sonnet-5"`, names no opus ID, and the
   sonnet tier did not move.
+- 2026-07-25: Six recurring false-firing alerts, three defects, one PR
+  (tatara-observability#63/#65/#66/#67/#69/#71/#72, tatara-operator#441/#446).
+  (1) "Operator sweep heartbeat stale" now reads
+  `time() - operator_sweep_next_expected_timestamp_seconds > 10800` instead of a
+  flat 21600s against `..._last_success_...`. Cadence knowledge moved into the
+  PRODUCER (the operator parses each Project's own cron and publishes the next
+  expected run - kube-state-metrics' `kube_cronjob_next_schedule_time` pattern),
+  so one rule covers every activity of every Project and adding either needs no
+  rule change. The flat threshold was breached for ~18h of every 24 by the
+  `0 3 * * *` / `0 6 * * *` nightly crons; the arithmetic was exact (last success
+  03:00:00Z + 21600s + `for: 10m` = observed startsAt 09:10:20Z). The
+  `group_left` companion-interval join was REJECTED: no OSS project ships it
+  (verified across Thanos, Loki mixin, kube-prometheus, kubernetes-mixin,
+  cert-manager, Velero) and it carries two sharp runtime failure modes
+  (`multiple matches for labels` kills the rule; a missing series on either side
+  silently kills the alert). Grace is 3h, not 30m, because `refine_barrier_timeout`
+  can legitimately hold a scan for 2h and the scan still stamps on release.
+  `exec_err_state` flipped Alerting -> Error (Grafana changed this same default in
+  9.2.0, PR #55345); `no_data_state: Alerting` stays and now actually functions,
+  because with no `or vector(0)` on the expression an absent series is genuinely
+  empty and NoData is reachable at all. (2) "Operator pod not ready" lost its
+  `or vector(0)`: on a FOREIGN exporter's metric with a `<` comparison it
+  fabricates a zero and pages that the operator is down while
+  `up{job="tatara-operator"}=1` throughout. It is now gated on
+  `and on() (up{job="kube-state-metrics"} == 1)`, and a new "Kube-state-metrics
+  down" rule (`absent(up{job="kube-state-metrics"} == 1)`) covers the blind spot
+  that gate would otherwise create - upstream kubernetes-mixin has this exact gap
+  and ships no such alert. (3) "Tatara agent reported platform problem" moved out
+  of `alerts/tatara-logs.yaml` onto `agent_internal_issue_total`: the old LogQL
+  `pattern | line_format | json` pipeline took ~9.6s over ~50 lines and its
+  `exec_err_state: Alerting` made it page on its own timeout. Grouped by
+  `category` ONLY, not `(category, severity)` as the design said - Grafana merges
+  query labels with the rule's configured labels and the CONFIGURED one wins, so
+  two instances differing only in the metric's `severity` collapse under this
+  rule's routing label `severity: "warning"`. The counter keeps both labels
+  producer-side. Three deterministic checks added to
+  `scripts/lint_alert_rules.py` (fabricated-zero deadman, idle-NaN quantile
+  guard, self-firing rule), each justify-able with a named annotation, plus a
+  file-level `tatara_exec_err_justification` on `tatara-logs.yaml` turning its
+  argued-in-prose Alerting default into an enforced contract. Verified by
+  `terraform plan` against a replica of `modules/grafana_alert`'s
+  `list(object({...}))` type that an undeclared top-level YAML key is SILENTLY
+  DROPPED by object-type conversion, so the new file key never reaches Grafana
+  and no `.tf` change was needed. Cloudflare pint was evaluated and NOT adopted:
+  its `promql/series` check explicitly whitelists `or vector(0)` ("the intention
+  of adding `or vector(0)` is to provide a fallback value"), it has no
+  histogram-quantile guard, and it has no plugin mechanism, so it can express
+  none of the three conventions. This PR must be merged AFTER
+  tatara-operator#441's, because `reconcile_metric_provenance.py` hard-fails on
+  an allowlist entry no producer repo emits.
+- 2026-07-25: Two sharper edges on the three new structural lint checks, found
+  during review and worth remembering before extending either check. Check 2
+  (idle-quantile guard) ties the `_count ... > 0` guard to the histogrammed
+  metric's own family by NAME ONLY - text matching against the family extracted
+  from that `histogram_quantile(`'s own `<family>_bucket` selector, not a label
+  comparison - and checks each `histogram_quantile(` call in an expression
+  independently; within one call, only the FIRST `_bucket` selector found in
+  that call's own arguments is taken as its family. A call with no extractable
+  `_bucket` selector at all (e.g. quantiling a recording rule) is treated as
+  unguarded, never silently passed. Check 3 (self-firing rules) enforces
+  `tatara_exec_err_justification` at the SAME SCOPE the `exec_err_state:
+  Alerting` was set: a rule-level override needs a rule annotation, a file-level
+  `default_exec_err_state: Alerting` needs a top-level file key, and neither
+  satisfies the other - a rule that merely inherits an already-justified file
+  default needs nothing extra, but a rule that opts INTO Alerting against a
+  justified OK/Error file default needs its own annotation. `alerts/tatara-logs.yaml`'s
+  file-level `default_exec_err_state: "Alerting"` is DELIBERATE, not an
+  oversight left over from #19 - it is the one file backed by Loki, where a
+  query-execution failure (e.g. connection-pool exhaustion) is itself the
+  outage this file's rules exist to catch (see the 2026-07-19 entry above); the
+  new `tatara_exec_err_justification` key now encodes in a greppable, CI-checked
+  place the argument the file's header comment previously only made in prose.
+- 2026-07-25 (final-fixes wave, fix #71): the whole-branch review caught a real defect in
+  the just-migrated "Tatara agent reported platform problem" rule (fix #71-1): `increase()`
+  cannot see a counter's own birth. `agent_internal_issue_total` is deliberately NOT
+  pre-seeded, so a child series is created BY its first `Inc()` with its first exported
+  sample already =1 - within the 5m window Prometheus sees a flat "1,1,...", delta=0,
+  `increase()`=0 (or no result at all with a single sample). Series identity includes
+  `pod`, three operator replicas serve turn-complete callbacks, and pods restart near-daily,
+  so the dropped set was one event per (category, severity, pod) per pod lifetime -
+  plausibly most reports. The migration had shipped LESS detection than the Loki rule it
+  replaced, which fired on the very first line. Fixed with a per-series (not aggregate)
+  manual subtraction, `clamp_min(x - (x offset 5m or 0*x), 0)` summed by category: `or`
+  supplies a zero for any series absent 5m ago (the birth case), a vanished series is
+  excluded from the sum entirely by PromQL's inner-join vector-matching (not zeroed, so a
+  rolled-over pod cannot produce a spurious negative aggregate), and `clamp_min` additionally
+  guards against a same-window in-memory counter reset (process crash-restart on the same
+  pod) producing a negative per-series term that could silently absorb a genuine positive
+  delta from a different pod's series in the same sum. Verified against live Prometheus via
+  the grafana MCP against structural analogs `operator_reconcile_total`/
+  `operator_task_terminal_total` (both lazily-created counters with a `pod` label,
+  same shape as `agent_internal_issue_total` which itself has zero live series today,
+  nothing to report): the subtraction's steady-state output matches `increase()` within
+  extrapolation rounding, the empty-selector case runs clean with an empty result (no
+  NoData regression), and the vanished-series exclusion and clamp_min no-op were both
+  confirmed against live data. No pod restarted during the live check, so the brand-new-
+  series branch rests on PromQL's documented `or`/vector-matching semantics rather than an
+  observed live birth. Also in this wave: dropped a misleading "or no pods exist at all"
+  claim from "Operator pod not ready"'s summary (that coverage lives in "Operator deployment
+  has no available replicas" + "Operator scrape target down" since the `or vector(0)`
+  removal, not here); fixed the sweep-freshness dashboard panel title to say "by project and
+  activity" (query/legend already did); dropped `lint_alert_rules.py`'s dead
+  `file_default` parameter on `lint_rule_exec_err_state`; closed the idle-quantile guard
+  regex on a fractional threshold (`(?![.\d])` so `> 0.2` is no longer misread as a bare
+  `> 0` idle guard - a ratio alert's own condition, not a guard); deduplicated `lint_rule`'s
+  inline queries-join onto the existing `_joined_expressions` helper; documented three
+  CONVENTIONS.md gaps found in review (6.1 only recognises `kube_*` as foreign, not
+  `node_*`/`container_*`; 6.2's within-call guard only reads the FIRST `_bucket` selector;
+  6.3's redundant-Alerting-redeclaration-under-an-already-justified-Alerting-default case is
+  flagged, not exempt); and shortened `tatara-logs.yaml`'s header comment to defer to the
+  `tatara_exec_err_justification` key instead of re-arguing the same case in prose.

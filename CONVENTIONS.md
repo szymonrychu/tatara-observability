@@ -113,7 +113,7 @@ When you add or change instrumentation or an alert, before opening the PR:
   expected-absent remote state, incremental work): give it a label that
   separates transient from error (pattern 3) and alert only on the error value.
 - Adding a quantile/latency alert: guard against idle NaN, e.g.
-  `... and on() (sum(rate(<metric>_count[w])) > 0)`.
+  `... and on() (sum(rate(<metric>_count[w])) > 0)`. This is linted - see 6.2.
 
 ## 5. The CI provenance check: no alert AND NO PANEL on a metric nobody emits
 
@@ -166,3 +166,110 @@ pip install pyyaml
 python3 scripts/check_metric_provenance.py            # alerts/*.yaml AND dashboards/*.json
 python3 -m unittest discover scripts -p 'test_*.py'    # linter self-tests (both checkers)
 ```
+
+## 6. Structural alert-shape checks
+
+`scripts/lint_alert_rules.py` enforces three more conventions beyond section 3's
+filter-or-justify. All three are deterministic from rule text alone, so they have
+no false failures. Each is justify-able with a named annotation, so a deliberate
+exception is greppable rather than remembered.
+
+### 6.1 No fabricated zero on a foreign exporter's metric
+
+`or vector(0)` substitutes a literal zero when the vector is empty. On a metric
+produced by a DIFFERENT exporter than the system being alerted on, paired with a
+`<` (or `<=`) threshold, that turns "the exporter is unscrapeable" into "the
+alerted system is down". This is tatara-observability#67: a kube-state-metrics
+gap paged that the operator was down while `up{job="tatara-operator"}=1`
+throughout.
+
+The check fires when an expression contains `or vector(0)` (or `or on() vector(0)`)
+AND `math_operator` is `<`/`<=` AND a `kube_*` metric appears in the expression. It only
+recognises `kube_*` as a foreign exporter today - a fabricated zero on some other foreign
+exporter's metric (`node_*`, `container_*`, etc.) is not currently detected.
+
+Correct alternatives, in preference order:
+
+1. Gate the rule on that exporter being up:
+   `... < 1 and on() (up{job="kube-state-metrics"} == 1)`, plus a separate
+   `absent(up{job="<exporter>"} == 1)` rule so the exporter outage itself is not a
+   blind spot.
+2. `absent()` / `absent_over_time()` on the series you actually care about.
+3. Let `noDataState` do its job. Note that `or vector(0)` makes `noDataState`
+   structurally dead code - a rule written that way can only ever be
+   Normal/Alerting/Error, never NoData.
+
+`or vector(0)` paired with a `>` threshold is the SAFE direction and is not
+flagged: a fabricated zero crosses no `>` threshold. `or vector(0)` on the alerted
+system's OWN `up` series is also correct and not flagged, because a vanished
+self-scrape genuinely is the failure.
+
+To keep a deliberate fabricated zero, set a non-empty `tatara_absence_fires`
+annotation stating why absence must page:
+
+```yaml
+annotations:
+  summary: "..."
+  tatara_absence_fires: "The fabricated zero IS the condition: <reason>."
+```
+
+### 6.2 Guard every quantile against the idle NaN
+
+`histogram_quantile` over a bucket set with no samples yields NaN. An idle
+service is not a slow service (section 1's "idle quantiles" entry). This was
+documented in the section 4 author checklist since 2026-07-12 and left to author
+memory; it is now linted.
+
+The check fires when an expression contains a `histogram_quantile(` call whose
+own `<metric>_bucket` argument has no matching `<metric>_count ... > 0` guard
+for that SAME metric family, checked independently per `histogram_quantile(`
+call if an expression has more than one. The reference shape is
+`alerts/tatara-operator.yaml`'s "Operator turn submit p95 latency high":
+
+```yaml
+      - expression: |
+          histogram_quantile(0.95, sum(rate(<metric>_bucket{...}[15m])) by (le)) and on() (sum(rate(<metric>_count{...}[15m])) > 0)
+```
+
+The check ties the guard to the histogrammed metric's own family by name only
+(text matching, not label matching) - it does not verify the guard's label
+selectors match the histogram's, and a `histogram_quantile(` call whose own
+arguments carry no recognisable `<metric>_bucket` selector (e.g. a recording
+rule as input) is treated as unguarded rather than silently passed. Within one
+`histogram_quantile(` call, only the FIRST `<metric>_bucket` selector found in
+that call's own arguments is taken as its family - a second, different
+`_bucket` reference later in the same call's arguments is not considered.
+
+To keep an unguarded quantile, set a non-empty `tatara_idle_quantile` annotation
+saying why that histogram is never idle.
+
+### 6.3 No self-firing rules
+
+`exec_err_state: Alerting` makes a rule page on its OWN query failure: a timed-out
+or malformed query is reported as the condition the rule watches for. Grafana
+changed this same default from `Alerting` to `Error` in 9.2.0 (PR #55345, issue
+#46398) for exactly this reason. "An absent series means the system is broken" is
+an argument for `no_data_state`, which is a DIFFERENT knob and can stay
+`Alerting` on a genuine heartbeat.
+
+The check fires when `exec_err_state: Alerting` is in effect - set on the rule, or
+set as the file's `default_exec_err_state`. It is justified by a non-empty
+`tatara_exec_err_justification` AT THE SAME SCOPE:
+
+- rule-level setting -> a rule annotation of that name;
+- file-level default -> a top-level key of that name in the alert file.
+
+A rule that merely INHERITS an already-justified file default needs nothing extra.
+A rule that opts INTO `Alerting` against an `OK`/`Error` file default needs its own
+annotation. This also applies when the rule REDECLARES `exec_err_state: Alerting`
+explicitly and the file default is ALREADY `Alerting` and already justified: the
+rule-level check looks only at whether the rule itself sets `Alerting`, not at
+whether that value happens to match the inherited default, so a redundant
+re-declaration is flagged and needs its own rule-level annotation too - inheriting
+(leaving `exec_err_state` unset) is the only way to ride on the file-level
+justification alone.
+
+The top-level file key is safe: Terraform's object-type conversion in
+`modules/grafana_alert/variables.tf` silently drops attributes the type does not
+declare, so the key never reaches Grafana and never appears in a plan.
+`alerts/tatara-logs.yaml` carries the live example.

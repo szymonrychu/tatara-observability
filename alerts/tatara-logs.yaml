@@ -2,37 +2,24 @@
 interval_seconds: 60
 default_no_data_state: "Alerting"
 default_exec_err_state: "Alerting"
+tatara_exec_err_justification: >-
+  Loki-log-based rules only. For a Loki QUERY, NoData and ExecErr both also fire when the
+  Loki BACKEND is degraded or unreachable (a Postgres connection-pool exhaustion event,
+  "too many clients"), so reporting OK then is blindness dressed up as health
+  (tatara-operator#381 gap 2). Every count_over_time(...) expression below carries an
+  `or vector(0)` guard so a genuine zero-match sample is not conflated with the backend
+  being down - the two must stay together. Terraform drops this key during object-type
+  conversion; it never reaches Grafana and exists to make this decision greppable and
+  CI-enforced (scripts/lint_alert_rules.py check 3).
 # This file's rules are Loki-log-based, not gauge/counter-based like the rest of the
-# platform's alert files. For every OTHER file here, an absent series legitimately means
-# "nothing to report" and default_no_data_state: OK (this file's old default, and
-# grafana.tf's repo-wide default_exec_err_state: OK) is correct. For a Loki QUERY, NoData
-# and ExecErr both also fire when the Loki BACKEND itself is degraded or unreachable (e.g.
-# a Postgres connection-pool exhaustion event, "too many clients") - and OK is exactly the
-# wrong thing to report then: it is blindness dressed up as health (tatara-operator#381
-# gap 2). Flipping to Alerting means a genuine Loki outage now pages instead of going
-# quiet. Every count_over_time(...) expression below carries an `or vector(0)` guard
-# for exactly this reason: without it, a real "zero matching lines" result is ALSO an
-# empty vector, and this flip would turn every quiet period into a false page. The two
-# changes MUST land together - `or vector(0)` alone (old default OK) or the state flip
-# alone (no `or vector(0)`) each break one side of this.
+# platform's alert files - see the `tatara_exec_err_justification` key above for why
+# NoData/ExecErr default to Alerting here specifically. Every count_over_time(...)
+# expression below carries an `or vector(0)` guard for the reason that key gives: without
+# it, a real "zero matching lines" result is ALSO an empty vector, and the Alerting
+# default would turn every quiet period into a false page. The two changes MUST land
+# together - `or vector(0)` alone (old default OK) or the state flip alone (no
+# `or vector(0)`) each break one side of this.
 rules:
-  - name: "Tatara agent reported platform problem"
-    queries:
-      - expression: |
-          sum by (description, category, severity) (count_over_time({namespace="tatara", app="tatara-operator"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | action="agent_internal_issue" [5m])) or on() vector(0)
-        datasource_uid: "efihqbqlmroqod"
-        query_type: "loki"
-    math_operator: ">"
-    threshold: 0
-    for: 1m
-    decimal_points: 0
-    annotations:
-      summary: "Tatara agent reported a platform problem ({{ index $labels \"category\" }}/{{ index $labels \"severity\" }}): {{ index $labels \"description\" }}"
-    labels:
-      homelab: "true"
-      system: "tatara"
-      component: "operator"
-      severity: "warning"
   - name: "Tatara operator error log burst"
     queries:
       - expression: |

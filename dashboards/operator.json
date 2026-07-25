@@ -2391,7 +2391,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Seconds since each sweep activity last completed successfully (contract K.1 operator_sweep_last_success_timestamp_seconds). Replaces the p95 of tatara_scan_duration_seconds, which dies with the scan loop the B.4 sweep replaces. A flat, climbing line is a sweep that has stopped running - the same failure the K.2 sweep-heartbeat alert (noDataState: Alerting) fires on. NOTE: K.1 declares no sweep-DURATION histogram, so the sweep's latency (as opposed to its liveness) is no longer observable; that is a contract gap, not an omission here.",
+      "description": "Seconds since each (project, activity) sweep last completed successfully (operator_sweep_last_success_timestamp_seconds). Grouped by project as well as activity: that gauge is written by every Project, so a max by (activity) alone reproduces the tatara-operator#441 clobber visually. A flat, climbing line is a sweep that has stopped running. The ALERT no longer reads this series - \"Operator sweep heartbeat stale\" reads time() - operator_sweep_next_expected_timestamp_seconds > 10800, which is cadence-aware; this panel is the human-readable freshness view. NOTE: contract K.1 declares no sweep-DURATION histogram, so the sweep's latency (as opposed to its liveness) is still not observable.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2474,13 +2474,13 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "time() - max by (activity) (operator_sweep_last_success_timestamp_seconds)",
-          "legendFormat": "{{activity}}",
+          "expr": "time() - max by (project, activity) (operator_sweep_last_success_timestamp_seconds)",
+          "legendFormat": "{{project}}/{{activity}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Sweep freshness by activity (time since last success)",
+      "title": "Sweep freshness by project and activity (time since last success)",
       "type": "timeseries"
     },
     {

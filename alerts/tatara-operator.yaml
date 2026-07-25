@@ -134,7 +134,7 @@ rules:
   - name: "Operator pod not ready"
     queries:
       - expression: |
-          sum(kube_pod_status_ready{namespace="tatara",pod=~"tatara-operator-.*",condition="true"}) < 1
+          sum(kube_pod_status_ready{namespace="tatara",pod=~"tatara-operator-.*",condition="true"})
             and on() (up{job="kube-state-metrics"} == 1)
     math_operator: "<"
     threshold: 1

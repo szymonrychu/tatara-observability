@@ -342,6 +342,97 @@ rules:
 """
         self.assertEqual(len(self._violations(body)), 1)
 
+    def test_guard_on_a_different_metric_family_is_violation(self):
+        # The quantile is over metricA_bucket; the guard reads metricB_count. A
+        # gap in metricA's own buckets still yields NaN, unnoticed.
+        body = """
+rules:
+  - name: "cross-family guard"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(metricA_bucket[15m])) by (le)) and on() (sum(rate(metricB_count[15m])) > 0)
+    math_operator: ">"
+    threshold: 30
+"""
+        v = self._violations(body)
+        self.assertEqual(len(v), 1)
+        self.assertEqual(v[0].rule, "cross-family guard")
+
+    def test_guard_on_the_same_metric_family_passes(self):
+        # Same shape as above, but the guard is tied to the histogrammed
+        # metric's own family - this is the fix's positive case.
+        body = """
+rules:
+  - name: "same-family guard"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(metricA_bucket[15m])) by (le)) and on() (sum(rate(metricA_count[15m])) > 0)
+    math_operator: ">"
+    threshold: 30
+"""
+        self.assertEqual(self._violations(body), [])
+
+    def test_no_extractable_bucket_family_is_violation(self):
+        # histogram_quantile's own argument carries no <family>_bucket selector
+        # at all (e.g. a variable/recording-rule input) - the check cannot tie
+        # a guard to anything, so it is treated as unguarded rather than passed
+        # silently.
+        body = """
+rules:
+  - name: "no bucket family"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, some_recording_rule{namespace="tatara"})
+    math_operator: ">"
+    threshold: 30
+"""
+        v = self._violations(body)
+        self.assertEqual(len(v), 1)
+        self.assertEqual(v[0].rule, "no bucket family")
+
+    def test_no_extractable_bucket_family_with_justification_passes(self):
+        body = """
+rules:
+  - name: "no bucket family, justified"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, some_recording_rule{namespace="tatara"})
+    math_operator: ">"
+    threshold: 30
+    annotations:
+      tatara_idle_quantile: "some_recording_rule pre-aggregates buckets upstream and is never idle"
+"""
+        self.assertEqual(self._violations(body), [])
+
+    def test_multiple_quantile_calls_each_need_their_own_family_guard(self):
+        # Two histogram_quantile calls in one expression: the first is
+        # correctly guarded on its own family, the second is not - one
+        # violation, because the second family's idle NaN is still live.
+        body = """
+rules:
+  - name: "two quantiles, one unguarded"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(metricA_bucket[15m])) by (le)) and on() (sum(rate(metricA_count[15m])) > 0) > histogram_quantile(0.95, sum(rate(metricB_bucket[15m])) by (le))
+    math_operator: ">"
+    threshold: 30
+"""
+        v = self._violations(body)
+        self.assertEqual(len(v), 1)
+        self.assertEqual(v[0].rule, "two quantiles, one unguarded")
+
+    def test_multiple_quantile_calls_both_guarded_passes(self):
+        body = """
+rules:
+  - name: "two quantiles, both guarded"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(metricA_bucket[15m])) by (le)) and on() (sum(rate(metricA_count[15m])) > 0) > histogram_quantile(0.95, sum(rate(metricB_bucket[15m])) by (le)) and on() (sum(rate(metricB_count[15m])) > 0)
+    math_operator: ">"
+    threshold: 30
+"""
+        self.assertEqual(self._violations(body), [])
+
 
 class RealAlertFilesPass(unittest.TestCase):
     def test_all_committed_alert_files_pass(self):

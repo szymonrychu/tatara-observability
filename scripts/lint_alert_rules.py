@@ -174,29 +174,81 @@ def lint_fabricated_zero(path: str, rule: dict) -> Violation | None:
 # and the reference example, is alerts/tatara-operator.yaml's
 # "Operator turn submit p95 latency high":
 #   histogram_quantile(0.95, ...) and on() (sum(rate(<metric>_count[w])) > 0)
+#
+# The guard must be tied to the SAME metric family as the histogrammed
+# `<family>_bucket` selector inside the histogram_quantile( call - a `_count`
+# reference on an unrelated family elsewhere in the expression does not prove
+# that family's own idle NaN is guarded. Each histogram_quantile( call in an
+# expression is checked (and must be guarded) independently.
 _HISTOGRAM_QUANTILE = re.compile(r"\bhistogram_quantile\s*\(")
-_COUNT_GT_ZERO_GUARD = re.compile(r"_count\b.*?>\s*0", re.S)
+_BUCKET_FAMILY = re.compile(r"(\w+)_bucket\b")
 QUANTILE_ANNOTATION_KEY = "tatara_idle_quantile"
+
+
+def _call_arguments(text: str, open_paren_index: int) -> str:
+    """Return the text between the parens of a call whose '(' sits at
+    open_paren_index, tracking nesting so an inner `sum(...)`/`rate(...)`
+    doesn't end the scan early."""
+    depth = 0
+    for i in range(open_paren_index, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_paren_index + 1 : i]
+    return text[open_paren_index + 1 :]  # unterminated call; use what's there
+
+
+def _quantile_call_families(expr: str) -> list[str | None]:
+    """One entry per histogram_quantile( call in expr, in order: the
+    <family> in that call's own <family>_bucket selector, or None if the
+    call's arguments carry no recognisable _bucket selector."""
+    families = []
+    for m in _HISTOGRAM_QUANTILE.finditer(expr):
+        args = _call_arguments(expr, m.end() - 1)
+        fm = _BUCKET_FAMILY.search(args)
+        families.append(fm.group(1) if fm else None)
+    return families
 
 
 def lint_idle_quantile(path: str, rule: dict) -> Violation | None:
     joined = _joined_expressions(rule)
-    if not _HISTOGRAM_QUANTILE.search(joined):
-        return None
-    if _COUNT_GT_ZERO_GUARD.search(joined):
+    families = _quantile_call_families(joined)
+    if not families:
         return None
     annotations = rule.get("annotations") or {}
-    if str(annotations.get(QUANTILE_ANNOTATION_KEY, "")).strip():
-        return None
-    return Violation(
-        path,
-        rule.get("name", "<unnamed>"),
-        "uses histogram_quantile() with no idle guard: an empty bucket set yields "
-        "NaN and an idle service is not a slow service. Add "
-        "`and on() (sum(rate(<metric>_count[w])) > 0)` (see "
-        "alerts/tatara-operator.yaml's \"Operator turn submit p95 latency high\") "
-        f"or set a non-empty `{QUANTILE_ANNOTATION_KEY}` annotation. See CONVENTIONS.md.",
-    )
+    justified = str(annotations.get(QUANTILE_ANNOTATION_KEY, "")).strip()
+    for family in families:
+        if family is None:
+            if justified:
+                continue
+            return Violation(
+                path,
+                rule.get("name", "<unnamed>"),
+                "uses histogram_quantile() but no `<metric>_bucket` selector could be "
+                "identified in its own arguments, so no same-family idle guard could "
+                "be verified: an empty bucket set yields NaN and an idle service is "
+                "not a slow service. Use a recognisable `<metric>_bucket` selector, "
+                f"or set a non-empty `{QUANTILE_ANNOTATION_KEY}` annotation. "
+                "See CONVENTIONS.md.",
+            )
+        guard = re.compile(rf"{re.escape(family)}_count\b.*?>\s*0", re.S)
+        if guard.search(joined):
+            continue
+        if justified:
+            continue
+        return Violation(
+            path,
+            rule.get("name", "<unnamed>"),
+            f"uses histogram_quantile() over `{family}_bucket` with no matching "
+            f"`{family}_count ... > 0` idle guard: an empty bucket set yields NaN "
+            "and an idle service is not a slow service. Add "
+            f"`and on() (sum(rate({family}_count[w])) > 0)` (see "
+            "alerts/tatara-operator.yaml's \"Operator turn submit p95 latency high\") "
+            f"or set a non-empty `{QUANTILE_ANNOTATION_KEY}` annotation. See CONVENTIONS.md.",
+        )
+    return None
 
 
 def lint_file(path: str) -> list[Violation]:

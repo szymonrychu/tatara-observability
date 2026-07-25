@@ -218,14 +218,22 @@ service is not a slow service (section 1's "idle quantiles" entry). This was
 documented in the section 4 author checklist since 2026-07-12 and left to author
 memory; it is now linted.
 
-The check fires when an expression contains `histogram_quantile(` and does not
-also contain a `_count ... > 0` guard. The reference shape is
+The check fires when an expression contains a `histogram_quantile(` call whose
+own `<metric>_bucket` argument has no matching `<metric>_count ... > 0` guard
+for that SAME metric family, checked independently per `histogram_quantile(`
+call if an expression has more than one. The reference shape is
 `alerts/tatara-operator.yaml`'s "Operator turn submit p95 latency high":
 
 ```yaml
       - expression: |
           histogram_quantile(0.95, sum(rate(<metric>_bucket{...}[15m])) by (le)) and on() (sum(rate(<metric>_count{...}[15m])) > 0)
 ```
+
+The check ties the guard to the histogrammed metric's own family by name only
+(text matching, not label matching) - it does not verify the guard's label
+selectors match the histogram's, and a `histogram_quantile(` call whose own
+arguments carry no recognisable `<metric>_bucket` selector (e.g. a recording
+rule as input) is treated as unguarded rather than silently passed.
 
 To keep an unguarded quantile, set a non-empty `tatara_idle_quantile` annotation
 saying why that histogram is never idle.

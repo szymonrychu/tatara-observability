@@ -272,4 +272,59 @@ justification alone.
 The top-level file key is safe: Terraform's object-type conversion in
 `modules/grafana_alert/variables.tf` silently drops attributes the type does not
 declare, so the key never reaches Grafana and never appears in a plan.
-`alerts/tatara-logs.yaml` carries the live example.
+`alerts/tatara-logs.yaml` carries the live example. That same silent drop is a
+trap everywhere else - see section 7 - so this key is one of the few explicit
+exemptions in `scripts/check_alert_schema.py`'s `LINT_ONLY_KEYS`.
+
+## 7. The CI schema check: an undeclared key is silently discarded
+
+`modules/grafana_alert/variables.tf` types the module input as
+`list(object({...}))`, and **Terraform's object-type conversion DISCARDS any
+attribute the object type does not declare**. Not an error, not a warning, not a
+plan diff - the key simply never reaches Grafana. So a perfectly spelled,
+perfectly valid Grafana attribute added to an alert file passes yamllint, passes
+`lint_alert_rules.py`, passes `check_metric_provenance.py`, passes `terraform
+validate`, produces an EMPTY plan, merges, applies green, and changes nothing.
+
+This is the third silent-green failure class in this repo, after the dark rule
+(section 5) and the false-positive rule (section 3), and it is the worst of the
+three because the change LOOKS applied. `keep_firing_for` - the Grafana knob that
+holds a rule Firing for a grace period after its condition clears - was
+undeclared until 2026-07-26. The memory stateful-member rule (uid
+`efraobdc2w4cgb`) flapped, and every re-fire minted a NEW GitHub issue, so one
+crash loop became tatara-operator #442, #444 and #448. Writing `keep_firing_for:`
+into the alert file would have read as the fix and done nothing; PR #82 had to
+work around it with a PromQL `max_over_time(...[30m])` latch instead.
+
+`scripts/check_alert_schema.py` runs in CI on every PR that touches `alerts/**`
+or `modules/grafana_alert/variables.tf`. It READS the object type out of
+`variables.tf` - it does not restate it, so the two cannot drift - and fails on
+any key in any `alerts/*.yaml` that the type does not declare, at the rule-group
+level, the rule level, or inside `queries[]`. `annotations` and `labels` are
+typed `map(string)`, so their keys are data and are not checked; that is where
+the `tatara_*` justification annotations live.
+
+Two consequences worth stating:
+
+- **Adding a Grafana attribute is a two-file change**: declare it in
+  `modules/grafana_alert/variables.tf` AND render it in
+  `modules/grafana_alert/main.tf`. A declaration alone is the same no-op one
+  layer down (`test_check_alert_schema.py` asserts the `keep_firing_for`
+  threading for this reason).
+- **A key that is deliberately lint-only** (read by a checker, never rendered)
+  must be listed in `LINT_ONLY_KEYS` with a pointer to the section that defines
+  it. Today that is exactly one key: section 6.3's
+  `tatara_exec_err_justification`.
+
+If the type expression in `variables.tf` ever changes shape past what the
+script's reader understands, the script exits 2 with a loud parse error rather
+than silently reading an empty schema - a guard that cannot read the schema must
+fail, not pass everything.
+
+Run it locally:
+
+```sh
+pip install pyyaml
+python3 scripts/check_alert_schema.py                   # alerts/*.yaml keys vs the module type
+python3 -m unittest discover scripts -p 'test_*.py'     # all checker self-tests
+```

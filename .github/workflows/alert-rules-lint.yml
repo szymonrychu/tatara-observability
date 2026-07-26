@@ -27,6 +27,9 @@ on:
       - "dashboards/**"
       - "scripts/lint_alert_rules.py"
       - "scripts/test_lint_alert_rules.py"
+      - "scripts/check_alert_schema.py"
+      - "scripts/test_check_alert_schema.py"
+      - "modules/grafana_alert/variables.tf"
       - "scripts/check_metric_provenance.py"
       - "scripts/test_check_metric_provenance.py"
       - "scripts/reconcile_metric_provenance.py"
@@ -41,6 +44,9 @@ on:
       - "dashboards/**"
       - "scripts/lint_alert_rules.py"
       - "scripts/test_lint_alert_rules.py"
+      - "scripts/check_alert_schema.py"
+      - "scripts/test_check_alert_schema.py"
+      - "modules/grafana_alert/variables.tf"
       - "scripts/check_metric_provenance.py"
       - "scripts/test_check_metric_provenance.py"
       - "scripts/reconcile_metric_provenance.py"
@@ -76,6 +82,16 @@ jobs:
 
       - name: lint alert rules
         run: python3 scripts/lint_alert_rules.py
+
+      # The silent-drop guard. Terraform's object-type conversion DISCARDS any alert key
+      # modules/grafana_alert/variables.tf does not declare - no error, no warning, no plan
+      # diff - so a valid Grafana attribute in an alert file can pass every other check
+      # here, merge, apply green, and do nothing. keep_firing_for was exactly that until
+      # 2026-07-26, and one flapping rule minted three separate incident issues because of
+      # it. This reads the schema out of variables.tf and fails on any key it does not
+      # declare, so an attribute can never again be lost silently.
+      - name: check alert keys against the module schema
+        run: python3 scripts/check_alert_schema.py
 
       # Covers alerts/*.yaml AND dashboards/*.json. A dashboard panel on a deleted metric
       # renders empty, silently, forever, with no CI signal at all - the same silent-green

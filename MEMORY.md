@@ -757,3 +757,45 @@ PR/push triggers.
   The two new #457 trend rules (repository phase desync, ingest job dedup race) shipped
   with system=tatara at first and were corrected. Rule of thumb: severity info => no
   system label => emails only. Do not "harmonise" the label sets across severities.
+- 2026-07-26, the maintainer ask from the entry above, done: keep_firing_for IS NOW
+  DECLARED, and the silent drop that hid it is now a CI failure. Two halves.
+  (1) THE FIX. modules/grafana_alert/variables.tf gained
+  `keep_firing_for = optional(string, "0")` on the rule object and main.tf threads it into
+  the grafana_rule_group rule block. CORRECTION: the default must be the literal string
+  "0", not "" - a live `terraform plan` in CI failed with `"" is not a valid duration:
+  unable to parse  as duration: format error` on every rule group, because the provider
+  rejects an empty string rather than treating it as unset. Caught only by real plan
+  against the provider; `terraform validate` and the local scratch harness both passed the
+  wrong default because neither round-trips through the provider's Go duration parser. With
+  "0" as the default, all 112 other rules render byte-identically - re-verified: the
+  module's type was evaluated over old and new alert trees in a scratch harness and exactly
+  one of the 113 rules differs. "Memory postgres or neo4j container stuck waiting" (uid
+  efraobdc2w4cgb) dropped #82's max_over_time(...[30m]) PromQL latch and now carries
+  `keep_firing_for: 30m`, so the expression means what it says again. KNOWN TRADE-OFF
+  recorded in the rule comment: keep_firing_for holds a FIRING alert, it does NOT hold the
+  PENDING window, so `for: 10m` again needs 10m of continuously-observed stuck state and an
+  early-crash-loop scrape landing on the brief Running window can delay the first fire by an
+  eval round or two. That is the price of not paging about a container that recovered 40
+  minutes ago, which 30m-latch + for:10m could do. If a real crash loop is ever seen failing
+  to fire, add a SHORT max_over_time (e.g. [5m]) as an honest smoothing window, never a 30m
+  latch. This was a terraform edit, explicitly authorised by the maintainer for this change
+  only; the standing rule (agents edit alerts/ only) is unchanged.
+  (2) THE GUARD, which is worth more than the attribute. scripts/check_alert_schema.py READS
+  the object type out of variables.tf (it does not restate it, so the two cannot drift) and
+  fails CI on any key in alerts/*.yaml the type does not declare - at rule-group, rule and
+  queries[] level. annotations/labels are map(string), so their keys stay free-form. The one
+  exemption is CONVENTIONS.md 6.3's file-level tatara_exec_err_justification, listed
+  explicitly in LINT_ONLY_KEYS. If the type expression ever changes past what the reader
+  understands the script exits 2 with a parse error rather than silently reading an empty
+  schema: a guard that cannot read the schema must fail, not pass everything. CONVENTIONS.md
+  section 7 is the normative writeup. Proved by failure before merge: adding
+  `missing_series_evals_to_resolve: 2` (a REAL Grafana attribute) to the memory rule left
+  lint_alert_rules.py, check_metric_provenance.py and `terraform validate` all green and
+  exit 0, and only the new check failed.
+  ADJACENT FINDING, NOT FIXED (needs a maintainer call): grafana.tf's merge() passes
+  `notification_label` into the module and variables.tf has never declared it, so it has
+  been silently discarded since the repo was created - confirmed live by the same harness.
+  And `default_query_type` IS declared but is referenced nowhere in main.tf, so it is a dead
+  knob one layer down (the query-level `query_type` default is what actually applies). Both
+  are terraform-side, so out of the agent-editable surface and out of this change's
+  authorisation.

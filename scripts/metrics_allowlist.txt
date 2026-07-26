@@ -148,6 +148,37 @@ operator_stage_drift_total
 operator_sweep_next_expected_timestamp_seconds
 agent_internal_issue_total
 
+# --- operator: memory-degradation + saturation batch (2026-07-26, tatara-operator
+# #457/#458/#469/#470, tatara-observability P7) ---
+# All seven verified against tatara-operator origin/main @ a8255cf, by declaration:
+#   operator_agent_pod_degraded_total{project,kind,subsystem} internal/obs/operator_metrics.go
+#     - a pod spawned while memory was not stably Ready. #470 removed the two spawn/turn
+#       gates, so this is what "running degraded" now looks like. subsystem="memory" only.
+#   operator_objbudget_spill_blocked_total{kind,reason} internal/obs/objbudget_metrics.go
+#     - a guarded write REFUSED because its eviction batch could not be spilled.
+#       reason=spill_error|unconfigured. The only PRE-SEEDED member of this batch.
+#   operator_mirror_write_dropped_total{project,kind,site} internal/obs/mirror_metrics.go
+#     - a best-effort mirror/webhook write dropped on the continue-on-error path.
+#   operator_restapi_notes_rehydrate_failed_total{project} internal/obs/restapi_metrics_v2.go
+#   operator_repository_ingest_gated{project,repo} (gauge) internal/obs/operator_metrics.go
+#     - THE ONE REMAINING MEMORY GATE (#434/#470).
+#   operator_repository_phase_repaired_total{project,repo} internal/obs/operator_metrics.go
+#   operator_ingest_job_deduplicated_total{project,repo} internal/obs/operator_metrics.go
+# Of these, operator_repository_ingest_gated and operator_ingest_job_deduplicated_total
+# were ALSO confirmed live in Prometheus (grafana MCP, 2026-07-26). The rest have no live
+# series yet - this cluster's Prometheus retains only ~90 minutes and has no persistent
+# storage, so absence proves nothing either way; the declaration is the authority.
+# RETIRED IN THE SAME BATCH, deliberately never listed here: operator_memory_gate_hold_total
+# and operator_memory_gate_bypass_total. #470 deleted both (zero matches for memory_gate
+# anywhere under tatara-operator main). No rule in this repo ever selected them.
+operator_agent_pod_degraded_total
+operator_objbudget_spill_blocked_total
+operator_mirror_write_dropped_total
+operator_restapi_notes_rehydrate_failed_total
+operator_repository_ingest_gated
+operator_repository_phase_repaired_total
+operator_ingest_job_deduplicated_total
+
 # --- operator: surviving, DASHBOARD-ONLY (2026-07-13 backfill). No alert selects these;
 # every one was verified against its declaration in the operator worktree's internal/obs
 # (or internal/pushmetrics) and none is retired by contract K.1. ---

@@ -229,6 +229,13 @@ rules:
   # was itself gated on the down memory (circular). These two rules catch the root
   # cause days early (volume filling) and the platform-level symptom (memory stuck
   # not-Ready), independent of the memory app being up.
+  #
+  # 2026-07-26: the CIRCULAR half of that story is HISTORY, not current behaviour.
+  # tatara-operator#470 removed the two spawn/turn gates, so agents now run while
+  # memory is unhealthy - degraded (no recall), not blocked. The incident agent can
+  # therefore investigate its own memory outage. Only the RE-INGEST gate remains.
+  # The rules below are worded for that world; do not re-import the old
+  # "the whole project stalls" framing from the incident writeups above.
   # ---------------------------------------------------------------------------
   - name: "Memory PVC volume near full"
     queries:
@@ -249,16 +256,29 @@ rules:
       system: "tatara"
       component: "memory"
       severity: "warning"
+  # operator_memory_stacks gained a `project` label (tatara-operator#457/#458), so this
+  # is now per-project instead of a fleet-wide count: the project lands on the alert
+  # instance and the incident webhook can attribute the outage to the project that owns
+  # the stack. Phases are exactly Provisioning|Ready|Failed|Degraded
+  # (project_controller.go memoryStackPhases).
+  # Degraded IS selected, and adding it fixes a latent hole: Degraded is not a milder
+  # Ready, it is "has been Provisioning past MemoryConfig.ProvisioningTimeout" (45m by
+  # chart default, project_memory.go's #355 bounded-provisioning timeout). On that
+  # transition the Provisioning series drops to 0, so a Provisioning|Failed-only selector
+  # RESOLVED this alert at the exact moment the stack was declared hopeless. Note it is
+  # NOT the #442/#461 degraded-but-quorate postgres case: that one leaves the phase alone
+  # and only sets MemoryReady=False/PostgresDegraded, and is covered by the stateful-member
+  # rule below, not by this gauge.
   - name: "Memory stack stuck not ready"
     queries:
       - expression: |
-          max(operator_memory_stacks{namespace="tatara",job="tatara-operator",phase=~"Provisioning|Failed"})
+          max by (project) (operator_memory_stacks{namespace="tatara",job="tatara-operator",phase=~"Provisioning|Failed|Degraded"})
     math_operator: ">"
     threshold: 0
     for: 15m
     decimal_points: 0
     annotations:
-      summary: "{{ index $values \"C\" }} tatara-memory stack(s) stuck in Provisioning/Failed for 15m (not Ready). Every Task for that project is hard-gated on memory Ready, so the whole project stalls - INCLUDING the incident agent that would investigate this (circular dependency: infra-outage self-heal needs the subsystem that is down). Escalate to a human / check the CNPG cluster + PVCs directly."
+      summary: "The tatara-memory stack for project {{ index $labels \"project\" }} has been stuck in Provisioning/Failed/Degraded for 15m (not Ready). Agents are NOT blocked by this any more (operator #470): pods still spawn and turns still run, but with NO recall for the whole turn, so what ships is degraded-quality output - see operator_agent_pod_degraded_total for how much of it. What DOES stop: per-repo re-ingest is held by the memory-readiness gate (operator_repository_ingest_gated), so the recall corpus goes stale on top of being unreachable; and any status write whose eviction batch cannot be spilled is REFUSED outright rather than losing data (operator_objbudget_spill_blocked_total), which wedges those objects until memory returns. Check the CNPG cluster + PVCs directly."
     labels:
       homelab: "true"
       system: "tatara"
@@ -280,16 +300,29 @@ rules:
   # incident agent must act BEFORE the primary also fails and hard-gates the whole
   # project (the circular-deadlock case). A downed replica leaves memory serving, so
   # that agent can still run. (lightrag outages surface via the LightRAG/API rules.)
+  #
+  # THE max_over_time IS A DELIBERATE LATCH, NOT A SMOOTHING WINDOW. Without it this rule
+  # resolves the instant a crash-looping member happens to be Running between restarts, and
+  # every flap back mints a BRAND NEW incident issue for one continuous fault - which is
+  # exactly how #444 and #448 were opened as two separate issues for one crash loop.
+  # keep_firing_for is the Grafana knob for this, but modules/grafana_alert/variables.tf
+  # does not declare it and Terraform's object-type conversion silently DROPS undeclared
+  # attributes, so a `keep_firing_for:` key here would never reach Grafana and would read
+  # as fixed while changing nothing. The latch is therefore done in PromQL, where this
+  # repo's agent-editable surface can actually express it: once a stuck reason is seen, the
+  # 30m lookback holds the series above 0 for 30m past recovery, so a member that flaps
+  # inside half an hour never resolves and never re-mints. Replace this with a real
+  # keep_firing_for the day the module grows one (see MEMORY.md 2026-07-26).
   - name: "Memory postgres or neo4j container stuck waiting"
     queries:
       - expression: |
-          max(kube_pod_container_status_waiting_reason{namespace="tatara",pod=~"mem-.*-(pg|neo4j)-[0-9]+",reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerError|CreateContainerConfigError"}) by (pod,reason)
+          max by (pod,reason) (max_over_time(kube_pod_container_status_waiting_reason{namespace="tatara",pod=~"mem-.*-(pg|neo4j)-[0-9]+",reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerError|CreateContainerConfigError"}[30m]))
     math_operator: ">"
     threshold: 0
     for: 10m
     decimal_points: 0
     annotations:
-      summary: "tatara-memory stateful pod {{ index $labels \"pod\" }} (cnpg postgres or neo4j) container stuck ({{ index $labels \"reason\" }}) for 10m. A cnpg postgres member stuck = HA degraded while the primary keeps serving (this silently masked an 8h replica crash loop on 2026-07-06); a neo4j pod stuck = graph queries failing. Check the CNPG cluster (kubectl cnpg status mem-<project>-pg) / the neo4j StatefulSet."
+      summary: "tatara-memory stateful pod {{ index $labels \"pod\" }} (cnpg postgres or neo4j) container stuck ({{ index $labels \"reason\" }}) at some point in the last 30m, for 10m. A cnpg postgres member stuck = HA degraded while the primary keeps serving (this silently masked an 8h replica crash loop on 2026-07-06); a neo4j pod stuck = graph queries failing. The 30m lookback is a LATCH so one crash loop is one incident rather than one per flap (#444 + #448 were minted as separate issues for the same fault), so a container that has already recovered can still be inside a firing window - check current state before closing. Check the CNPG cluster (kubectl cnpg status mem-<project>-pg) / the neo4j StatefulSet."
     labels:
       homelab: "true"
       system: "tatara"

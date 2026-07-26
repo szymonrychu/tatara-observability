@@ -681,3 +681,79 @@ PR/push triggers.
   `{{"{{"}}.body{{"}}"}}`, verified with a throwaway `text/template` program to render back to
   exactly `{{.body}}`. This is half of #79; the other half (Alloy DaemonSet covering only 3
   of 5 nodes, 48% of tatara pods shipping no logs) is untouched, out of scope for this repo.
+- 2026-07-26 (tatara-observability P7, tatara-operator #457/#458/#469/#470 batch): the
+  memory-degradation work invalidated the premise several rules asserted, and a rule that
+  asserts something false is worse than a missing one because the incident agent reads the
+  summary as fact. #470 removed the two memory SPAWN/TURN gates, so "Every Task for that
+  project is hard-gated on memory Ready, so the whole project stalls - INCLUDING the
+  incident agent" (Memory stack stuck not ready) became flatly wrong: agents now spawn and
+  run turns with NO recall instead of not at all, and the ONLY remaining gate is per-repo
+  re-ingest. Rewrote it around the real blast radius (degraded-quality output +
+  operator_repository_ingest_gated + refused over-budget status writes). Same pass:
+  "Operator incident starved in triage" argued a queued incident "CANNOT be waiting on the
+  normal pool" because AlertCapacity reserves a slot - true at capacity 1, false at the
+  configured 3, where three concurrent incidents legitimately fill the pool; it now
+  suppresses on operator_admission_blocked_total{class="alert",reason="pool_full"} so it
+  fires only on the genuine wedge (queued while the pool is NOT full), and the priority
+  filter that was left open "pending verification" is tightened to priority="0" (verified:
+  internal/queue/enqueue.go sets 0 for class=alert, 2 otherwise).
+- 2026-07-26, same pass, THREE FINDINGS WORTH MORE THAN THE RULES THEMSELVES.
+  (1) keep_firing_for IS NOT EXPRESSIBLE IN THIS REPO'S AGENT-EDITABLE SURFACE.
+  "Memory postgres or neo4j container stuck waiting" minted #444 and #448 as separate
+  issues for one crash loop because it resolves between restarts and re-fires. The Grafana
+  knob for that is keep_firing_for, and the provider supports it - but
+  modules/grafana_alert/variables.tf does not DECLARE it, and Terraform's object-type
+  conversion silently DROPS undeclared attributes (the same mechanism CONVENTIONS.md 6.3
+  relies on to make the file-level tatara_exec_err_justification key safe). A
+  `keep_firing_for:` in an alert YAML would therefore look like a fix, pass every check in
+  this repo, and change nothing in Grafana. Latched in PromQL instead
+  (max_over_time(...[30m]) holds the series above 0 for 30m past recovery). Adding
+  keep_firing_for to the module is a one-line terraform change and would be strictly
+  better; it is out of the agent-editable surface, so it is a maintainer ask.
+  (2) operator_memory_stacks phase="Degraded" IS NOT A MILDER "Ready". It is "has been
+  Provisioning past MemoryConfig.ProvisioningTimeout" (45m chart default, project_memory.go
+  #355). A phase=~"Provisioning|Failed" selector therefore RESOLVED "Memory stack stuck not
+  ready" at the exact moment the stack was declared hopeless - the Provisioning series drops
+  to 0 on that transition. Added Degraded to the regex. It is NOT the #442/#461
+  degraded-but-quorate postgres case, which leaves the phase alone and only sets
+  MemoryReady=False/PostgresDegraded - do not conflate the two.
+  (3) THE increase() COUNTER-BIRTH DEFECT WAS OBSERVED LIVE FOR THE FIRST TIME. MEMORY.md
+  2026-07-25 established the per-series subtraction idiom for non-pre-seeded counters but
+  could only prove the brand-new-series branch by PromQL semantics, never by observation.
+  Today, against live Prometheus: sum by (project,repo) (increase(
+  operator_ingest_job_deduplicated_total[1h])) reported tatara-claude-code-wrapper = 0
+  while the subtraction over the same window and series reported 1. The series was born
+  inside the window; increase() needs two samples and could not see it. Every new rule here
+  on a non-pre-seeded counter (mirror_write_dropped, restapi_notes_rehydrate_failed,
+  repository_phase_repaired, ingest_job_deduplicated) uses the subtraction for that reason.
+  The two objbudget rules deliberately do NOT: objbudget_metrics.go pre-seeds all 3 kinds x
+  2 reasons, confirmed live as exactly 6 label combinations, so increase() is safe there.
+- 2026-07-26, routing fix carried by the same pass: "Repository stuck in failing ingest
+  state" and "Repository ingest stale" grouped by (repo) alone under a namespace="tatara"
+  selector - the OPERATOR's namespace, not a project - so a failing mtg-project repo
+  (mtg-decks) produced an alert carrying no project and was routed to the tatara incident
+  agent, whose repo list does not contain it. operator_repository_ingest_failing /
+  _ingest_gated / _last_ingest_timestamp_seconds all gained a project label in #457, so all
+  three are now `by (project, repo)`: Grafana copies query result labels onto the alert
+  instance, which is what puts `project` on the notification. Verified live - 16 (project,
+  repo) series across tatara/infrastructure/mtg. KNOWN SHARP EDGE left in place because it
+  is operator-side: neither ingest gauge has a Reset() or DeleteLabelValues (unlike
+  operator_memory_stacks and operator_queue_age_seconds, which recompute per pass), so a
+  DELETED Repository keeps its last value until the operator pod restarts and can hold an
+  alert firing against a repo that no longer exists. Documented in the rule comment.
+- 2026-07-26 verification note for whoever edits these next: this cluster's Prometheus
+  retains only ~90 MINUTES and has no persistent storage, so an absent series proves
+  nothing about a metric name. Names were verified against tatara-operator origin/main at
+  a8255cf, which is ALSO what is deployed (image tag v1.30.0 == a8255cf), not against
+  code/tatara-operator in the workbench - that checkout was 6 commits behind and does not
+  contain #465/#468/#469/#470 at all. A verification pass run against it reported six of
+  these seven metrics as "DOES NOT EXIST". Clone origin/main to a scratch dir before
+  trusting a submodule checkout for metric provenance.
+- 2026-07-26 convention learned the hard way in the same pass: severity "info" rules in
+  this repo DELIBERATELY OMIT the system=tatara label ("Operator auth rejections elevated"
+  says so in its own summary; "Memory ingest item error rate elevated" is the other). The
+  system=tatara route is what turns a firing alert into an incident Task, so an info-level
+  trend rule that carries it mints an incident for a condition nobody should be paged on.
+  The two new #457 trend rules (repository phase desync, ingest job dedup race) shipped
+  with system=tatara at first and were corrected. Rule of thumb: severity info => no
+  system label => emails only. Do not "harmonise" the label sets across severities.

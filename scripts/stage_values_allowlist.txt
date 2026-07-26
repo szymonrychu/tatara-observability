@@ -103,3 +103,12 @@ operator_object_size_bytes
 operator_object_too_large_total
 operator_comment_spill_total
 operator_orphan_adopted_total
+# objbudget_metrics.go: kind = the guarded CR kind being written, exactly
+# Issue|MergeRequest|Task (objbudget.go's per-Fit* `const kind`). Same family as
+# operator_object_too_large_total above, same reason.
+operator_objbudget_spill_blocked_total
+# mirror_metrics.go: kind = the mirror WRITE TARGET, and it is not even a clean CR
+# kind - the comment_append site passes resolveMirrorTarget's runtime value, so the
+# live set is Issue|MergeRequest|issue_comment|mr_comment|mr_review. Never an A.4
+# Task kind.
+operator_mirror_write_dropped_total

@@ -77,16 +77,27 @@ rules:
       system: "tatara"
       component: "ingester"
       severity: "warning"
+  # ---------------------------------------------------------------------------
+  # PER-REPO INGEST HEALTH. All three of these key on the operator's per-Repository
+  # gauges, which gained a `project` label in tatara-operator#457. GROUPING BY project
+  # IS LOAD-BEARING, not cosmetic: the rules used to group by (repo) alone under a
+  # namespace="tatara" selector, which is the OPERATOR's namespace and not a project -
+  # so a failing mtg-project repo (mtg-decks) fired an alert carrying no project at all
+  # and was routed to the tatara project's incident agent, whose repo list does not
+  # contain it and which therefore cannot act on it. Grafana copies a query's result
+  # labels onto the alert instance, so `by (project, repo)` is what puts `project` on the
+  # notification and lets routing attribute the alert to the project that owns the repo.
+  # ---------------------------------------------------------------------------
   - name: "Repository ingest stale"
     queries:
       - expression: |
-          max by (repo) (time() - operator_repository_last_ingest_timestamp_seconds{namespace="tatara"})
+          max by (project, repo) (time() - operator_repository_last_ingest_timestamp_seconds{namespace="tatara"})
     math_operator: ">"
     threshold: 86400
     for: 30m
     decimal_points: 0
     annotations:
-      summary: "Repository {{ index $labels \"repo\" }} last successful ingest was {{ index $values \"C\" }}s ago (>24h). Its recall corpus is going stale: the per-repo re-ingest cron missed or is silently wedged. Normal live staleness is ~2.5h; 24h is a backstop."
+      summary: "Repository {{ index $labels \"repo\" }} (project {{ index $labels \"project\" }}) last successful ingest was {{ index $values \"C\" }}s ago (>24h). Its recall corpus is going stale: the per-repo re-ingest cron missed or is silently wedged. Normal live staleness is ~2.5h; 24h is a backstop. If \"Repository re-ingest gated on memory readiness\" is also firing for this project, that is the cause and this is the consequence - fix the memory stack, not the cron."
     labels:
       homelab: "true"
       system: "tatara"
@@ -95,18 +106,110 @@ rules:
   - name: "Repository stuck in failing ingest state"
     queries:
       - expression: |
-          max by (repo) (operator_repository_ingest_failing{namespace="tatara"})
+          max by (project, repo) (operator_repository_ingest_failing{namespace="tatara"})
     math_operator: ">"
     threshold: 0
     for: 1h
     decimal_points: 0
     annotations:
-      summary: "Repository {{ index $labels \"repo\" }} is pinned in a failing ingest state (operator_repository_ingest_failing=1) for >1h. A persistent analyzer/auth/graph failure survived the incremental-to-full self-heal and has not cleared on re-ingest."
+      summary: "Repository {{ index $labels \"repo\" }} (project {{ index $labels \"project\" }}) is pinned in a failing ingest state (operator_repository_ingest_failing=1) for >1h. A persistent analyzer/auth/graph failure survived the incremental-to-full self-heal and has not cleared on re-ingest."
     labels:
       homelab: "true"
       system: "tatara"
       component: "ingester"
       severity: "warning"
+  # The memory-readiness gate is a SILENT hold: nothing fails, nothing retries, so
+  # operator_repository_ingest_failing stays 0 for a gated repo and the rule above cannot
+  # see it (tatara-operator#434). This is the one part of the memory-outage blast radius
+  # that #470 did NOT remove - agents now run degraded rather than blocked, but re-ingest
+  # is still gated, so the corpus goes stale for as long as the stack is down.
+  # 1h is chosen against the two real cadences: the gate normally clears within the 3m
+  # MemoryReadyStabilizationWindow after the stack reports Ready, and re-ingest itself is
+  # a daily cron, so an hour of hold is well past provisioning noise and still leaves most
+  # of a day before "Repository ingest stale" backstops at 24h.
+  # Sibling, not duplicate: tatara-operator's own chart ships a TataraIngestGated
+  # PrometheusRule on the same gauge at the same 1h. That one carries only a `severity`
+  # label, so it does NOT match the system=tatara notification policy and never reaches
+  # the operator incident webhook. This rule is the one that mints an incident Task.
+  # KNOWN SHARP EDGE (operator-side, not fixable here): this gauge has no Reset() and no
+  # DeleteLabelValues, unlike operator_memory_stacks and operator_queue_age_seconds which
+  # both recompute from scratch each pass. A DELETED Repository therefore keeps its last
+  # value until the operator pod restarts, so a repo that was gated when it was removed
+  # can hold this alert firing against a repo that no longer exists. If this fires for a
+  # repo you cannot find, check that it still exists before chasing the memory stack.
+  - name: "Repository re-ingest gated on memory readiness"
+    queries:
+      - expression: |
+          max by (project, repo) (operator_repository_ingest_gated{namespace="tatara"})
+    math_operator: ">"
+    threshold: 0
+    for: 1h
+    decimal_points: 0
+    annotations:
+      summary: "Repository {{ index $labels \"repo\" }} (project {{ index $labels \"project\" }}) has had its re-ingest held by the project memory-readiness gate for 1h. Nothing failed and nothing retried - the gate is a silent hold - so operator_repository_ingest_failing reads 0 throughout. The gate clears within the 3m stabilization window once the stack is Ready, so an hour means that project's memory stack is not converging: check operator_memory_stacks{project=...} and the \"Memory stack stuck not ready\" alert. Agents keep running meanwhile, but on a corpus that is both unreachable and going stale."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "ingester"
+      severity: "warning"
+  # ---------------------------------------------------------------------------
+  # "Is the underlying defect still being produced?" pair (tatara-operator#457). Both
+  # counters were added to measure a race/desync the operator now MASKS: the Repository
+  # reconciler repairs the (Phase=Failed, IngestFailureCount=0) desync on sight, and the
+  # deterministic ingest Job name collapses a duplicate creation into an adoption. The
+  # masking is correct, but a masked defect that is still firing is still a defect, so
+  # these are info-severity trend rules, not pages.
+  #
+  # BOTH USE THE PER-SERIES SUBTRACTION, NOT increase(). Neither counter is pre-seeded, so
+  # a child series is CREATED by its first Inc() with its first exported sample already =1;
+  # increase() needs two samples in the window to see a delta and so cannot see a counter's
+  # own birth - the exact defect fixed on "Tatara agent reported platform problem" in
+  # alerts/tatara-operator.yaml (see the long comment there for the full algebra). Here the
+  # first occurrence is precisely the interesting one, so increase() would drop the signal
+  # these rules exist to carry. `offset 1h or 0 * <metric>` supplies a zero for a series
+  # that did not exist an hour ago; clamp_min guards a same-window process restart.
+  - name: "Repository phase desync still being produced"
+    queries:
+      - expression: |
+          sum by (project, repo) (
+            clamp_min(
+              operator_repository_phase_repaired_total{namespace="tatara",job="tatara-operator"}
+              - (operator_repository_phase_repaired_total{namespace="tatara",job="tatara-operator"} offset 1h
+                 or 0 * operator_repository_phase_repaired_total{namespace="tatara",job="tatara-operator"}),
+              0
+            )
+          )
+    math_operator: ">"
+    threshold: 0
+    for: 30m
+    decimal_points: 0
+    annotations:
+      summary: "The Repository reconciler repaired the desynchronised (Phase=Failed, IngestFailureCount=0) state {{ index $values \"C\" }} time(s) in 1h on {{ index $labels \"repo\" }} (project {{ index $labels \"project\" }}). The repair is working, so nothing is stuck - but a repo sat in that state for 20.8h with zero actual ingest failures before it existed, and the ORIGIN of the desync was never proven. A non-zero rate here means whatever writes it is still running. Info-only (no system=tatara label): emails, does not raise an incident Task."
+    labels:
+      homelab: "true"
+      component: "ingester"
+      severity: "info"
+  - name: "Ingest job creation race still being hit"
+    queries:
+      - expression: |
+          sum by (project, repo) (
+            clamp_min(
+              operator_ingest_job_deduplicated_total{namespace="tatara",job="tatara-operator"}
+              - (operator_ingest_job_deduplicated_total{namespace="tatara",job="tatara-operator"} offset 1h
+                 or 0 * operator_ingest_job_deduplicated_total{namespace="tatara",job="tatara-operator"}),
+              0
+            )
+          )
+    math_operator: ">"
+    threshold: 0
+    for: 30m
+    decimal_points: 0
+    annotations:
+      summary: "{{ index $values \"C\" }} ingest Job creation(s) for {{ index $labels \"repo\" }} (project {{ index $labels \"project\" }}) collapsed into adopting an existing Job of the same deterministic name in 1h. The deterministic name is holding the read-then-create race (two Jobs were once created 16ms apart from the same pod), so no duplicate ingest runs - but the race is still being run into, and the name is the only thing stopping it. Info-only (no system=tatara label): emails, does not raise an incident Task. A sustained rate means the reconcile path deserves a real guard, not that ingest is broken."
+    labels:
+      homelab: "true"
+      component: "ingester"
+      severity: "info"
   - name: "Ingester LLM call failure ratio high"
     queries:
       - expression: |

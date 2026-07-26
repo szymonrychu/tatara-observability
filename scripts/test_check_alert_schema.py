@@ -37,7 +37,7 @@ variable "alerts" {
       })),
       threshold       = number
       for             = optional(string, "1m"),
-      keep_firing_for = optional(string, ""),
+      keep_firing_for = optional(string, "0"),
       annotations     = optional(map(string), {}),
     }))
   }))

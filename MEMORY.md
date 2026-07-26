@@ -760,11 +760,16 @@ PR/push triggers.
 - 2026-07-26, the maintainer ask from the entry above, done: keep_firing_for IS NOW
   DECLARED, and the silent drop that hid it is now a CI failure. Two halves.
   (1) THE FIX. modules/grafana_alert/variables.tf gained
-  `keep_firing_for = optional(string, "")` on the rule object and main.tf threads it into
-  the grafana_rule_group rule block. The provider (grafana 4.39.0) parses an empty value as
-  0, so all 112 other rules render byte-identically - verified, not assumed: the module's
-  type was evaluated over old and new alert trees in a scratch harness and exactly one of
-  the 113 rules differs. "Memory postgres or neo4j container stuck waiting" (uid
+  `keep_firing_for = optional(string, "0")` on the rule object and main.tf threads it into
+  the grafana_rule_group rule block. CORRECTION: the default must be the literal string
+  "0", not "" - a live `terraform plan` in CI failed with `"" is not a valid duration:
+  unable to parse  as duration: format error` on every rule group, because the provider
+  rejects an empty string rather than treating it as unset. Caught only by real plan
+  against the provider; `terraform validate` and the local scratch harness both passed the
+  wrong default because neither round-trips through the provider's Go duration parser. With
+  "0" as the default, all 112 other rules render byte-identically - re-verified: the
+  module's type was evaluated over old and new alert trees in a scratch harness and exactly
+  one of the 113 rules differs. "Memory postgres or neo4j container stuck waiting" (uid
   efraobdc2w4cgb) dropped #82's max_over_time(...[30m]) PromQL latch and now carries
   `keep_firing_for: 30m`, so the expression means what it says again. KNOWN TRADE-OFF
   recorded in the rule comment: keep_firing_for holds a FIRING alert, it does NOT hold the

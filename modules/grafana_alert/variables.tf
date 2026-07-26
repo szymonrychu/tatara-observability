@@ -30,9 +30,11 @@ variable "alerts" {
       for           = optional(string, "1m"),
       # Grafana's post-recovery grace period: the rule stays Firing for this long
       # after its condition clears, so one flapping fault is one incident instead
-      # of one per flap. "" is the provider's "not set" (it parses an empty value
-      # as 0), so a rule that omits it renders exactly as it did before.
-      keep_firing_for = optional(string, ""),
+      # of one per flap. "0" is the provider's "not set" - an empty string is
+      # rejected as an invalid duration (confirmed by a live terraform plan
+      # failure), so the default must be the literal string "0", not "". A rule
+      # that omits it renders exactly as it did before this field existed.
+      keep_firing_for = optional(string, "0"),
       decimal_points  = optional(number, 2),
       annotations     = optional(map(string), {}),
       labels          = optional(map(string), {}),

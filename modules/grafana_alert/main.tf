@@ -115,7 +115,10 @@ resource "grafana_rule_group" "rules" {
       no_data_state  = coalesce(rule.value.no_data_state, each.value.default_no_data_state)
       exec_err_state = coalesce(rule.value.exec_err_state, each.value.default_exec_err_state)
       for            = rule.value.for
-      annotations    = rule.value.annotations
+      # Post-recovery hold. The provider treats "" as "0" (unset), so every rule that
+      # does not set keep_firing_for keeps rendering byte-identically.
+      keep_firing_for = rule.value.keep_firing_for
+      annotations     = rule.value.annotations
       # some alerts had the labels extended with {"":""}, therefore I've added it as well
       labels    = length(rule.value.labels) > 0 ? rule.value.labels : each.value.default_labels
       is_paused = rule.value.is_paused

@@ -25,15 +25,20 @@ variable "alerts" {
         relative_time_range_from = optional(number, 1200),
         relative_time_range_to   = optional(number, 0),
       })),
-      math_operator  = optional(string, ">"),
-      threshold      = number
-      for            = optional(string, "1m"),
-      decimal_points = optional(number, 2),
-      annotations    = optional(map(string), {}),
-      labels         = optional(map(string), {}),
-      no_data_state  = optional(string),
-      exec_err_state = optional(string),
-      is_paused      = optional(bool, false)
+      math_operator = optional(string, ">"),
+      threshold     = number
+      for           = optional(string, "1m"),
+      # Grafana's post-recovery grace period: the rule stays Firing for this long
+      # after its condition clears, so one flapping fault is one incident instead
+      # of one per flap. "" is the provider's "not set" (it parses an empty value
+      # as 0), so a rule that omits it renders exactly as it did before.
+      keep_firing_for = optional(string, ""),
+      decimal_points  = optional(number, 2),
+      annotations     = optional(map(string), {}),
+      labels          = optional(map(string), {}),
+      no_data_state   = optional(string),
+      exec_err_state  = optional(string),
+      is_paused       = optional(bool, false)
     }))
   }))
 }

@@ -34,6 +34,7 @@ Each entry in `rules`:
 | `queries` | yes | List of `{ expression: "..." }` PromQL queries |
 | `threshold` | yes | Numeric threshold for firing |
 | `for` | yes | Duration before alert fires (e.g. `300s`) |
+| `keep_firing_for` | no | Grace period the rule keeps Firing after its condition clears (e.g. `30m`). Default `""` = not set. Use it to de-flap a rule whose fault resolves and re-fires, so one fault is one incident |
 | `decimal_points` | no | Rounding precision (default: `0`) |
 | `math_operator` | no | Comparison operator (default: `< 0`) |
 | `annotations` | no | Map of annotation key → template string |

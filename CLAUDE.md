@@ -9,7 +9,10 @@ infra, not a tatara code component, but it follows the tatara per-repo contract.
 `tatara-observability` is where the tatara platform defines (and the agents tune)
 the Grafana alert rules for the tatara components. Agents edit only
 `alerts/tatara-*.yaml` - the simple `name`/`queries[].expression`/`math_operator`/
-`threshold`/`for`/`decimal_points`/`annotations`/`labels` schema. The
+`threshold`/`for`/`keep_firing_for`/`decimal_points`/`annotations`/`labels` schema.
+A key that schema does not declare is SILENTLY DROPPED by terraform, so adding a
+new Grafana attribute means editing `modules/grafana_alert/{variables,main}.tf`
+too - `scripts/check_alert_schema.py` fails CI on any undeclared key. The
 `modules/grafana_alert` module renders each file (one rule group) into the Grafana
 `Tatara` folder. GitHub Actions runs terraform: a PR posts a sticky `terraform
 plan`; merge to `main` runs `terraform apply` (Grafana Editor SA token, S3 state).

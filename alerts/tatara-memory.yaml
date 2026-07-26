@@ -301,28 +301,34 @@ rules:
   # project (the circular-deadlock case). A downed replica leaves memory serving, so
   # that agent can still run. (lightrag outages surface via the LightRAG/API rules.)
   #
-  # THE max_over_time IS A DELIBERATE LATCH, NOT A SMOOTHING WINDOW. Without it this rule
-  # resolves the instant a crash-looping member happens to be Running between restarts, and
-  # every flap back mints a BRAND NEW incident issue for one continuous fault - which is
-  # exactly how #444 and #448 were opened as two separate issues for one crash loop.
-  # keep_firing_for is the Grafana knob for this, but modules/grafana_alert/variables.tf
-  # does not declare it and Terraform's object-type conversion silently DROPS undeclared
-  # attributes, so a `keep_firing_for:` key here would never reach Grafana and would read
-  # as fixed while changing nothing. The latch is therefore done in PromQL, where this
-  # repo's agent-editable surface can actually express it: once a stuck reason is seen, the
-  # 30m lookback holds the series above 0 for 30m past recovery, so a member that flaps
-  # inside half an hour never resolves and never re-mints. Replace this with a real
-  # keep_firing_for the day the module grows one (see MEMORY.md 2026-07-26).
+  # keep_firing_for: 30m IS A DE-FLAPPER, NOT A LONGER `for`. Without it this rule resolves
+  # the instant a crash-looping member happens to be Running between restarts, and every flap
+  # back mints a BRAND NEW incident issue for one continuous fault - which is exactly how
+  # #444 and #448 were opened as two separate issues for one crash loop. #82 latched this in
+  # PromQL (max_over_time(...[30m])) because the module did not declare keep_firing_for and
+  # Terraform's object-type conversion silently DROPS undeclared attributes, so the real knob
+  # was unreachable from this file. The module declares it now (2026-07-26), so the latch is
+  # gone from the expression and the hold is done where it belongs: Grafana holds the rule
+  # Firing for 30m after the condition clears, and the expression means what it says again.
+  # KNOWN TRADE-OFF: keep_firing_for holds a FIRING alert; it does not hold the PENDING
+  # window, so `for: 10m` again needs 10m of continuously-observed stuck state. Early in a
+  # crash loop (10-40s backoff) a scrape can land on the brief Running window and reset that
+  # timer, which can delay the first fire by an eval round or two; once the backoff reaches
+  # its 5m cap the waiting state dominates and it fires. That delay is the price of not
+  # paging about a container that recovered 40 minutes ago, which is what the 30m PromQL
+  # latch plus `for: 10m` could do. If a real crash loop is ever observed failing to fire,
+  # add a SHORT max_over_time (e.g. [5m]) as an honest smoothing window - not a 30m latch.
   - name: "Memory postgres or neo4j container stuck waiting"
     queries:
       - expression: |
-          max by (pod,reason) (max_over_time(kube_pod_container_status_waiting_reason{namespace="tatara",pod=~"mem-.*-(pg|neo4j)-[0-9]+",reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerError|CreateContainerConfigError"}[30m]))
+          max by (pod,reason) (kube_pod_container_status_waiting_reason{namespace="tatara",pod=~"mem-.*-(pg|neo4j)-[0-9]+",reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerError|CreateContainerConfigError"})
     math_operator: ">"
     threshold: 0
     for: 10m
+    keep_firing_for: 30m
     decimal_points: 0
     annotations:
-      summary: "tatara-memory stateful pod {{ index $labels \"pod\" }} (cnpg postgres or neo4j) container stuck ({{ index $labels \"reason\" }}) at some point in the last 30m, for 10m. A cnpg postgres member stuck = HA degraded while the primary keeps serving (this silently masked an 8h replica crash loop on 2026-07-06); a neo4j pod stuck = graph queries failing. The 30m lookback is a LATCH so one crash loop is one incident rather than one per flap (#444 + #448 were minted as separate issues for the same fault), so a container that has already recovered can still be inside a firing window - check current state before closing. Check the CNPG cluster (kubectl cnpg status mem-<project>-pg) / the neo4j StatefulSet."
+      summary: "tatara-memory stateful pod {{ index $labels \"pod\" }} (cnpg postgres or neo4j) container stuck ({{ index $labels \"reason\" }}) for 10m. A cnpg postgres member stuck = HA degraded while the primary keeps serving (this silently masked an 8h replica crash loop on 2026-07-06); a neo4j pod stuck = graph queries failing. This rule keeps firing for 30m after the container recovers, so one crash loop is one incident rather than one per flap (#444 + #448 were minted as separate issues for the same fault) - a container can therefore be healthy again while the alert is still firing; check current state before closing. Check the CNPG cluster (kubectl cnpg status mem-<project>-pg) / the neo4j StatefulSet."
     labels:
       homelab: "true"
       system: "tatara"

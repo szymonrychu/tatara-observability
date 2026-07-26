@@ -298,24 +298,93 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "warning"
+  # THE ERROR-RATIO RULE ABOVE CANNOT SEE THESE. A dropped mirror write happens on the
+  # CONTINUE-ON-ERROR path: the webhook still returns 200 to the forge on purpose (a
+  # webhook must never fail) and a REST accept still commits its stage transition, so the
+  # request counts as a SUCCESS in operator_webhook_events_total while a write silently
+  # went missing underneath it. Two of the eight call sites did not even log. The most
+  # common root cause is a tatara-memory outage: every objbudget.Fit* write fails by design
+  # when the guard cannot spill, so this appears as a burst across many (project, site)
+  # series at once rather than as one clean failure.
+  # Grouped BY SITE because the consequences are not interchangeable and the responder
+  # needs to know which one landed - the summary names the three that actually lose
+  # platform behaviour rather than just freshness.
+  #
+  # PER-SERIES SUBTRACTION, NOT increase(): this counter is not pre-seeded, so a series is
+  # created BY its first Inc() with its first sample already =1, and increase() needs two
+  # samples in the window to see a delta - it cannot see a counter's own birth. Here the
+  # single first occurrence is exactly the event that matters (one lost incident_refire is
+  # one suppressed escalation), so increase() would drop the signal this rule exists for.
+  # The algebra is spelled out in full on "Tatara agent reported platform problem" below.
+  - name: "Operator mirror or webhook writes dropped"
+    queries:
+      - expression: |
+          sum by (project, site) (
+            clamp_min(
+              operator_mirror_write_dropped_total{namespace="tatara",job="tatara-operator"}
+              - (operator_mirror_write_dropped_total{namespace="tatara",job="tatara-operator"} offset 30m
+                 or 0 * operator_mirror_write_dropped_total{namespace="tatara",job="tatara-operator"}),
+              0
+            )
+          )
+    math_operator: ">"
+    threshold: 0
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator dropped {{ index $values \"C\" }} best-effort mirror/webhook write(s) at site={{ index $labels \"site\" }} for project {{ index $labels \"project\" }} in 30m. The forge got a 200 and the request looks successful, so no error-ratio rule can see this. Three sites lose platform BEHAVIOUR, not just freshness: site=incident_refire loses the refire counter that escalationDue reads, which SUPPRESSES INCIDENT ESCALATION - a re-firing production alert stops escalating and nothing says so; site=comment_append loses a HUMAN comment from the mirror on a path that still fires the unpark, so the agent is woken by a comment its own bundle does not contain; site=issue_body_title suppresses the derived issue_edited event, so the owning Task never sees the edit at all. The rest (issue_state, mr_refresh, record_bot_head, incident_cooldown_reset, incident_escalate) leave stale mirror state, and the two head-SHA ones can cause a spurious ownership stand-down. Check tatara-memory first: an outage makes every objbudget-guarded write fail at once."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
   # ----------------------------------------------------------------------------
-  # Memory stacks + lightrag: a Failed per-project memory stack blocks its agents.
+  # Memory stacks + lightrag: a Failed per-project memory stack DEGRADES its agents.
+  # It no longer blocks them - see #470 and the degraded-pod rule below.
   # ----------------------------------------------------------------------------
   - name: "Operator memory stack failed"
     queries:
       - expression: |
-          max(operator_memory_stacks{namespace="tatara",job="tatara-operator",phase="Failed"})
+          max by (project) (operator_memory_stacks{namespace="tatara",job="tatara-operator",phase="Failed"})
     math_operator: ">"
     threshold: 0
     for: 10m
     decimal_points: 0
     annotations:
-      summary: "{{ index $values \"C\" }} per-project tatara-memory stack(s) are in phase Failed. Agents for that project cannot read/write memory."
+      summary: "The tatara-memory stack for project {{ index $labels \"project\" }} is in phase Failed. Its agents keep spawning and working (#470 removed the spawn gate) but cannot read or write memory, so they run on an empty corpus."
     labels:
       homelab: "true"
       system: "tatara"
       component: "operator"
       severity: "critical"
+  # tatara-operator#470 removed the two memory SPAWN/TURN gates: an unhealthy memory stack
+  # no longer holds Tasks, it degrades them. That is the right trade (an unbounded memory
+  # outage used to stop the platform instead of slowing it), but it moves a hard failure
+  # into a silent quality regression, so the amount of work shipping without recall has to
+  # be bounded in time by an alert. The counter is recorded at the spawn site itself
+  # (task_stage.go, right after the wrapper Pod Create) rather than depending on the agent
+  # noticing it has no recall. subsystem is "memory" and nothing else today.
+  #
+  # THRESHOLD >1, NOT >0, IS THE ANTI-BLIP DESIGN. MemoryStablyReady requires 3 minutes of
+  # continuous Ready, so an ordinary memory restart legitimately degrades whatever spawns
+  # inside that window; one such pod is not an incident. Two or more inside an hour means
+  # the stack has been unhealthy long enough that real work is going out blind. `for: 15m`
+  # then requires that to persist rather than firing on the instant the second pod spawns.
+  - name: "Operator agent pods running without memory recall"
+    queries:
+      - expression: |
+          sum by (project, subsystem) (increase(operator_agent_pod_degraded_total{namespace="tatara",job="tatara-operator"}[1h])) or vector(0)
+    math_operator: ">"
+    threshold: 1
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "{{ index $values \"C\" }} agent pod(s) for project {{ index $labels \"project\" }} were spawned in the last hour with {{ index $labels \"subsystem\" }} unavailable, so they ran a full turn with NO recall. They are not blocked (that gate was removed in #470) - they are producing output from an empty corpus, which reads as ordinary work and lands as ordinary commits and reviews. Treat the results of those Tasks as suspect. Root cause is the project's memory stack: check \"Memory stack stuck not ready\". Two related consequences fire separately - re-ingest is gated (\"Repository re-ingest gated on memory readiness\") and over-budget status writes are refused (\"Operator status writes blocked by an unspillable eviction batch\")."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
   - name: "Operator memory retrieval surface absent"
     queries:
       - expression: |
@@ -564,6 +633,37 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "warning"
+  # Invisible to the error-ratio rule above, deliberately: task_context?notes=all now
+  # serves the notes it HAS instead of 502-ing the whole response when a spilled batch
+  # cannot be read back from tatara-memory. That is the right call for availability, and
+  # it means the request is counted as a SUCCESS while the agent silently receives a
+  # shorter history than it asked for - with nothing in the response saying so. This
+  # counter is the only signal that it happened.
+  # Same non-pre-seeded counter-birth problem as the mirror rule above, same fix; note the
+  # value is a count of NOTE BATCHES (one call site Adds len(refs), not 1), so it reads
+  # high relative to the number of requests affected.
+  - name: "Operator task context served with missing notes"
+    queries:
+      - expression: |
+          sum by (project) (
+            clamp_min(
+              operator_restapi_notes_rehydrate_failed_total{namespace="tatara",job="tatara-operator"}
+              - (operator_restapi_notes_rehydrate_failed_total{namespace="tatara",job="tatara-operator"} offset 30m
+                 or 0 * operator_restapi_notes_rehydrate_failed_total{namespace="tatara",job="tatara-operator"}),
+              0
+            )
+          )
+    math_operator: ">"
+    threshold: 0
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator could not rehydrate {{ index $values \"C\" }} spilled note batch(es) for project {{ index $labels \"project\" }} in 30m, so task_context?notes=all served a PARTIAL history and returned 2xx. Agents asking for their full note history are getting a truncated one with no indication in the response; any turn that reasoned over it reasoned over less than it believed. Usually a tatara-memory outage (check \"Memory stack stuck not ready\" for this project); if memory is healthy the spilled batch is permanently unreadable and the notes are gone."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
   - name: "Operator auth rejections elevated"
     queries:
       - expression: |
@@ -672,20 +772,44 @@ rules:
   # The incident-starvation rule keys on the admission queue itself, not on
   # stage="triaging": triaging's own budget is 5m -> failed(triage-stalled) (F.4), so a
   # Task literally cannot SIT in triaging for 15m and a stage-age rule there could never
-  # fire (fix M20). operator_queue_age_seconds carries class,priority,state (K.1
-  # addendum 8); class=alert is the incident pool (B.7). The priority filter is left open
-  # pending verification of the actual priority values the operator emits - tighten to the
-  # incident priority value once confirmed against the merged operator.
+  # fire (fix M20). operator_queue_age_seconds carries project,class,priority,state (K.1
+  # addendum 8, project added in #457/#458); class=alert is the incident pool (B.7).
+  #
+  # PRIORITY FILTER NOW TIGHTENED (it was left open "pending verification"). Verified
+  # against tatara-operator main: internal/queue/enqueue.go gives a class=alert event
+  # Spec.Priority 0 and everything else 2 when the caller does not override, and
+  # project_controller.go labels the gauge with strconv.Itoa(EffectiveQueuePriority(...)),
+  # so the incident value is the literal string "0". Filtering on it means a
+  # non-incident event that somehow lands in the alert pool cannot page this rule.
+  #
+  # THE SUPPRESSION TERM REPLACES A CLAIM THAT IS NO LONGER TRUE. The old summary argued
+  # a queued incident "CANNOT be waiting on the normal pool" because AlertCapacity
+  # reserves a slot. That reasoning held when AlertCapacity was effectively 1 - one
+  # incident, one reserved slot, so queueing meant broken. It is now configured to 3 on
+  # all three projects (the operator's own fallback default is still 1, Project.
+  # AlertCapacity()), so three concurrent incidents legitimately fill the reserved pool and a
+  # fourth waits: ordinary saturation, not a wedge. operator_admission_blocked_total
+  # {class="alert",reason="pool_full"} is emitted (at most once per pool per pass, and
+  # only when work was genuinely left Queued behind a full pool - #440) exactly in that
+  # case, so `unless on()` drops this rule to NoData -> OK while the pool is honestly
+  # full, and lets it fire only when an incident is queued behind a pool that is NOT at
+  # capacity - which is the genuine wedge.
+  # increase() cannot see that counter's birth (it is not pre-seeded), but on THIS side
+  # that blind spot is harmless: pool_full re-increments on every dispatcher pass while
+  # work stays queued, so the gap is at most one evaluation, and a single unsuppressed
+  # evaluation cannot satisfy `for: 2m` on its own.
   - name: "Operator incident starved in triage"
     queries:
       - expression: |
-          max(operator_queue_age_seconds{namespace="tatara",job="tatara-operator",class="alert",state="Queued"}) or vector(0)
+          (max(operator_queue_age_seconds{namespace="tatara",job="tatara-operator",class="alert",priority="0",state="Queued"}) or vector(0))
+          unless on()
+          (sum(increase(operator_admission_blocked_total{namespace="tatara",job="tatara-operator",class="alert",reason="pool_full"}[10m])) > 0)
     math_operator: ">"
     threshold: 300
     for: 2m
     decimal_points: 0
     annotations:
-      summary: "The oldest queued alert-class event has been waiting {{ index $values \"C\" }}s (>5m) in state=Queued. Incidents are priority class 0 and AlertCapacity reserves a pod slot for them (contract B.7/B3), so an incident CANNOT be waiting on the normal pool. Either priority admission is broken or the whole triage path is wedged - a firing production alert is not being worked."
+      summary: "The oldest queued incident (class=alert, priority=0) has been waiting {{ index $values \"C\" }}s (>5m) in state=Queued while the alert pool is NOT reporting itself full. AlertCapacity is 3, so three incidents in flight and a fourth waiting is legitimate saturation - and that case is suppressed here by operator_admission_blocked_total{class=\"alert\",reason=\"pool_full\"}. This firing means the incident is queued behind a pool with room: priority admission is broken, or the whole triage path is wedged. A firing production alert is not being worked."
     labels:
       homelab: "true"
       system: "tatara"
@@ -897,6 +1021,53 @@ rules:
     decimal_points: 0
     annotations:
       summary: "tatara-operator could not fit {{ index $labels \"kind\" }}/{{ index $labels \"name\" }} under the 800,000-byte object budget after evicting everything evictable ({{ index $values \"C\" }} attempt(s) in 15m). That object is now PERMANENTLY UNWRITABLE and any Issue/MergeRequest it owns is pinned open forever. Manual intervention required."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  # A.7's OTHER refusal, and the one that is NOT a code bug. "Operator object too large to
+  # write" above is "nothing left to evict"; these two are "there IS something to evict but
+  # it cannot be spilled to tatara-memory, so the write is REFUSED". That policy is
+  # deliberate (SPILL FIRST, DROP ONLY ON SPILL SUCCESS - a memory outage is a fault that
+  # gets repaired and no comment or note should be lost meanwhile), which is exactly why it
+  # needs an alert: a deliberately blocking policy has to be bounded in TIME or it is
+  # indistinguishable from a wedge. Until tatara-operator#469 it was entirely silent, so an
+  # object wedged by a memory outage looked exactly like a healthy one.
+  # Split by `reason` because the two have opposite responses. Both counters are PRE-SEEDED
+  # per guarded kind (Issue|MergeRequest|Task x spill_error|unconfigured, objbudget_metrics.go),
+  # so a zero baseline exists from operator startup and plain increase() is safe here - no
+  # counter-birth blind spot to work around.
+  # NOTE: `kind` here is the CR kind being written (Issue|MergeRequest|Task), NOT the A.4
+  # Task origin kind - see scripts/stage_values_allowlist.txt's kind:exempt-metrics section.
+  - name: "Operator status writes blocked by an unspillable eviction batch"
+    queries:
+      - expression: |
+          sum by (kind) (increase(operator_objbudget_spill_blocked_total{namespace="tatara",job="tatara-operator",reason="spill_error"}[30m])) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 15m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator refused {{ index $values \"C\" }} {{ index $labels \"kind\" }} status write(s) in 30m because their over-budget eviction batch could not be spilled to tatara-memory, and has been doing so for 15m. The guard blocks rather than dropping ON PURPOSE, so nothing is lost - but every writer for those objects is failing meanwhile and they stay unwritable until memory returns. This is the memory outage's real blast radius now that agents are no longer gated (#470): check \"Memory stack stuck not ready\" for the owning project first; if memory is healthy, the spill target itself is broken."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  # reason=unconfigured is NOT an outage: the guard had an eviction batch to spill and no
+  # spiller wired up at all. It cannot self-heal, no memory stack can fix it, and it will
+  # refuse writes forever, so it pages faster than the outage case above.
+  - name: "Operator objbudget spiller unconfigured"
+    queries:
+      - expression: |
+          sum by (kind) (increase(operator_objbudget_spill_blocked_total{namespace="tatara",job="tatara-operator",reason="unconfigured"}[30m])) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      summary: "tatara-operator refused {{ index $values \"C\" }} {{ index $labels \"kind\" }} status write(s) in 30m with reason=unconfigured: the A.7 byte-budget guard needed to spill an eviction batch and NO spiller is wired up. This is a WIRING BUG, not an outage - it will never clear on its own, no memory stack can repair it, and every over-budget write of that kind is refused until a deploy fixes it. Do not wait for it to self-heal."
     labels:
       homelab: "true"
       system: "tatara"

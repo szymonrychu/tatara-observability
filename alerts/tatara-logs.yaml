@@ -31,7 +31,7 @@ rules:
     for: 5m
     decimal_points: 0
     annotations:
-      summary: "tatara-operator logged {{ index $values \"C\" }} ERROR lines in 5m (>20). Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\"} | json | level=\"ERROR\"."
+      summary: "tatara-operator logged {{ index $values \"C\" }} ERROR lines in 5m (>20). Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\"} | pattern `<_> <_> <_> <body>` | line_format `{{\"{{\"}}.body{{\"}}\"}}` | json | level=\"ERROR\"."
     labels:
       homelab: "true"
       system: "tatara"
@@ -69,7 +69,7 @@ rules:
     for: 5m
     decimal_points: 0
     annotations:
-      summary: "tatara-memory logged {{ index $values \"C\" }} ERROR lines in 5m (>20). Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-memory\"} | json | level=\"ERROR\"."
+      summary: "tatara-memory logged {{ index $values \"C\" }} ERROR lines in 5m (>20). Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-memory\"} | pattern `<_> <_> <_> <body>` | line_format `{{\"{{\"}}.body{{\"}}\"}}` | json | level=\"ERROR\"."
     labels:
       homelab: "true"
       system: "tatara"
@@ -93,7 +93,7 @@ rules:
     for: 5m
     decimal_points: 0
     annotations:
-      summary: "tatara-operator logged {{ index $values \"C\" }} ERROR line(s) with msg=\"{{ index $labels \"msg\" }}\" in the last 1h (>=2). Below the 20-in-5m burst threshold but recurring - a chronic trickle. Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\"} | json | level=\"ERROR\" | msg=\"{{ index $labels \"msg\" }}\"."
+      summary: "tatara-operator logged {{ index $values \"C\" }} ERROR line(s) with msg=\"{{ index $labels \"msg\" }}\" in the last 1h (>=2). Below the 20-in-5m burst threshold but recurring - a chronic trickle. Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\"} | pattern `<_> <_> <_> <body>` | line_format `{{\"{{\"}}.body{{\"}}\"}}` | json | level=\"ERROR\" | msg=\"{{ index $labels \"msg\" }}\"."
     labels:
       homelab: "true"
       system: "tatara"
@@ -120,7 +120,7 @@ rules:
     for: 5m
     decimal_points: 0
     annotations:
-      summary: "tatara-operator logged {{ index $values \"C\" }} callback_authn_failed event(s) in 15m (>5). Logged at INFO level (invisible to the ERROR-log-burst rule) on the operator's turn-complete callback receiver. Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\"} | json | action=\"callback_authn_failed\"."
+      summary: "tatara-operator logged {{ index $values \"C\" }} callback_authn_failed event(s) in 15m (>5). Logged at INFO level (invisible to the ERROR-log-burst rule) on the operator's turn-complete callback receiver. Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\"} | pattern `<_> <_> <_> <body>` | line_format `{{\"{{\"}}.body{{\"}}\"}}` | json | action=\"callback_authn_failed\"."
     labels:
       homelab: "true"
       system: "tatara"

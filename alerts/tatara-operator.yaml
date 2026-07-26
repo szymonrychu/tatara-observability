@@ -1076,7 +1076,7 @@ rules:
     decimal_points: 0
     exec_err_state: "Error"
     annotations:
-      summary: "Tatara agents reported {{ index $values \"C\" }} internal issue(s) of category={{ index $labels \"category\" }} in 5m. Drill down in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\"} | json | action=\"agent_internal_issue\" for the free-text descriptions."
+      summary: "Tatara agents reported {{ index $values \"C\" }} internal issue(s) of category={{ index $labels \"category\" }} in 5m. Drill down in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\"} | pattern `<_> <_> <_> <body>` | line_format `{{\"{{\"}}.body{{\"}}\"}}` | json | action=\"agent_internal_issue\" for the free-text descriptions."
     labels:
       homelab: "true"
       system: "tatara"

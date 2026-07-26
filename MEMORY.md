@@ -662,3 +662,22 @@ PR/push triggers.
   6.3's redundant-Alerting-redeclaration-under-an-already-justified-Alerting-default case is
   flagged, not exempt); and shortened `tatara-logs.yaml`'s header comment to defer to the
   `tatara_exec_err_justification` key instead of re-arguing the same case in prose.
+- 2026-07-26 (tatara-observability#79, half 1 of 2): a Loki drill-down annotation against
+  this platform's logs must strip the CRI prefix (`<ts> stdout F {json}`) with
+  `pattern \`<_> <_> <_> <body>\` | line_format \`{{.body}}\`` before `| json`, exactly like
+  every rule's own query in `alerts/tatara-logs.yaml` already does - a bare `| json` fails
+  `JSONParserErr` on every collected line, not just malformed ones, because the prefix is
+  never valid JSON. The #63 Loki-to-Prometheus migration on "Tatara agent reported platform
+  problem" (`alerts/tatara-operator.yaml`) carried over a simplified drill-down text that
+  dropped the `pattern`/`line_format` stages the old query had, so the alert fires correctly
+  but its annotation points a responder at zero results. Fixed there, and boy-scouted the
+  same defect found already present (pre-dating tonight, not from the migration) in all four
+  `alerts/tatara-logs.yaml` drill-down annotations, whose own queries already do this
+  correctly but whose copy-pasteable annotation text did not. Second wrinkle: Grafana renders
+  annotation values as Go templates at evaluation time (that is how `{{ index $values "C" }}`
+  in these same annotations gets substituted), so pasting a literal `{{.body}}` into the
+  annotation text would itself be parsed as a template action referencing a nonexistent
+  field, not shown as text. Used the standard Go template literal-brace escape,
+  `{{"{{"}}.body{{"}}"}}`, verified with a throwaway `text/template` program to render back to
+  exactly `{{.body}}`. This is half of #79; the other half (Alloy DaemonSet covering only 3
+  of 5 nodes, 48% of tatara pods shipping no logs) is untouched, out of scope for this repo.

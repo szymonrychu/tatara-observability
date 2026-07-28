@@ -116,3 +116,18 @@ Planned work not yet started. Move items out when shipped (note in MEMORY.md if 
   entry) could only be validated live against structural analogs (`agent_internal_issue_total` itself
   has zero live series today), so this is the one rule in the set whose live firing behaviour cannot
   be proven from the repo alone.
+- `external`, BLOCKS THIS REPO BUT CANNOT BE FIXED HERE (tatara-observability#79 root cause (a)):
+  the promtail DaemonSet in namespace `monitoring` runs on 3 of the cluster's 5 Ready nodes -
+  `kube_daemonset_status_desired_number_scheduled{daemonset="promtail"}` is 3, while
+  `prometheus-prometheus-node-exporter` and `smartctl-exporter-*` are both 5 on the same cluster,
+  so this is promtail's OWN nodeSelector/tolerations excluding `nas-d0w363i` and `worker-jtw3f33`,
+  not a scheduling outage. `list_loki_label_values(node_name)` over 7d confirms neither node has
+  ever shipped a line. Consequence for every Loki rule in `alerts/tatara-logs.yaml`: an empty
+  result for a pod on those two nodes means "not collected", never "no output". The collector is
+  not deployed by any tatara-* repo (`tatara-helmfile` ships only the `tatara`-namespace app
+  releases), so the fix belongs to the monitoring-stack owner: give the promtail DaemonSet the
+  tolerations matching those two nodes' taints (node-exporter's toleration set is the working
+  reference on this same cluster) and/or drop its restricting nodeSelector, then re-check that
+  `list_loki_label_values(node_name)` returns 5 values. This repo's half is shipped: the "Log
+  collector node coverage incomplete" rule now fires (currently = 2) so the blind spot is visible
+  instead of silent. Retire this line when that expression reads 0.

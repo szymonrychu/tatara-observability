@@ -799,3 +799,52 @@ PR/push triggers.
   knob one layer down (the query-level `query_type` default is what actually applies). Both
   are terraform-side, so out of the agent-editable surface and out of this change's
   authorisation.
+- 2026-07-29 (tatara-observability#79, half 2 of 2, and the correction to half 1's
+  closing sentence): half 1 (2026-07-26, above) is CONFIRMED SHIPPED AND APPLIED - the
+  deployed rule (uid `aft7tvrphodmoa`, re-keyed from the `cfrz32fd0veo0a` the issue cites)
+  carries the CRI-stripping annotation live, read back via
+  `GET /api/v1/provisioning/alert-rules`. Re-proved the A/B against live Loki
+  (uid `efihqbqlmroqod`, now-3d): the naive `{namespace="tatara", app="tatara-operator"}
+  | json | action="agent_internal_issue"` returns 0 entries over 452,170 scanned lines,
+  while the same query with the `pattern`/`line_format` prelude returns every report with
+  `description`/`turn_id`/`offending_tool` parsed. Nothing further to fix on (b).
+  TWO CORRECTIONS TO THE ISSUE'S OWN TEXT, both from live data. (1) The collector is
+  PROMTAIL, not Alloy: `kube_pod_info{namespace="monitoring"}` shows three pods with
+  `created_by_name="promtail"`. Anyone grepping the infra repo for "alloy" per the issue
+  body will find nothing. (2) It is not a scheduling failure but a scheduling EXCLUSION:
+  `kube_daemonset_status_desired_number_scheduled{daemonset="promtail"}` = 3 against 5
+  Ready nodes, while `prometheus-prometheus-node-exporter` and `smartctl-exporter-*` both
+  show 5 on the same cluster. desired=3 means the scheduler was never asked, so
+  desired-vs-ready (the obvious rule shape) would have read PERFECTLY GREEN throughout -
+  which is why the new rule counts nodes, not DaemonSet replicas.
+- 2026-07-29: the coverage gap is UNCHANGED since the 2026-07-23 observation -
+  `list_loki_label_values(node_name)` over 7d still returns exactly
+  `["kubernetes-47d28x2","kubernetes-5vv07x2","kubernetes-jhv07x2"]`; `nas-d0w363i` and
+  `worker-jtw3f33` have never shipped a line. New rule "Log collector node coverage
+  incomplete" in `alerts/tatara-logs.yaml` makes it visible:
+  `count(kube_node_status_condition{condition="Ready",status="true"} == 1) -
+  (sum(kube_daemonset_status_number_ready{namespace="monitoring",daemonset=~"promtail|alloy|grafana-agent|vector|fluent-bit"})
+  or vector(0))` > 0 for 30m, evaluating to 2 live. Four decisions worth keeping:
+  (1) it must be a PROMETHEUS rule - a Loki query cannot detect its own blind spot,
+  because a node that ships nothing has no stream to select; (2) it therefore sets
+  `no_data_state`/`exec_err_state` explicitly to opt out of this file's Loki-shaped
+  Alerting defaults, and the top-level `tatara_exec_err_justification` key was amended so
+  its "Loki-log-based rules only" claim stays true; (3) the `daemonset=~` alternation
+  keeps a promtail->alloy swap from silently converting the rule into permanent NoData;
+  (4) the `or vector(0)` is NOT the #67 fabricated-zero anti-pattern - that one is
+  `or vector(0)` under a `<` threshold, this is `>`, and a kube-state-metrics outage
+  empties the LHS too, so the binary op yields an empty result (NoData) rather than a
+  number. It fabricates only when KSM is up and the DaemonSet is gone, where "all N nodes
+  are blind" is the correct page.
+- 2026-07-29 (routed from tatara-memory#84): "Memory service operation error ratio high"
+  now carries `class!="maintenance"` on BOTH sides of the ratio. tatara-memory#84 added a
+  `class` label (`maintenance`/`user`) to `tatara_memory_op_total` so internal purge ops
+  can be separated from agent-facing ones, and this rule's own summary says its premise is
+  "agents failing to read/write memory". Live evidence it mattered: `delete_by_source` and
+  `delete_by_sources` carried 65 errors each against 60/21 successes, and the unfiltered
+  ratio spiked to 0.15 - 50% over the 0.1 threshold - within the preceding 24h, entirely on
+  those two maintenance ops. The producer change is NOT deployed yet and this is
+  deliberately safe anyway: a negative matcher also matches series where the label is
+  absent (absent == ""), so filtered and unfiltered return an identical value today (both
+  0, verified live) and the exclusion starts applying the moment the label ships. No second
+  edit needed, and no window where the rule selects nothing.

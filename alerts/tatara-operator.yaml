@@ -1131,12 +1131,25 @@ rules:
   # hours of every 24 by the 0 3 * * * / 0 6 * * * nightly crons. One rule covers every
   # activity of every Project, and a new activity or Project needs no rule change.
   #
-  # Grace is 3h, not the 30m a naive reading suggests: refine_barrier_timeout can
-  # legitimately hold a scan for up to 2h (tatara-operator
-  # internal/controller/repository_controller.go:49) and the scan still stamps when the
-  # timeout releases, so a shorter grace reintroduces the false fires this rule exists to
+  # Grace is 3h, not the 30m a naive reading suggests. This used to be sized around the
+  # refine pre-scan barrier, which could legitimately hold a scan for up to 2h; that
+  # barrier is gone (operator v1.35, refine now runs on its own cron with no hold), but 3h
+  # stays as headroom against ordinary cron/queueing jitter across every (project,
+  # activity) pair - a shorter grace reintroduces the false fires this rule exists to
   # remove. A fully-missed nightly batch pages ~3h late instead of being invisible.
   # Successor to "Operator scan loop stalled" (tatara_scan_*, deleted with the scan).
+  #
+  # DEMAND-DRIVEN ACTIVITIES ARE DELIBERATELY ABSENT FROM THIS RULE. Brainstorm stopped
+  # being periodic in operator v1.35: it refills on a level-triggered reconcile pass and
+  # pauses only on an agent's explicit exhausted verdict, so the operator retracts
+  # activity="brainstorm" from operator_sweep_next_expected_timestamp_seconds
+  # unconditionally, regardless of the Project's own brainstorm.enabled. Do not "fix" the
+  # missing series. Under demand-driven scheduling a correctly-paused project is
+  # indistinguishable from a wedged one by this metric, and a rule that fires when the
+  # system is working correctly trains people to ignore it. The paused state is carried by
+  # operator_brainstorm_paused{project} instead (see tatara-operator's obs package).
+  # activity="refine" replaced it here: refine is genuinely periodic grooming and now
+  # carries its own cron (spec.scm.cron.refine.schedule).
   # ----------------------------------------------------------------------------
   - name: "Operator sweep heartbeat stale"
     queries:

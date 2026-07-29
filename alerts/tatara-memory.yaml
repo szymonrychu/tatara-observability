@@ -19,6 +19,7 @@ rules:
     for: 10m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-api-server-pod-not-ready"
       summary: "tatara-memory pod {{ index $labels \"pod\" }} not Ready for 10m. Project memory API degraded."
     labels:
       homelab: "true"
@@ -34,6 +35,7 @@ rules:
     for: 15m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-api-server-crash-looping"
       summary: "tatara-memory pod {{ index $labels \"pod\" }} restarting ~{{ index $values \"C\" }} times / 15m. Crash loop."
     labels:
       homelab: "true"
@@ -49,6 +51,7 @@ rules:
     for: 1m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-api-server-oomkilled"
       summary: "tatara-memory pod {{ index $labels \"pod\" }} was OOMKilled. Raise memory limit or investigate leak."
     labels:
       homelab: "true"
@@ -64,6 +67,7 @@ rules:
     for: 10m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-api-server-container-stuck-waiting"
       summary: "tatara-memory pod {{ index $labels \"pod\" }} container stuck waiting ({{ index $labels \"reason\" }}) for 10m."
     labels:
       homelab: "true"
@@ -86,6 +90,7 @@ rules:
     for: 10m
     decimal_points: 2
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-http-5xx-error-ratio-high"
       summary: "tatara-memory HTTP 5xx ratio {{ index $values \"C\" }} (>5%, excludes /readyz|/healthz|/metrics probes) over 10m. API serving errors."
     labels:
       homelab: "true"
@@ -103,6 +108,7 @@ rules:
     for: 15m
     decimal_points: 2
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-service-operation-error-ratio-high"
       summary: "tatara-memory service op error ratio {{ index $values \"C\" }} (>10% of memory service ops - writes + non-lookup reads - erroring over 10m; get/get_entity not-found excluded). Agents failing to read/write memory."
     labels:
       homelab: "true"
@@ -118,6 +124,7 @@ rules:
     for: 1m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-api-server-http-handler-panics"
       summary: "tatara-memory recovered {{ index $values \"C\" }} HTTP handler panic(s) in 15m. Investigate the memory API handler crash."
     labels:
       homelab: "true"
@@ -135,6 +142,7 @@ rules:
     for: 10m
     decimal_points: 2
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-lightrag-call-error-ratio-high"
       summary: "tatara-memory LightRAG client error ratio {{ index $values \"C\" }} (>10%) over 10m. Ingest/query backend failing."
     labels:
       homelab: "true"
@@ -150,6 +158,7 @@ rules:
     for: 15m
     decimal_points: 2
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-lightrag-call-p95-latency-high"
       summary: "tatara-memory LightRAG call p95 latency {{ index $values \"C\" }}s (>30s) over 10m. Backend slow."
     labels:
       homelab: "true"
@@ -167,6 +176,7 @@ rules:
     for: 30m
     decimal_points: 2
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-ingest-job-failure-ratio-high"
       summary: "tatara-memory ingest job failure ratio {{ index $values \"C\" }} (>20%) over 30m. Repo ingestion degraded."
     labels:
       homelab: "true"
@@ -182,6 +192,7 @@ rules:
     for: 30m
     decimal_points: 2
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-ingest-item-error-rate-elevated"
       summary: "tatara-memory ingest items erroring/timing out at {{ index $values \"C\" }}/s for 30m. Items being dropped."
     labels:
       homelab: "true"
@@ -196,6 +207,7 @@ rules:
     for: 15m
     decimal_points: 2
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-code-graph-query-errors"
       summary: "tatara-memory code-graph queries erroring at {{ index $values \"C\" }}/s for 15m. Agent graph traversals failing."
     labels:
       homelab: "true"
@@ -213,6 +225,7 @@ rules:
     for: 1h
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-code-graph-analytics-stalled-with-dirty-repos"
       summary: "tatara-memory code-graph analytics stalled: {{ index $values \"C\" }} dirty repos with no recompute in 30m. Centrality/community data stale."
     labels:
       homelab: "true"
@@ -250,6 +263,7 @@ rules:
     for: 15m
     decimal_points: 2
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-pvc-volume-near-full"
       summary: "tatara-memory PVC {{ index $labels \"persistentvolumeclaim\" }} is {{ index $values \"C\" }} free (below 15%). Postgres WAL/data fill leads to a CNPG crash loop below memory quorum; expand storage (Project spec.memory.pgStorage / neo4jStorage) before it hits 0."
     labels:
       homelab: "true"
@@ -278,6 +292,7 @@ rules:
     for: 15m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-stack-stuck-not-ready"
       summary: "The tatara-memory stack for project {{ index $labels \"project\" }} has been stuck in Provisioning/Failed/Degraded for 15m (not Ready). Agents are NOT blocked by this any more (operator #470): pods still spawn and turns still run, but with NO recall for the whole turn, so what ships is degraded-quality output - see operator_agent_pod_degraded_total for how much of it. What DOES stop: per-repo re-ingest is held by the memory-readiness gate (operator_repository_ingest_gated), so the recall corpus goes stale on top of being unreachable; and any status write whose eviction batch cannot be spilled is REFUSED outright rather than losing data (operator_objbudget_spill_blocked_total), which wedges those objects until memory returns. Check the CNPG cluster + PVCs directly."
     labels:
       homelab: "true"
@@ -328,6 +343,7 @@ rules:
     keep_firing_for: 30m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-postgres-or-neo4j-container-stuck-waiting"
       summary: "tatara-memory stateful pod {{ index $labels \"pod\" }} (cnpg postgres or neo4j) container stuck ({{ index $labels \"reason\" }}) for 10m. A cnpg postgres member stuck = HA degraded while the primary keeps serving (this silently masked an 8h replica crash loop on 2026-07-06); a neo4j pod stuck = graph queries failing. This rule keeps firing for 30m after the container recovers, so one crash loop is one incident rather than one per flap (#444 + #448 were minted as separate issues for the same fault) - a container can therefore be healthy again while the alert is still firing; check current state before closing. Check the CNPG cluster (kubectl cnpg status mem-<project>-pg) / the neo4j StatefulSet."
     labels:
       homelab: "true"

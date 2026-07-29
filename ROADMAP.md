@@ -116,3 +116,16 @@ Planned work not yet started. Move items out when shipped (note in MEMORY.md if 
   entry) could only be validated live against structural analogs (`agent_internal_issue_total` itself
   has zero live series today), so this is the one rule in the set whose live firing behaviour cannot
   be proven from the repo alone.
+- `shipped` (2026-07-29, #81 + tatara-documentation#24): every alert rule carries a
+  `runbook_url` pointing at a rule-name-derived anchor on the published runbooks page, plus
+  `scripts/check_runbook_urls.py` in `alert-rules-lint.yml` (exact-URL gate locally, anchor
+  existence by shallow-cloning tatara-documentation, coverage printed to the job summary) and
+  the reciprocal append-only anchor guard in tatara-documentation. CONVENTIONS.md section 8
+  is the author-facing contract. See MEMORY.md 2026-07-29. This closes #79's action item 4
+  (a `runbookURL` on `cfrz32fd0veo0a`) as a side effect - that rule is covered like every other.
+- `planned`: the measurable test of whether this actually changed behaviour is the NEXT firing
+  of `Memory postgres or neo4j container stuck waiting` (rule key 944c6a861f89f080). It has
+  produced three full from-scratch RCAs (tatara-helmfile #245, #263, #237) whose root cause was
+  already one of two documented bullets on the runbook page. A fourth from-scratch RCA means the
+  incident agent is reading the link and ignoring it, which is a `tatara-agent-skills` problem,
+  not an alerting one. Check this before adding any further runbook prose.

@@ -25,6 +25,7 @@ rules:
     for: 6h
     decimal_points: 2
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tier-quality-rubber-stamp-model-claude-sonnet-5"
       summary: "claude-sonnet-5 review find-rate {{ index $values \"C\" }} (<2%) over 6h with a minimum review volume met. Reviews may be rubber-stamping (approving without substantive scrutiny) rather than reviewing seriously; consider a tier-revert per the G5 incident goal."
     labels:
       homelab: "true"

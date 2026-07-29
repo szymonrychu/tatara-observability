@@ -11,6 +11,7 @@ rules:
     for: 10m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-ingest-job-failing"
       summary: "Tatara FULL re-ingest failing: {{ index $values \"C\" }} full-ingest failure(s) in the last 1h (operator-side). Recall corpus is going stale: a scheduled/first full ingest or the incremental-to-full self-heal fallback failed. Benign self-healing incremental failures are excluded."
     labels:
       homelab: "true"
@@ -26,6 +27,7 @@ rules:
     for: 10m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-ingest-job-stuck-active"
       summary: "A tatara ingest Job has been active for {{ index $values \"C\" }}s (>30m). Ingest is wedged (analyzer hang, lightrag lock, or slow clone)."
     labels:
       homelab: "true"
@@ -41,6 +43,7 @@ rules:
     for: 5m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-ingest-pod-oomkilled"
       summary: "Tatara ingest pod(s) OOMKilled ({{ index $values \"C\" }} container(s), pod~*-ingest-*). Bump ingest job memory limits; large repo blew the heap."
     labels:
       homelab: "true"
@@ -56,6 +59,7 @@ rules:
     for: 10m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-ingest-pod-stuck-waiting"
       summary: "Tatara ingest pod(s) stuck waiting ({{ index $values \"C\" }} container(s), pod~*-ingest-*). Image pull or container-config error blocking ingest."
     labels:
       homelab: "true"
@@ -71,6 +75,7 @@ rules:
     for: 15m
     decimal_points: 2
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-ingest-run-failure-ratio-high"
       summary: "Ingester-side run failure ratio is {{ index $values \"C\" }} over 1h (>50%). Most ingest runs are terminating in failure."
     labels:
       homelab: "true"
@@ -97,6 +102,7 @@ rules:
     for: 30m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-repository-ingest-stale"
       summary: "Repository {{ index $labels \"repo\" }} (project {{ index $labels \"project\" }}) last successful ingest was {{ index $values \"C\" }}s ago (>24h). Its recall corpus is going stale: the per-repo re-ingest cron missed or is silently wedged. Normal live staleness is ~2.5h; 24h is a backstop. If \"Repository re-ingest gated on memory readiness\" is also firing for this project, that is the cause and this is the consequence - fix the memory stack, not the cron."
     labels:
       homelab: "true"
@@ -112,6 +118,7 @@ rules:
     for: 1h
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-repository-stuck-in-failing-ingest-state"
       summary: "Repository {{ index $labels \"repo\" }} (project {{ index $labels \"project\" }}) is pinned in a failing ingest state (operator_repository_ingest_failing=1) for >1h. A persistent analyzer/auth/graph failure survived the incremental-to-full self-heal and has not cleared on re-ingest."
     labels:
       homelab: "true"
@@ -146,6 +153,7 @@ rules:
     for: 1h
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-repository-re-ingest-gated-on-memory-readiness"
       summary: "Repository {{ index $labels \"repo\" }} (project {{ index $labels \"project\" }}) has had its re-ingest held by the project memory-readiness gate for 1h. Nothing failed and nothing retried - the gate is a silent hold - so operator_repository_ingest_failing reads 0 throughout. The gate clears within the 3m stabilization window once the stack is Ready, so an hour means that project's memory stack is not converging: check operator_memory_stacks{project=...} and the \"Memory stack stuck not ready\" alert. Agents keep running meanwhile, but on a corpus that is both unreachable and going stale."
     labels:
       homelab: "true"
@@ -184,6 +192,7 @@ rules:
     for: 30m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-repository-phase-desync-still-being-produced"
       summary: "The Repository reconciler repaired the desynchronised (Phase=Failed, IngestFailureCount=0) state {{ index $values \"C\" }} time(s) in 1h on {{ index $labels \"repo\" }} (project {{ index $labels \"project\" }}). The repair is working, so nothing is stuck - but a repo sat in that state for 20.8h with zero actual ingest failures before it existed, and the ORIGIN of the desync was never proven. A non-zero rate here means whatever writes it is still running. Info-only (no system=tatara label): emails, does not raise an incident Task."
     labels:
       homelab: "true"
@@ -205,6 +214,7 @@ rules:
     for: 30m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-ingest-job-creation-race-still-being-hit"
       summary: "{{ index $values \"C\" }} ingest Job creation(s) for {{ index $labels \"repo\" }} (project {{ index $labels \"project\" }}) collapsed into adopting an existing Job of the same deterministic name in 1h. The deterministic name is holding the read-then-create race (two Jobs were once created 16ms apart from the same pod), so no duplicate ingest runs - but the race is still being run into, and the name is the only thing stopping it. Info-only (no system=tatara label): emails, does not raise an incident Task. A sustained rate means the reconcile path deserves a real guard, not that ingest is broken."
     labels:
       homelab: "true"
@@ -219,6 +229,7 @@ rules:
     for: 15m
     decimal_points: 2
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-ingester-llm-call-failure-ratio-high"
       summary: "Ingester LLM call failure ratio is {{ index $values \"C\" }} over 1h (>0.3, gated to >=20 calls). Semantic chunk extraction is failing best-effort, so graph enrichment is degrading while the ingest run still reports success."
     labels:
       homelab: "true"
@@ -234,6 +245,7 @@ rules:
     for: 10m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-ingester-quarantining-files-analyzer-hard-error"
       summary: "Tatara ingester quarantined {{ index $values \"C\" }} file(s) in the last 1h (analyzer hard-error). Those files are held at last-good and dropped from the code graph until their next diff edit, so agents get an incomplete graph for the affected repo/language. Check the ingest job WARN logs for analyzer name + paths + error."
     labels:
       homelab: "true"

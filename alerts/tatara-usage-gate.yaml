@@ -29,6 +29,7 @@ rules:
     for: 15m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-claude-account-usage-poll-unhealthy"
       summary: "tatara_account_usage_poll_health={{ index $values \"C\" }} (<1) for 15m while the poller is enabled. The /api/oauth/usage poller has exceeded its failure threshold; the account-usage snapshot is stale. The gate keeps holding on the last-known windows until each expires (eventual fail-open, by design - a claudeSubscription project has no customWindow inputs to fall back to); the OTel 429 backstop is the hard floor. Check operator logs for poll errors (auth, 429, schema drift)."
     labels:
       homelab: "true"
@@ -44,6 +45,7 @@ rules:
     for: 15m
     decimal_points: 1
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-claude-account-usage-window-near-emergency-ceiling"
       summary: "Highest Claude account usage window is at {{ index $values \"C\" }}% (>80%, the operator's DefaultEmergencyPercent) for 15m. The shared subscription is close to a window ceiling; only the incident kind (98% ceiling) still has headroom. THRESHOLD IS PROVISIONAL: reused from budget.DefaultEmergencyPercent (tatara-operator internal/budget/budget.go) as the closest existing platform convention for 'emergency'; tune once real five_hour/seven_day utilization data accumulates."
     labels:
       homelab: "true"
@@ -59,6 +61,7 @@ rules:
     for: 5m
     decimal_points: 3
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-claude-code-api-429-rate-reactive-backstop-pending-otel-deployment"
       summary: "Claude Code agents hit HTTP 429 at {{ index $values \"C\" }}/s over 5m (reactive backstop per the design spec's 'any live-turn 429 -> emergency fleet stop' floor). The proactive per-kind gate failed to prevent a rate-limit hit; treat as an incident. INERT UNTIL DEPLOYED: this metric requires Claude Code native OTel to be enabled on wrapper agent pods (Phase B, tatara-claude-code-wrapper) and the OTLP->Prometheus collector wired via tatara-helmfile (Phase D) - both land after this dashboard/alert PR."
     labels:
       homelab: "true"
@@ -74,6 +77,7 @@ rules:
     for: 30m
     decimal_points: 1
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-claude-account-monthly-overage-climbing"
       summary: "Monthly pay-as-you-go overage utilization is {{ index $values \"C\" }}% (>80%) for 30m. Read-only signal (overage never gates spawning, per the design's explicit non-goal) - informational for the human plan owner to decide whether to raise the limit or curb discretionary agent kinds manually."
     labels:
       homelab: "true"

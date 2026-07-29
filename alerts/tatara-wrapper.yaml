@@ -25,6 +25,7 @@ rules:
     for: 15m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-wrapper-agent-container-crash-looping"
       summary: "Wrapper agent container restarted {{ index $values \"C\" }} times in 15m in namespace {{ index $labels \"namespace\" }}. Agent pods are crash-looping."
     labels:
       homelab: "true"
@@ -40,6 +41,7 @@ rules:
     for: 5m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-wrapper-agent-container-oomkilled"
       summary: "{{ index $values \"C\" }} wrapper agent container(s) last terminated OOMKilled in namespace {{ index $labels \"namespace\" }}. Raise the agent memory limit."
     labels:
       homelab: "true"
@@ -55,6 +57,7 @@ rules:
     for: 15m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-wrapper-agent-container-stuck-waiting"
       summary: "{{ index $values \"C\" }} wrapper agent container(s) stuck waiting (image-pull or create-container error) in namespace {{ index $labels \"namespace\" }}. Agents cannot start."
     labels:
       homelab: "true"
@@ -70,6 +73,7 @@ rules:
     for: 30m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-wrapper-agent-pods-not-becoming-ready"
       summary: "{{ index $values \"C\" }} wrapper agent pod(s) not Ready for 30m in namespace {{ index $labels \"namespace\" }}. Agent throughput degraded."
     labels:
       homelab: "true"
@@ -86,6 +90,7 @@ rules:
     for: 30m
     decimal_points: 2
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-wrapper-commit-push-failure-ratio-high"
       summary: "Wrapper commit/push failing {{ index $values \"C\" }} of pushes over 30m (>20%). Agent work is not landing on the source repos."
     labels:
       homelab: "true"
@@ -101,6 +106,7 @@ rules:
     for: 30m
     decimal_points: 2
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-wrapper-turns-erroring"
       summary: "Wrapper turns failing {{ index $values \"C\" }} of turns over 30m (>30%). Claude sessions are erroring out."
     labels:
       homelab: "true"
@@ -116,6 +122,7 @@ rules:
     for: 10m
     decimal_points: 2
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-wrapper-http-5xx-responses"
       summary: "Wrapper HTTP API returning 5xx (excludes /readyz|/healthz|/metrics probes) at {{ index $values \"C\" }}/s over 10m. A real wrapper API request path is erroring."
     labels:
       homelab: "true"
@@ -131,6 +138,7 @@ rules:
     for: 5m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-wrapper-http-handler-panics"
       summary: "Wrapper recovered {{ index $values \"C\" }} HTTP handler panic(s) in 15m. A request path is panicking."
     labels:
       homelab: "true"
@@ -156,6 +164,7 @@ rules:
     for: 5m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-wrapper-claude-process-crash-looping"
       summary: "Claude subprocess restarted {{ index $values \"C\" }} times in 15m inside wrapper agent pod {{ index $labels \"exported_pod\" }}. The in-pod agent session is crash-looping (burning budget, stalling the Task)."
     labels:
       homelab: "true"

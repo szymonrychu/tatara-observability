@@ -68,6 +68,19 @@ kube_pod_info
 volume_manager_total_volumes
 kubelet_volume_stats_available_bytes
 kubelet_volume_stats_capacity_bytes
+# tatara-observability#90: the two-cause split in alerts/tatara-nodes.yaml. Both are
+# kube-state-metrics, both confirmed emitted live 2026-07-29 via grafana MCP against the
+# homelab Prometheus - kube_pod_spec_volumes_persistentvolumeclaims_info returns the
+# pod -> PVC edge for every PVC-mounting pod in the cluster, and
+# kube_persistentvolumeclaim_access_mode{access_mode="ReadWriteOnce"} returned
+# home-automation/piper among others. They are what makes "a ReadWriteOnce volume is
+# mid-handoff between two nodes" separable from "this node's CSI plane is broken".
+# NOT added, because they do not answer the question despite looking like they should:
+# kube_pod_status_reason (has no "Multi-Attach" value in this cluster) and
+# kube_volumeattachment_info (the second attachment is never created, so counting
+# attachments during the live deadlock finds exactly one). Both checked, both rejected.
+kube_pod_spec_volumes_persistentvolumeclaims_info
+kube_persistentvolumeclaim_access_mode
 
 # --- external: forward-looking, not yet deployed by any producer repo ---
 # scripts/reconcile_metric_provenance.py (issue #57) treats "external" sections as exempt

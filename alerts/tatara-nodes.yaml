@@ -11,6 +11,29 @@
 # live Prometheus, and RE-verified here (grafana MCP, uid=prometheus, 2026-07-29) before
 # landing - see each rule's own comment for the numbers.
 #
+# 2026-07-29, tatara-observability#90. "Node volume plane wedged" fired 17 minutes after
+# this file was created, on a TRUE condition with a FALSE cause. The desired-minus-actual
+# gap on kubernetes-5vv07x2 was real and 5h old, but the node was mounting 22 RBD and 5
+# CephFS volumes fine; the one outstanding volume was a ReadWriteOnce RBD PVC that a
+# Running pod on ANOTHER node legitimately held, blocked by a RollingUpdate with
+# maxUnavailable=0. The rule's annotation said "cordon and drain the node", which would
+# have evicted ~22 healthy pods off an innocent node and not resolved the deadlock. Two
+# causes, opposite responses, one expression. The split is now made in PromQL: the wedge
+# rule subtracts the volumes an RWO handoff explains, and the handoff gets its own rule
+# with its own remediation, so nothing goes dark - see both rules' comments.
+#
+# DUPLICATE-SERIES HARDENING (same change). Every join here matches kube_pod_info on
+# (namespace, pod), and that is NOT unique: during a kube-state-metrics rollover two
+# replicas are scraped at once, and for ~5m after a pod moves node the old and new series
+# are both live. Either produces "found duplicate series ... many-to-many matching not
+# allowed", which with default_exec_err_state Error and no alerting on Error means the
+# rule silently reports nothing - the repo's recurring silent-green failure class. Proven
+# live: the unhardened join errors on a range query over the last 8h (arc-system listener,
+# ks-m rollover; argo-workflows eventbus-default-js-2, moved node). Every kube_pod_info
+# right-hand side is therefore wrapped in topk by (namespace, pod) (1, ...), and every
+# other kube-state-metrics series used in a join is collapsed with max by (...). DO NOT
+# remove these - the expressions look identical without them and fail only under churn.
+#
 # WHY A NEW FILE. One file = one Grafana rule group (grafana.tf derives rulegroup_name
 # from the filename via a fileset() glob, so a new file needs NO terraform change). These
 # are component="node", not component="operator"/"memory", and folding them into
@@ -44,16 +67,19 @@ rules:
   #      kubernetes-47d28x2 0.154, worker-jtw3f33 0.091. There are always some dead
   #      endpoints, so 0.8 has real headroom. DO NOT lower it to 0.5 - that sits inside
   #      twice the observed ceiling and would page on ordinary churn.
+  # The topk/max dedupes added 2026-07-29 (#90) do not move that baseline: re-measured
+  # over the last 8h at 30m resolution the ratio reads 0.091-0.278 per node exactly as
+  # before, and the range no longer errors out on duplicate kube_pod_info series.
   - name: "Node pod network partitioned"
     queries:
       - expression: |
           (
-            count by (node) ((up == 0) * on (namespace, pod) group_left(node) kube_pod_info{node!=""})
+            count by (node) ((up == 0) * on (namespace, pod) group_left(node) (topk by (namespace, pod) (1, kube_pod_info{node!=""})))
             /
-            count by (node) (up * on (namespace, pod) group_left(node) kube_pod_info{node!=""})
+            count by (node) (up * on (namespace, pod) group_left(node) (topk by (namespace, pod) (1, kube_pod_info{node!=""})))
           )
-          and on (node) (kube_node_status_condition{condition="Ready",status="true"} == 1)
-          and on (node) (count by (node) (up * on (namespace, pod) group_left(node) kube_pod_info{node!=""}) >= 3)
+          and on (node) (max by (node) (kube_node_status_condition{condition="Ready",status="true"}) == 1)
+          and on (node) (count by (node) (up * on (namespace, pod) group_left(node) (topk by (namespace, pod) (1, kube_pod_info{node!=""}))) >= 3)
     math_operator: ">"
     threshold: 0.8
     for: 10m
@@ -67,8 +93,12 @@ rules:
       component: "node"
       severity: "critical"
   # tatara-helmfile#245 class: the kubelet wants to mount volumes it cannot mount. Pods
-  # scheduled there sit in CreateContainerError indefinitely and the node still reports
-  # Ready. volume_manager_total_volumes is exported by the KUBELET, which is host-network
+  # needing those volumes hang indefinitely and the node still reports Ready. (#90
+  # correction: they hang in Pending/ContainerCreating, NOT CreateContainerError as this
+  # comment and the old summary both claimed - the live pod was Pending with no pod IP,
+  # because it never got past attach. And only pods needing the AFFECTED volumes hang,
+  # not everything scheduled on the node.)
+  # volume_manager_total_volumes is exported by the KUBELET, which is host-network
   # and therefore stays scrapeable straight through a pod-overlay partition - the same
   # property that made #239 diagnosable at all, so this rule keeps working during the
   # failure mode the rule above covers.
@@ -80,23 +110,142 @@ rules:
   # too strong about the instant: a mount in progress transiently shows 1. That is exactly
   # what `for: 15m` exists to absorb - a real wedge persists for hours (#245 ran for a
   # working day), a mount does not. Do not tighten this to a shorter `for`.
+  #
+  # THE #90 SUBTRACTION. The raw gap has two causes with OPPOSITE remediations, and the
+  # gap alone cannot tell them apart:
+  #   a) the node's own CSI/mount plane is broken (#245) - cordon and drain is right;
+  #   b) a ReadWriteOnce volume is mid-handoff between two pods on two nodes - the node
+  #      is healthy, draining it evicts innocent workloads and does not resolve anything.
+  # So the term subtracted below removes exactly the (b) volumes: Pending pods on this
+  # node whose RWO PVC is also referenced from a DIFFERENT node. What is left is backlog
+  # (b) does not explain, which is the only thing that can implicate the node. Case (b)
+  # is not dropped on the floor - "PersistentVolumeClaim multi-attach deadlock" below
+  # fires on it instead, with the correct fix, so the split loses no coverage.
+  #
+  # WHY THESE METRICS AND NOT THE OBVIOUS ONES. Checked live 2026-07-29 before writing a
+  # line of this, because the obvious discriminators do not exist in this cluster:
+  #   - kube_pod_status_reason has NO "Multi-Attach" value. Its full label set here is
+  #     Evicted, NodeAffinity, NodeLost, PreemptionByScheduler, SchedulingGated, Shutdown,
+  #     TerminationByKubelet, UnexpectedAdmissionError. A rule keyed on it would be dark.
+  #   - "the PV is attached to two nodes" is NOT observable either. The attachdetach
+  #     controller REFUSES to create the second VolumeAttachment, so during the live
+  #     deadlock kube_volumeattachment_info showed exactly ONE attachment for
+  #     pvc-3f9dec97-..., on the holder node. Counting attachments finds nothing.
+  #   - storage_operation_duration_seconds{status=~"fail.*"} is not a node-fault signal:
+  #     volume_fs_resize failures are a standing baseline on 3 of 5 healthy nodes.
+  # What IS observable is the pod-to-PVC-to-node shape, hence kube_pod_spec_volumes_
+  # persistentvolumeclaims_info joined to kube_pod_info, gated on the PVC being RWO.
+  #
+  # LIVE VERIFICATION of this exact expression, 8h range at 300s (the full retention this
+  # Prometheus has): kubernetes-5vv07x2 reads 0 at EVERY sample - the #90 false alert is
+  # gone - while worker-jtw3f33 keeps its isolated single-sample blips (1,4,1,1,1,1) that
+  # `for: 15m` absorbs, and the other three nodes stay flat 0. The unsubtracted expression
+  # read 1 continuously on kubernetes-5vv07x2 across that same window.
+  #
+  # THE `or (0 * ...)` is a zero-fill, not a fabricated zero: nodes with no RWO handoff
+  # have no series in the subtracted term, and without the fill the subtraction would drop
+  # every healthy node out of the result. It is on the SAFE side of CONVENTIONS.md 6.1 -
+  # paired with `>`, a zero can never cross the threshold.
   - name: "Node volume plane wedged"
     queries:
       - expression: |
           (
             sum by (node) (volume_manager_total_volumes{state="desired_state_of_world"})
             - sum by (node) (volume_manager_total_volumes{state="actual_state_of_world"})
+            - (
+                count by (node) (
+                  (
+                    max by (namespace, pod, persistentvolumeclaim) (kube_pod_spec_volumes_persistentvolumeclaims_info)
+                    * on (namespace, pod) group_left(node) (topk by (namespace, pod) (1, kube_pod_info{node!=""}))
+                    and on (namespace, pod) (max by (namespace, pod) (kube_pod_status_phase{phase="Pending"}) == 1)
+                  )
+                  and on (namespace, persistentvolumeclaim) (
+                    (
+                      count by (namespace, persistentvolumeclaim) (
+                        max by (namespace, persistentvolumeclaim, node) (
+                          max by (namespace, pod, persistentvolumeclaim) (kube_pod_spec_volumes_persistentvolumeclaims_info)
+                          * on (namespace, pod) group_left(node) (topk by (namespace, pod) (1, kube_pod_info{node!=""}))
+                        )
+                      ) > 1
+                    )
+                    and on (namespace, persistentvolumeclaim) (
+                      max by (namespace, persistentvolumeclaim) (kube_persistentvolumeclaim_access_mode{access_mode="ReadWriteOnce"}) == 1
+                    )
+                  )
+                )
+                or
+                (0 * sum by (node) (volume_manager_total_volumes{state="desired_state_of_world"}))
+              )
           )
-          and on (node) (kube_node_status_condition{condition="Ready",status="true"} == 1)
+          and on (node) (max by (node) (kube_node_status_condition{condition="Ready",status="true"}) == 1)
     math_operator: ">"
     threshold: 0
     for: 15m
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-node-volume-plane-wedged"
-      summary: "Node {{ index $labels \"node\" }} has {{ index $values \"C\" }} volume(s) the kubelet wants but cannot mount, sustained for 15m, while the node still reports Ready - CSI/volume plane wedged. Pods scheduled there will sit in CreateContainerError. Cordon and drain the node. A single volume appearing for one scrape is a mount in progress, not this condition; the 15m hold is what tells them apart."
+      summary: "Node {{ index $labels \"node\" }} has {{ index $values \"C\" }} volume(s) the kubelet has wanted but not mounted for 15m while reporting Ready, over and above any explained by a ReadWriteOnce handoff. DO NOT cordon or drain yet - that is only correct if the NODE is at fault, and this rule cannot prove it is. Diagnose first: 'kubectl get pods -A --field-selector spec.nodeName={{ index $labels \"node\" }} | grep -vE \"Running|Completed\"', then 'kubectl describe pod' each one. A CSI/mount error against this node (for example 'failed to stat ... permission denied' on a stale mount, tatara-helmfile#245) is the node fault that cordon and drain fixes. An 'attachdetach-controller Multi-Attach error ... already used by pod(s) X' means another pod legitimately holds a ReadWriteOnce volume, the node is healthy, and draining it is actively harmful - fix that workload instead. If the node is mounting its other volumes fine, it is not wedged. A single volume for one scrape is a mount in progress; the 15m hold tells them apart."
     labels:
       homelab: "true"
       system: "tatara"
       component: "node"
       severity: "critical"
+  # tatara-observability#90 class, and the (b) half of the split above. A RollingUpdate
+  # Deployment with maxUnavailable=0 / maxSurge=1 backed by a ReadWriteOnce PVC creates
+  # the surge pod BEFORE deleting the old one. If the scheduler puts it on a different
+  # node, the wait is circular and permanent: the new pod cannot become Ready without the
+  # volume, the volume cannot be released until the old pod is deleted, and the old pod is
+  # not deleted until the new pod is Ready. It never self-heals and it is invisible in
+  # every deployment-health signal except an unavailable replica.
+  #
+  # THE VALUE is the number of distinct nodes running pods that reference the PVC, so 2 is
+  # the ordinary deadlock and >2 means several attempts piled up. THREE clauses, each
+  # load-bearing:
+  #   1. `> 1` distinct nodes - one node is a same-node handoff, which RWO permits and
+  #      which completes normally.
+  #   2. RWO - an RWX volume mounts on many nodes by design and never deadlocks. Verified
+  #      necessary: storage-system/pvc-nfs-subdir-external-provisioner sits on 3 nodes
+  #      permanently and is not a fault.
+  #   3. at least one referencing pod Pending - a completed handoff transiently shows two
+  #      nodes while the old pod terminates. This clause is what removes the standing
+  #      false positives: without it the last 8h show 4 PVCs on >1 node, with it exactly
+  #      one, home-automation/piper, continuously for the whole window.
+  # `for: 15m` matches the sibling rule and clears the healthy case with room to spare -
+  # #90 measured the same daily piper handoff completing in ~4 and ~10 minutes on the
+  # preceding days without deadlocking.
+  #
+  # SEVERITY warning, not critical: the OLD pod keeps running and serving, so there is no
+  # outage. What is broken is that the workload can never roll again, which needs a human
+  # but not a page in the night.
+  - name: "PersistentVolumeClaim multi-attach deadlock"
+    queries:
+      - expression: |
+          (
+            count by (namespace, persistentvolumeclaim) (
+              max by (namespace, persistentvolumeclaim, node) (
+                max by (namespace, pod, persistentvolumeclaim) (kube_pod_spec_volumes_persistentvolumeclaims_info)
+                * on (namespace, pod) group_left(node) (topk by (namespace, pod) (1, kube_pod_info{node!=""}))
+              )
+            ) > 1
+          )
+          and on (namespace, persistentvolumeclaim) (
+            max by (namespace, persistentvolumeclaim) (kube_persistentvolumeclaim_access_mode{access_mode="ReadWriteOnce"}) == 1
+          )
+          and on (namespace, persistentvolumeclaim) (
+            count by (namespace, persistentvolumeclaim) (
+              max by (namespace, pod, persistentvolumeclaim) (kube_pod_spec_volumes_persistentvolumeclaims_info)
+              and on (namespace, pod) (max by (namespace, pod) (kube_pod_status_phase{phase="Pending"}) == 1)
+            ) > 0
+          )
+    math_operator: ">"
+    threshold: 1
+    for: 15m
+    decimal_points: 0
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-persistentvolumeclaim-multi-attach-deadlock"
+      summary: "ReadWriteOnce PVC {{ index $labels \"namespace\" }}/{{ index $labels \"persistentvolumeclaim\" }} is referenced from {{ index $values \"C\" }} nodes at once with a Pending pod among them, for 15m - a Multi-Attach deadlock. An RWO volume attaches to exactly one node, so the new pod cannot start until the old one is deleted, and a RollingUpdate with maxUnavailable=0 will not delete the old one until the new one is Ready. This never resolves itself. Confirm with 'kubectl -n {{ index $labels \"namespace\" }} describe pod <pending-pod> | grep -A2 Multi-Attach', unblock by deleting the pod that still holds the volume, then fix the workload permanently with strategy Recreate (correct for any single-replica RWO workload) or maxUnavailable=1/maxSurge=0. The node hosting the Pending pod is NOT at fault - do not cordon or drain it."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "node"
+      severity: "warning"

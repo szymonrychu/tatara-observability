@@ -953,3 +953,41 @@ PR/push triggers.
   root-cause rule below the symptom rule that names it as the first triage hop inverts
   the triage order. The remaining blast radius is also SILENT (degraded-quality output
   ships with no visible failure), which is the case for more urgency, not less.
+- 2026-07-29 (#90): split "Node volume plane wedged" into a node-fault half and a
+  workload half, because its FIRST firing, 17 minutes after PR #89 created it, was a true
+  condition with a false cause and a harmful remediation ("cordon and drain the node").
+  The desired-minus-actual gap on `kubernetes-5vv07x2` was real and 5h old; the node was
+  mounting 22 RBD + 5 CephFS volumes fine, and the single outstanding volume was a
+  ReadWriteOnce RBD PVC a Running pod on `kubernetes-47d28x2` legitimately held, blocked
+  by a `maxUnavailable: 0` RollingUpdate. Draining would have evicted ~22 healthy pods
+  off an innocent node and not resolved the deadlock.
+  Three discriminators were checked live and TWO WERE REJECTED, which is the part worth
+  remembering: (a) `kube_pod_status_reason` has NO `Multi-Attach` value in this cluster
+  (Evicted, NodeAffinity, NodeLost, PreemptionByScheduler, SchedulingGated, Shutdown,
+  TerminationByKubelet, UnexpectedAdmissionError only), so the obvious rule would have
+  been dark from birth; (b) "the PV is attached to two nodes" is NOT observable either -
+  the attachdetach controller refuses to create the second VolumeAttachment, so during
+  the LIVE deadlock `kube_volumeattachment_info` showed exactly one attachment for
+  `pvc-3f9dec97-...`, on the holder. Also rejected:
+  `storage_operation_duration_seconds{status=~"fail.*"}` as a node-fault signal -
+  `volume_fs_resize` failures are a standing baseline on 3 of 5 healthy nodes.
+  What works is the pod -> PVC -> node shape
+  (`kube_pod_spec_volumes_persistentvolumeclaims_info` joined to `kube_pod_info`, gated on
+  `access_mode="ReadWriteOnce"` and on one referencing pod being Pending). The Pending
+  clause is load-bearing: without it the last 8h show 4 PVCs on >1 node, with it exactly
+  one. The wedge rule now SUBTRACTS that term, so it reads 0 at every sample over the
+  whole 8h retention where it previously read 1 continuously, while worker-jtw3f33 keeps
+  its single-sample transient blips.
+- 2026-07-29 (#90, second finding): every `group_left(node) kube_pod_info` join in
+  `alerts/tatara-nodes.yaml` was unsafe. `(namespace, pod)` is NOT unique in
+  kube-state-metrics output: two replicas are scraped at once during a ks-m rollover, and
+  for ~5m after a pod moves node both the old and new series are live. Proven by the
+  query erroring twice over an 8h range - `arc-system/arc-runner-tatara-helmfile-...-
+  listener` (two `instance` values, same node) and `argo-workflows/eventbus-default-js-2`
+  (two nodes). `many-to-many matching not allowed` puts the rule in Error, and with
+  `default_exec_err_state` Error and no Error alerting the rule then reports NOTHING -
+  the repo's recurring silent-green class, arrived at from a new direction. Fix is
+  `topk by (namespace, pod) (1, kube_pod_info{node!=""})` on every right-hand side plus
+  `max by (...)` on every other ks-m series used in a join. The pod-network rule's
+  documented 0.09-0.28 baseline is unchanged by it (re-measured over 8h). This trap is
+  invisible in review: the unhardened expression looks correct and fails only under churn.

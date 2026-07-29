@@ -57,7 +57,22 @@ rules:
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-approval-refusals-elevated"
-      summary: "tatara-operator refused {{ index $values \"C\" }} approval attempt(s) in 15m (reason={{ index $labels \"reason\" }}). The approval gate matches the most recent MAINTAINER comment's text against Project.spec.scm.approvalPhrases, with the bot structurally excluded and the evidence single-use. A burst means either a maintainer is repeatedly phrasing approval in a way the wordlist does not match, or something is trying to force the gate."
+      summary: >-
+        tatara-operator refused {{ index $values "C" }} approval attempt(s) in 15m (reason={{
+        index $labels "reason" }}). The approval gate has no wordlist: the clarify agent judges
+        whether a maintainer comment approves and CITES it, and the operator re-verifies the
+        structural facts - the cited comment exists on the issue, its author is a verified
+        non-bot maintainer, the agent's verbatim quote occurs in the body, and it has not
+        approved once already (the citation need not be the newest maintainer comment; that
+        withdrawal veto lives with the agent, not the operator). reason groups into three:
+        no-citation and quote-not-in-comment mean the agent is mis-instructed (check the skills
+        pin); citation-not-maintainer and evidence-replayed mean something is trying to force
+        the gate; no-live-issue and no-maintainer-comment mean there is simply nothing to
+        approve yet, not an attack. no-live-issue is every owned Issue closed, done or rejected
+        - commonly a human closing it mid-flight as a deliberate veto, so do not blame the agent
+        citation for it. no-maintainer-comment just means nobody has commented yet: clarify
+        Tasks are outrunning their humans. A grant can also carry no citation at all when
+        autoApproveTataraProposals covers a bot-authored proposal no human ever commented on.
     labels:
       homelab: "true"
       system: "tatara"

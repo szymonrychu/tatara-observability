@@ -36,6 +36,8 @@ on:
       - "scripts/test_reconcile_metric_provenance.py"
       - "scripts/metrics_allowlist.txt"
       - "scripts/stage_values_allowlist.txt"
+      - "scripts/check_runbook_urls.py"
+      - "scripts/test_check_runbook_urls.py"
       - ".github/workflows/alert-rules-lint.yml"
   push:
     branches: [main]
@@ -53,6 +55,8 @@ on:
       - "scripts/test_reconcile_metric_provenance.py"
       - "scripts/metrics_allowlist.txt"
       - "scripts/stage_values_allowlist.txt"
+      - "scripts/check_runbook_urls.py"
+      - "scripts/test_check_runbook_urls.py"
       - ".github/workflows/alert-rules-lint.yml"
   schedule:
     # Nightly reverse-drift sweep: a metric removed from a producer repo never touches
@@ -106,3 +110,13 @@ jobs:
       # a hard failure here.
       - name: reconcile metric provenance against producer repos
         run: python3 scripts/reconcile_metric_provenance.py
+
+      # Issue #81: the incident skill's mandatory phase-2 "Runbook check" is a no-op unless
+      # rules carry a runbook_url, and a runbook_url is worthless unless the anchor it names
+      # actually exists on the docs page. This asserts both: every rule has the exact URL the
+      # anchor contract derives from its own name (CONVENTIONS.md section 8), and - by
+      # shallow-cloning tatara-documentation, same pattern as the step above - that
+      # docs/operations/runbooks.md declares every one of those anchors. Clone failure is a
+      # neutral skip inside the script; the local half still fails hard.
+      - name: check runbook_url annotations resolve to real docs anchors
+        run: python3 scripts/check_runbook_urls.py

@@ -799,3 +799,37 @@ PR/push triggers.
   knob one layer down (the query-level `query_type` default is what actually applies). Both
   are terraform-side, so out of the agent-editable surface and out of this change's
   authorisation.
+- 2026-07-29 (issue #81, with tatara-documentation#24): all 113 alert rules now carry a
+  `runbook_url` annotation, and the link target is a CONTRACT, not free text: exactly
+  `https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-<slug>`
+  where `<slug>` is the rule's own `name` lowercased with every run of non-`[a-z0-9]`
+  collapsed to `-`. Deriving the anchor from the RULE NAME rather than from a docs heading
+  is the whole decision: a docs heading can be reworded or two sections merged without
+  breaking a single link, and neither repo keeps a mapping table that could drift. Cost,
+  stated plainly: renaming a rule renames its anchor, so a rename is now a two-repo change
+  (`scripts/check_runbook_urls.py` fails on the dangling anchor until the docs side lands).
+  That is the intended trade - a rename is rare, a heading reword is not.
+- 2026-07-29: `runbook_url` needed NO terraform change. `modules/grafana_alert/variables.tf`
+  types `annotations` as `map(string)`, so its KEYS are data, not schema, and
+  `check_alert_schema.py` deliberately does not check them (see its docstring). Verified:
+  113 insertions in `alerts/*.yaml`, zero `.tf` lines touched, `check_alert_schema.py` green.
+  Grafana renders `runbook_url` as a first-class button in the alert view.
+- 2026-07-29: rejected the weaker "runbook_url must start with the docs site_url" check.
+  The pre-mortem failure mode for any hard gate here is an author satisfying it by pointing
+  forty rules at the bare `runbooks/` page - coverage reads 100%, the incident agent follows
+  the link, finds nothing, and the lint now CERTIFIES the gap as closed. Requiring the exact
+  derived URL makes that impossible to express, which is why `check_runbook_urls.py` compares
+  for equality rather than by prefix.
+- 2026-07-29: the two halves of the guard live in DIFFERENT repos on purpose.
+  "An alert has no anchor" needs the alert list, so it is checked here
+  (`scripts/check_runbook_urls.py`, which also shallow-clones tatara-documentation and asserts
+  each anchor exists - same clone-and-neutral-skip pattern as `reconcile_metric_provenance.py`).
+  "An anchor was silently removed or renamed" needs the docs history, so it is checked there
+  (`scripts/check_runbook_anchors.py`, append-only against `main`). Putting both here would
+  report a docs-caused break against an unrelated alerts PR, blaming an innocent author -
+  the exact pre-mortem the issue called out.
+- 2026-07-29 gotcha for whoever pairs these repos again: a new rule's CI here goes RED until
+  its docs anchor lands, because the anchor check runs against tatara-documentation `main`.
+  That ordering is the point, not a bug. `TATARA_DOCS_REF=<docs-branch> python3
+  scripts/check_runbook_urls.py` validates the pair before either merges; CI always uses
+  `main` so it can only pass against what is actually published.

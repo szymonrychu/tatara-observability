@@ -328,3 +328,65 @@ pip install pyyaml
 python3 scripts/check_alert_schema.py                   # alerts/*.yaml keys vs the module type
 python3 -m unittest discover scripts -p 'test_*.py'     # all checker self-tests
 ```
+
+## 8. Every rule links to a runbook, at an anchor that provably exists
+
+`tatara-agent-skills`' incident skill makes "follow the alert's runbook URL"
+phase 2 of every incident turn on this platform. Until issue #81 that phase was
+a guaranteed no-op: not one of the rules carried a `runbook_url`, so every
+incident agent re-derived from scratch a fix that
+`tatara-documentation/docs/operations/runbooks.md` had already published.
+tatara-helmfile #245, #263 and #237 each cost a page, an incident pod and a
+multi-thousand-word issue to rediscover one paragraph that page already
+contained.
+
+**Every rule carries a `runbook_url` annotation, and it is not free-form.** It
+must be exactly:
+
+```
+https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-<slug>
+```
+
+where `<slug>` is the rule's own `name`, lowercased, with every run of
+characters outside `[a-z0-9]` collapsed to a single `-` and leading/trailing
+`-` stripped. `"Wrapper commit/push failure ratio high"` becomes
+`wrapper-commit-push-failure-ratio-high`.
+
+Deriving the anchor from the rule name, rather than from a heading on the docs
+page, is the point of the contract:
+
+- A docs heading can be reworded, or its section merged into another, without
+  breaking a single alert link. Only the anchor is load-bearing, and the anchor
+  is not the heading.
+- Neither repo keeps a mapping table, so there is nothing to drift.
+- **Renaming a rule renames its anchor.** That is a deliberate, breaking change:
+  add the new anchor to `docs/operations/runbooks.md` in the same change, or CI
+  fails on a dangling link. Do not "fix" it by hand-editing the URL - an anchor
+  that does not match its rule name is exactly the silent rot this contract
+  exists to stop.
+
+The exact-match requirement is not pedantry. The obvious way to satisfy a
+weaker "is it a docs URL" check is to point forty rules at the bare `runbooks/`
+page: coverage reads 100%, the incident agent follows the link, finds nothing,
+and the lint now certifies the gap as closed. An exact derived match makes that
+impossible to express.
+
+`scripts/check_runbook_urls.py` enforces it, and additionally shallow-clones
+tatara-documentation and asserts every anchor is declared in
+`docs/operations/runbooks.md` - the same cross-repo clone pattern as
+`reconcile_metric_provenance.py`, and a neutral skip on clone failure for the
+same reason. An anchor may be backed by a written runbook (`status: covered`)
+or by an honest "no runbook yet" placeholder (`status: none`); both resolve, and
+the covered/total split is printed into the job summary on every run so runbook
+coverage is a number rather than a guess.
+
+The reverse direction - "an anchor was silently removed or renamed on the docs
+page" - is guarded in tatara-documentation by
+`scripts/check_runbook_anchors.py`, not here, so the break is reported in the
+PR that causes it rather than against an unrelated alerts PR.
+
+Run it locally:
+
+```sh
+python3 scripts/check_runbook_urls.py     # needs network for the anchor half
+```

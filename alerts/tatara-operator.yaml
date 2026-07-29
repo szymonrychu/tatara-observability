@@ -974,7 +974,7 @@ rules:
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-task-park-spike"
-      summary: "{{ index $values \"C\" }} Task(s) parked with stageReason={{ index $labels \"stageReason\" }} in 3h (>3). Successor to the lifecycle give-up alert. backlog-sweep is excluded (it is the zero-cost mint path that OWNS a backlog issue and spawns no pod) and awaiting-human is excluded (a human not having replied yet is not a platform failure). Everything else here is the platform failing to deliver."
+      summary: "{{ index $values \"C\" }} park event(s) (transitions, not distinct Tasks - a park/un-park flap inflates this) with stageReason={{ index $labels \"stageReason\" }} in 3h (>3). Successor to the lifecycle give-up alert. backlog-sweep is excluded (it is the zero-cost mint path that OWNS a backlog issue and spawns no pod) and awaiting-human is excluded (a human not having replied yet is not a platform failure). Everything else here is the platform failing to deliver."
     labels:
       homelab: "true"
       system: "tatara"

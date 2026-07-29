@@ -28,7 +28,7 @@ rules:
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-delivery-parked-on-a-merge-or-deploy-timeout"
-      summary: "{{ index $values \"C\" }} Task(s) parked with stageReason={{ index $labels \"stageReason\" }} in 30m. A merge or deploy stage blew its budget (merging 4h, deploying 2h) and the Task was parked. Merged component code is NOT reaching the cluster. Un-parking re-enters merging/deploying cursor-resumed (contract F.6), it never re-enters implementing - so check the owned MergeRequest CRs and the tatara-helmfile apply run, not the agent."
+      summary: "{{ index $values \"C\" }} park event(s) (park/un-park transitions, not distinct Tasks) with stageReason={{ index $labels \"stageReason\" }} in 30m - a park/un-park flap on one Task counts several times here, so this is an upper bound on Tasks affected, not a Task count. A merge or deploy stage blew its budget (merging 4h, deploying 2h; each re-park gets a fresh 30m re-entry window, up to 3 per timeout cycle) and the Task was parked. Merged component code is NOT reaching the cluster. Un-parking re-enters merging/deploying cursor-resumed (contract F.6), it never re-enters implementing - so check the owned MergeRequest CRs and the tatara-helmfile apply run, not the agent."
     labels:
       homelab: "true"
       system: "tatara"

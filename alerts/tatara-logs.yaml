@@ -3,7 +3,10 @@ interval_seconds: 60
 default_no_data_state: "Alerting"
 default_exec_err_state: "Alerting"
 tatara_exec_err_justification: >-
-  Loki-log-based rules only. For a Loki QUERY, NoData and ExecErr both also fire when the
+  Loki-log-based rules only - with one deliberate exception, "Log collector node coverage
+  incomplete", which reads Prometheus and therefore sets no_data_state/exec_err_state
+  explicitly on itself to opt OUT of these defaults (a Loki blind spot cannot be detected
+  by a Loki query; see that rule's own comment). For a Loki QUERY, NoData and ExecErr both also fire when the
   Loki BACKEND is degraded or unreachable (a Postgres connection-pool exhaustion event,
   "too many clients"), so reporting OK then is blindness dressed up as health
   (tatara-operator#381 gap 2). Every count_over_time(...) expression below carries an
@@ -130,4 +133,62 @@ rules:
       homelab: "true"
       system: "tatara"
       component: "operator"
+      severity: "warning"
+  # THE META-RULE FOR THIS FILE (tatara-observability#79). Every other rule above reads
+  # Loki, and a Loki rule can only see a pod whose node runs a log collector. On
+  # 2026-07-29 the promtail DaemonSet had desired_number_scheduled=3 against 5 Ready
+  # nodes (node-exporter and smartctl-exporter both show 5 on the same cluster, so this
+  # is promtail's own nodeSelector/tolerations, not a scheduling outage), and
+  # list_loki_label_values(node_name) over 7d returned exactly
+  # ["kubernetes-47d28x2","kubernetes-5vv07x2","kubernetes-jhv07x2"] - nas-d0w363i and
+  # worker-jtw3f33 have never shipped a line. A tatara pod landing on either node is
+  # invisible to every rule above, and the failure is SELF-CONCEALING: the rules report
+  # a clean zero, which is indistinguishable from health. That is exactly how #79's
+  # agent report was lost. The fix itself is infra (the collector DaemonSet is not in
+  # any tatara-* repo); what belongs HERE is making the blind spot visible.
+  #
+  # PROMETHEUS, not Loki - deliberately. A Loki query cannot detect its own blind spot:
+  # a node that ships nothing has no stream to select. kube-state-metrics is the only
+  # surface that knows about nodes the collector never reached.
+  #
+  # Expression = "Ready nodes with no ready log-collector pod". A single subtraction
+  # catches BOTH failure modes: the DaemonSet never being scheduled onto a node
+  # (desired < nodes, today's case) and being scheduled but unhealthy (ready < desired).
+  # The daemonset=~ alternation is deliberate: swapping promtail for alloy/vector must
+  # not silently turn this rule into a permanent NoData.
+  #
+  # On the `or vector(0)`: it fires the WORST case rather than hiding it - if the
+  # collector DaemonSet disappears entirely the right answer is "all N nodes are blind",
+  # not NoData. It cannot fabricate a false page from a kube-state-metrics outage: that
+  # empties the LHS too, and a binary op with an empty left operand yields an empty
+  # result (NoData), never a number. Not a check-1 violation either - that check is
+  # about `or vector(0)` under a `<` threshold; this is `>`.
+  #
+  # exec_err_state/no_data_state are set explicitly to override this file's Loki-shaped
+  # Alerting defaults (see the top-level justification key): this rule reads Prometheus,
+  # so a query error is a Prometheus/Grafana problem, not evidence of a coverage gap.
+  #
+  # for: 30m rides out a DaemonSet rolling update and a node reboot; the real condition
+  # has persisted for 7+ days, so a slow rule loses nothing.
+  #
+  # Verified live 2026-07-29 (grafana MCP, uid=prometheus): this exact expression
+  # evaluates to 2, matching the two known-blind nodes.
+  - name: "Log collector node coverage incomplete"
+    queries:
+      - expression: |
+          count(kube_node_status_condition{condition="Ready",status="true"} == 1)
+          - (sum(kube_daemonset_status_number_ready{namespace="monitoring",daemonset=~"promtail|alloy|grafana-agent|vector|fluent-bit"}) or vector(0))
+    math_operator: ">"
+    threshold: 0
+    for: 30m
+    decimal_points: 0
+    no_data_state: "NoData"
+    exec_err_state: "Error"
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-log-collector-node-coverage-incomplete"
+      summary: "{{ index $values \"C\" }} Ready node(s) have no ready log-collector pod, so every pod scheduled there ships NO logs to Loki. Every Loki-based rule in alerts/tatara-logs.yaml is blind on those nodes and reports a clean zero regardless - an empty Loki result for a pod there PROVES NOTHING. Find them: compare `count by (node) (kube_node_info)` against `count by (node) (kube_pod_info{namespace=\"monitoring\", created_by_name=\"promtail\"})`, then check the collector DaemonSet's nodeSelector/tolerations against those nodes' taints. This is an infra fix (the collector is not deployed by any tatara-* repo); until it lands, treat namespace-wide Loki queries as covering only part of the fleet."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "observability"
       severity: "warning"

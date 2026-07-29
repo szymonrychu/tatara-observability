@@ -833,3 +833,123 @@ PR/push triggers.
   That ordering is the point, not a bug. `TATARA_DOCS_REF=<docs-branch> python3
   scripts/check_runbook_urls.py` validates the pair before either merges; CI always uses
   `main` so it can only pass against what is actually published.
+- 2026-07-29 (tatara-observability#79, half 2 of 2, and the correction to half 1's
+  closing sentence): half 1 (2026-07-26, above) is CONFIRMED SHIPPED AND APPLIED - the
+  deployed rule (uid `aft7tvrphodmoa`, re-keyed from the `cfrz32fd0veo0a` the issue cites)
+  carries the CRI-stripping annotation live, read back via
+  `GET /api/v1/provisioning/alert-rules`. Re-proved the A/B against live Loki
+  (uid `efihqbqlmroqod`, now-3d): the naive `{namespace="tatara", app="tatara-operator"}
+  | json | action="agent_internal_issue"` returns 0 entries over 452,170 scanned lines,
+  while the same query with the `pattern`/`line_format` prelude returns every report with
+  `description`/`turn_id`/`offending_tool` parsed. Nothing further to fix on (b).
+  TWO CORRECTIONS TO THE ISSUE'S OWN TEXT, both from live data. (1) The collector is
+  PROMTAIL, not Alloy: `kube_pod_info{namespace="monitoring"}` shows three pods with
+  `created_by_name="promtail"`. Anyone grepping the infra repo for "alloy" per the issue
+  body will find nothing. (2) It is not a scheduling failure but a scheduling EXCLUSION:
+  `kube_daemonset_status_desired_number_scheduled{daemonset="promtail"}` = 3 against 5
+  Ready nodes, while `prometheus-prometheus-node-exporter` and `smartctl-exporter-*` both
+  show 5 on the same cluster. desired=3 means the scheduler was never asked, so
+  desired-vs-ready (the obvious rule shape) would have read PERFECTLY GREEN throughout -
+  which is why the new rule counts nodes, not DaemonSet replicas.
+- 2026-07-29: the coverage gap is UNCHANGED since the 2026-07-23 observation -
+  `list_loki_label_values(node_name)` over 7d still returns exactly
+  `["kubernetes-47d28x2","kubernetes-5vv07x2","kubernetes-jhv07x2"]`; `nas-d0w363i` and
+  `worker-jtw3f33` have never shipped a line. New rule "Log collector node coverage
+  incomplete" in `alerts/tatara-logs.yaml` makes it visible:
+  `count(kube_node_status_condition{condition="Ready",status="true"} == 1) -
+  (sum(kube_daemonset_status_number_ready{namespace="monitoring",daemonset=~"promtail|alloy|grafana-agent|vector|fluent-bit"})
+  or vector(0))` > 0 for 30m, evaluating to 2 live. Four decisions worth keeping:
+  (1) it must be a PROMETHEUS rule - a Loki query cannot detect its own blind spot,
+  because a node that ships nothing has no stream to select; (2) it therefore sets
+  `no_data_state`/`exec_err_state` explicitly to opt out of this file's Loki-shaped
+  Alerting defaults, and the top-level `tatara_exec_err_justification` key was amended so
+  its "Loki-log-based rules only" claim stays true; (3) the `daemonset=~` alternation
+  keeps a promtail->alloy swap from silently converting the rule into permanent NoData;
+  (4) the `or vector(0)` is NOT the #67 fabricated-zero anti-pattern - that one is
+  `or vector(0)` under a `<` threshold, this is `>`, and a kube-state-metrics outage
+  empties the LHS too, so the binary op yields an empty result (NoData) rather than a
+  number. It fabricates only when KSM is up and the DaemonSet is gone, where "all N nodes
+  are blind" is the correct page.
+- 2026-07-29 (routed from tatara-memory#84): "Memory service operation error ratio high"
+  now carries `class!="maintenance"` on BOTH sides of the ratio. tatara-memory#84 added a
+  `class` label (`maintenance`/`user`) to `tatara_memory_op_total` so internal purge ops
+  can be separated from agent-facing ones, and this rule's own summary says its premise is
+  "agents failing to read/write memory". Live evidence it mattered: `delete_by_source` and
+  `delete_by_sources` carried 65 errors each against 60/21 successes, and the unfiltered
+  ratio spiked to 0.15 - 50% over the 0.1 threshold - within the preceding 24h, entirely on
+  those two maintenance ops. The producer change is NOT deployed yet and this is
+  deliberately safe anyway: a negative matcher also matches series where the label is
+  absent (absent == ""), so filtered and unfiltered return an identical value today (both
+  0, verified live) and the exclusion starts applying the moment the label ships. No second
+  edit needed, and no window where the rule selects nothing.
+- 2026-07-29 (this branch, `fix/observability-followups`): integration commit for the
+  overnight sweep. It is stacked on #86 (`feat/alert-runbook-urls`) and MERGES #85
+  (`fix/agent-report-rule-actionable`) into it, because the two break each other on main:
+  #85 adds a rule ("Log collector node coverage incomplete") written before #86's
+  `check_runbook_urls.py` existed, so it has no `runbook_url` and no docs anchor, and
+  merging both in EITHER order leaves this repo's CI red. Four files conflicted.
+  Resolutions: `alerts/tatara-memory.yaml` - keep #86's `runbook_url` AND #85's reworded
+  summary (the two sides edited adjacent lines of one annotations block, nothing to
+  choose between); `MEMORY.md` / `ROADMAP.md` - both sides are pure appends, keep both;
+  `alerts/tatara-logs.yaml` - auto-merged, then given the missing `runbook_url`.
+- 2026-07-29: `tatara-memory#84` is an ISSUE, not a PR. The producer change that adds
+  `class="maintenance"/"user"` to `tatara_memory_op_total` (widening it from {op,result}
+  to {op,class,result}) is tatara-memory PR **#92**, still OPEN. The comment in
+  `alerts/tatara-memory.yaml` and the MEMORY entry above it both cited #84 as if it were
+  the PR; corrected in place. The rule itself is unaffected - the forward-compatibility
+  argument (a negative matcher also matches an absent label) is what makes shipping ahead
+  of the producer safe, and that is unchanged.
+- 2026-07-29 THE ONE THAT MATTERS FOR ANYONE ROUTING METRICS INTO THIS REPO:
+  `scripts/reconcile_metric_provenance.py` HARD-FAILS on an allowlist entry that no
+  producer repo's **main** emits, and it runs on every PR and every push, not just the
+  nightly cron. So a metric that exists only on an OPEN producer PR CANNOT be added to
+  `scripts/metrics_allowlist.txt` yet - doing so turns this repo's CI red on every
+  subsequent PR until that producer PR merges. Proven empirically before deciding, not
+  assumed: adding `operator_sweep_skipped_total` to the operator section produced
+  "FAIL: 1 allowlist entr(y/ies) are stale - no producer repo still emits them", and
+  removing it restored green. The reverse direction (a repo emits a name nobody
+  allowlisted) is informational only and never fails, which is why the asymmetry is easy
+  to get backwards. Consequence: the sweep's 6 producer PRs are recorded in ROADMAP.md
+  with exact verified names and labels, and the allowlist lines land when they merge.
+- 2026-07-29: three routed alert-rule RCAs from the sweep did NOT survive verification.
+  (1) "Memory stack stuck not ready" (uid `bfr6yx0ntbw1sd`) - the RCA said its summary
+  still claims a not-Ready stack halts the whole project including the incident agent.
+  It does not: #82 rewrote that summary on 2026-07-26 and it now reads "Agents are NOT
+  blocked by this any more (operator #470)". Confirmed against the LIVE rule via grafana
+  MCP, not just the file. The RCA was written against a pre-#82 snapshot.
+  (2) Routed uid `ffrz32fcqvta8d` is "Operator unexpected merge detected"
+  (`operator_unexpected_merge_total`), NOT the `operator_gc_blocked_total` rule the RCA
+  describes. The real "Operator GC blocked" uid is `bfrz32fj74dfkb`. Verify a routed uid
+  against Grafana before editing the rule it names.
+  (3) The same item's "stop summing across replicas - the summing is itself a defect" is
+  right about the NEW gauge and wrong about the CURRENT rule. `operator_gc_blocked_total`
+  is a per-replica COUNTER; `sum by (reason) (increase(...))` over 3 replicas is the
+  correct total. `operator_fold_in_flight_blocked_tasks` (PR #490, open) is a GAUGE with a
+  `project` label - summing THAT across replicas would triple-count, so it needs
+  `max by (project)`. Both facts, not one.
+- 2026-07-29: REFUSED to re-key "Tatara operator error recurring" (uid `afq61w8fewikgf`)
+  off Loki ERROR-line counts onto `operator_sweep_skipped_total` /
+  `operator_sweep_errors_total`, on four independent grounds, three of them live-verified.
+  (a) The Loki rule is NOT sweep-scoped: at the moment of checking it was firing on
+  msg="sweep: reconcile_ownership" and had also fired on msg="review: the forge REFUSED
+  the review post; parking", which no sweep metric can express. (b)
+  `operator_sweep_errors_total` ALREADY has its own per-(project,activity,reason) rule in
+  `alerts/tatara-operator.yaml`; re-keying would duplicate it and delete the residual
+  coverage. (c) `operator_sweep_skipped_total` counts SKIPS, not errors - its only reason
+  value today is `mr_claimed_by_other_task`, ordinary coordination, so it is not an error
+  signal at all. (d) Decisive: `increase(operator_sweep_errors_total{reason=
+  "reconcile_ownership"}[2h])` returns NO SERIES ABOVE ZERO while the Loki rule counted 3
+  ERROR lines for that exact msg in 1h - the Prometheus counter does not capture those
+  errors, so the swap would have deleted a signal that was firing at that instant. That
+  gap is a producer-side instrumentation bug (an error logged but not counted) and is
+  recorded in ROADMAP.md for tatara-operator. Also: `alerts/tatara-logs.yaml` sets
+  `default_no_data_state: "Alerting"`, so pointing any rule in that file at a metric the
+  deployed operator (v1.35.1) does not emit would page continuously, not go quiet.
+- 2026-07-29: kept `severity: critical` on "Memory stack stuck not ready" after
+  re-examining it, rather than downgrading now that #470 removed the project-halting
+  blast radius. Reason: "Operator status writes blocked by an unspillable eviction batch"
+  (uid `bfrz32fcydibkc`) is itself critical and its summary explicitly says "check
+  'Memory stack stuck not ready' for the owning project first". Downgrading the
+  root-cause rule below the symptom rule that names it as the first triage hop inverts
+  the triage order. The remaining blast radius is also SILENT (degraded-quality output
+  ships with no visible failure), which is the case for more urgency, not less.

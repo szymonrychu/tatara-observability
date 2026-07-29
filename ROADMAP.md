@@ -129,3 +129,78 @@ Planned work not yet started. Move items out when shipped (note in MEMORY.md if 
   already one of two documented bullets on the runbook page. A fourth from-scratch RCA means the
   incident agent is reading the link and ignoring it, which is a `tatara-agent-skills` problem,
   not an alerting one. Check this before adding any further runbook prose.
+- `external`, BLOCKS THIS REPO BUT CANNOT BE FIXED HERE (tatara-observability#79 root cause (a)):
+  the promtail DaemonSet in namespace `monitoring` runs on 3 of the cluster's 5 Ready nodes -
+  `kube_daemonset_status_desired_number_scheduled{daemonset="promtail"}` is 3, while
+  `prometheus-prometheus-node-exporter` and `smartctl-exporter-*` are both 5 on the same cluster,
+  so this is promtail's OWN nodeSelector/tolerations excluding `nas-d0w363i` and `worker-jtw3f33`,
+  not a scheduling outage. `list_loki_label_values(node_name)` over 7d confirms neither node has
+  ever shipped a line. Consequence for every Loki rule in `alerts/tatara-logs.yaml`: an empty
+  result for a pod on those two nodes means "not collected", never "no output". The collector is
+  not deployed by any tatara-* repo (`tatara-helmfile` ships only the `tatara`-namespace app
+  releases), so the fix belongs to the monitoring-stack owner: give the promtail DaemonSet the
+  tolerations matching those two nodes' taints (node-exporter's toleration set is the working
+  reference on this same cluster) and/or drop its restricting nodeSelector, then re-check that
+  `list_loki_label_values(node_name)` returns 5 values. This repo's half is shipped: the "Log
+  collector node coverage incomplete" rule now fires (currently = 2) so the blind spot is visible
+  instead of silent. Retire this line when that expression reads 0.
+- `shipped` (2026-07-29, this branch + tatara-documentation `fix/observability-followups`):
+  integration of #86 and #85 plus `alerts/tatara-nodes.yaml`, a new rule group carrying
+  "Node pod network partitioned" and "Node volume plane wedged", both routed from
+  tatara-helmfile#294 (closing its #239 and #245) and both re-verified against live
+  Prometheus before landing: the partition ratio's healthy baseline is 0.09-0.28 across
+  all 5 nodes so `> 0.8` has real headroom, and the volume gap is 0 on every node at every
+  15m sample over 24h except a single instantaneous 1 on `worker-jtw3f33` (a mount in
+  progress, which is exactly what `for: 15m` absorbs). New file, no terraform change:
+  `grafana.tf` discovers rule groups with `fileset(path.module, "alerts/*.yaml")`.
+- `blocked on producer PRs, DO NOT ALLOWLIST YET`: six open PRs across the sweep introduce
+  metrics this repo will want. `scripts/reconcile_metric_provenance.py` hard-fails on an
+  allowlist entry no producer **main** emits and runs on every PR and push (proven
+  empirically 2026-07-29, see MEMORY.md), so each name below lands in
+  `scripts/metrics_allowlist.txt` only once its PR merges. All were verified in producer
+  Go source at the PR head - name, type and labels - so each is a one-line addition then,
+  not a re-investigation. NONE is emitted by the deployed operator (v1.35.1) today, so no
+  rule may key on any of them yet either: `alerts/tatara-operator.yaml` sets
+  `default_no_data_state: "OK"`, which would make such a rule silently green - the exact
+  failure class `check_metric_provenance.py` exists to prevent.
+  - tatara-operator#485: `operator_stage_race_lost_total{from,to}` (counter,
+    `internal/obs/stage_metrics.go`).
+  - tatara-operator#487: `operator_memory_apply_transient_errors_total{project}` (counter,
+    `internal/obs/operator_metrics.go`). The only signal for the newly-absorbed
+    transient-webhook window.
+  - tatara-operator#489: `operator_sweep_skipped_total{project,activity,reason}` (counter,
+    `internal/obs/sweep_metrics.go`; only reason value today is
+    `mr_claimed_by_other_task`). NOT an error signal - see MEMORY.md.
+  - tatara-operator#490: `operator_fold_in_flight_blocked_tasks{project}` (GAUGE, one
+    label, `internal/obs/reaper_metrics_v2.go`). Aggregate with `max by (project)`, never
+    `sum` - it is per-replica and summing would triple-count on 3 replicas.
+  - tatara-claude-code-wrapper#141: `ccw_bootstrap_reconcile_total{result}` (result values
+    `up_to_date|merged|conflict|fetch_fail|base_unresolved`) and
+    `ccw_commit_oversized_blob_skipped_total`, which is a plain Counter with NO labels -
+    any selector with a label matcher on it matches nothing.
+  - tatara-memory#97: `http_admission_in_flight{class}`, `http_admission_waiting{class}`,
+    `http_admission_total{class,result}`, `http_admission_wait_seconds{class,result}`
+    (`internal/httpapi/admission.go`; class `memories_bulk|code_graph_bulk`, result
+    `admitted|shed|canceled`).
+  - tatara-memory#94: no new hand-declared family. It registers
+    `collectors.NewDBStatsCollector(db, "tatara_memory")`, which exposes nine `go_sql_*`
+    names each carrying only `db_name`, and adds the label VALUE
+    `code_graph_analytics_runs_total{result="timeout"}` to an existing family.
+  - tatara-memory#92: no new family either - it widens `tatara_memory_op_total` from
+    {op,result} to {op,class,result}. Already relied on by "Memory service operation error
+    ratio high" and safe ahead of the merge (negative matcher on an absent label).
+  - tatara-memory-repo-ingester#32: `code_graph_batches_total{result}`,
+    `code_graph_batch_rows` (histogram, no labels), `push_retries_total{path,reason}`,
+    `push_shed_responses_total{path,status}` (`internal/obs/obs.go`). CARDINALITY HAZARD
+    to settle before alerting on the last two: `path` is the raw request path and
+    `internal/push/push.go` passes `"/ingest-jobs/"+job.ID`, so a retry or shed on job
+    polling emits an unbounded per-job-ID label value. Raise it on that PR.
+- `routed to tatara-operator, producer-side instrumentation gap` (2026-07-29): the
+  operator logs ERROR lines the sweep counter does not count.
+  `increase(operator_sweep_errors_total{reason="reconcile_ownership"}[2h])` returned no
+  series above zero at the same moment the Loki rule "Tatara operator error recurring" was
+  firing on 3 ERROR lines with msg="sweep: reconcile_ownership" in 1h. Until that is
+  closed, the Loki rule is the ONLY signal for those failures, which is why this branch
+  refused to re-key it onto Prometheus sweep metrics (MEMORY.md 2026-07-29). Re-check
+  after the fix; the Loki rule can be narrowed only once the counter demonstrably covers
+  what the log lines report.

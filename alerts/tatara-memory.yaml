@@ -97,19 +97,37 @@ rules:
       system: "tatara"
       component: "memory"
       severity: "warning"
+  # class!="maintenance" on BOTH sides. Provenance corrected 2026-07-29: tatara-memory#84
+  # is the ISSUE; the producer change is tatara-memory PR #92 ("fix(observability): log
+  # purge-path errors, split maintenance metric class"), which widens
+  # tatara_memory_op_total from {op,result} to {op,class,result} with class="maintenance"
+  # for delete_by_source/delete_by_sources and class="user" for everything else. That PR
+  # is still OPEN, so the label is not live yet - see the forward-compatibility note
+  # below, which is what makes shipping ahead of it safe. This rule's premise, stated in its own
+  # summary, is "agents failing to read/write memory"; a purge sweep erroring is neither
+  # agent-facing nor a reason to page. Live evidence for why it mattered (2026-07-29,
+  # grafana MCP): delete_by_source and delete_by_sources carried 65 errors each against
+  # 60/21 successes, and the unfiltered ratio spiked to 0.15 - 50% over the 0.1 threshold
+  # - inside the last 24h, entirely on those two maintenance ops.
+  #
+  # A negative matcher on an ABSENT label also matches (absent == ""), so this is
+  # forward-compatible: the producer change is not deployed yet, and today the filtered
+  # and unfiltered expressions return an identical value (both 0, verified live). It
+  # starts excluding maintenance the moment the label ships - no second edit, and no
+  # window where the rule selects nothing.
   - name: "Memory service operation error ratio high"
     queries:
       - expression: |
-          sum(rate(tatara_memory_op_total{namespace="tatara",result="error",op!~"get|get_entity"}[10m]))
+          sum(rate(tatara_memory_op_total{namespace="tatara",result="error",op!~"get|get_entity",class!="maintenance"}[10m]))
           /
-          clamp_min(sum(rate(tatara_memory_op_total{namespace="tatara",op!~"get|get_entity"}[10m])), 0.001)
+          clamp_min(sum(rate(tatara_memory_op_total{namespace="tatara",op!~"get|get_entity",class!="maintenance"}[10m])), 0.001)
     math_operator: ">"
     threshold: 0.1
     for: 15m
     decimal_points: 2
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-service-operation-error-ratio-high"
-      summary: "tatara-memory service op error ratio {{ index $values \"C\" }} (>10% of memory service ops - writes + non-lookup reads - erroring over 10m; get/get_entity not-found excluded). Agents failing to read/write memory."
+      summary: "tatara-memory service op error ratio {{ index $values \"C\" }} (>10% of memory service ops - writes + non-lookup reads - erroring over 10m; get/get_entity not-found and class=maintenance purge ops excluded). Agents failing to read/write memory."
     labels:
       homelab: "true"
       system: "tatara"

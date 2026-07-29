@@ -1,0 +1,102 @@
+---
+# Per-node infrastructure faults that took the tatara platform down and that NO tatara-*
+# rule could see, because every other file in this directory is scoped to a tatara
+# workload (namespace="tatara", job="tatara-operator", app="tatara-memory", ...). Both
+# rules here are node-scoped and read kubelet / kube-state-metrics.
+#
+# PROVENANCE. Routed from tatara-helmfile#294, which closed tatara-helmfile#239 (a ~9h
+# pod-overlay partition on worker-jtw3f33) and #245 (a CSI mount wedge on the same node)
+# as "no action in that repo - the detection gap belongs to tatara-observability". The two
+# expressions below are lifted verbatim from that PR body, which validated them against
+# live Prometheus, and RE-verified here (grafana MCP, uid=prometheus, 2026-07-29) before
+# landing - see each rule's own comment for the numbers.
+#
+# WHY A NEW FILE. One file = one Grafana rule group (grafana.tf derives rulegroup_name
+# from the filename via a fileset() glob, so a new file needs NO terraform change). These
+# are component="node", not component="operator"/"memory", and folding them into
+# tatara-operator.yaml would mis-file them under a component whose file-level defaults are
+# tuned for operator workload series.
+#
+# default_no_data_state: "OK" matches every other Prometheus-backed file here. It is the
+# right choice for BOTH rules: each expression is guarded by an `and on (node)` Ready
+# filter that legitimately empties the result when no node qualifies (all nodes NotReady
+# is its own, louder problem, and kubelet-down is covered by the homelab node alerts in
+# infra/terraform/grafana). Neither rule carries an `or vector(0)`, deliberately: a
+# fabricated 0 on a kube-state-metrics scrape gap is the tatara-observability#33 false
+# CRITICAL, and neither of these conditions is "the series vanished".
+interval_seconds: 60
+default_no_data_state: "OK"
+rules:
+  # tatara-helmfile#239 class: the node keeps reporting Ready and the kubelet keeps being
+  # scraped (it is host-network), while every POD-network scrape target on it goes dark.
+  # That asymmetry is the whole signal - a node that is genuinely gone fails the Ready
+  # guard and is covered elsewhere; a node whose overlay is partitioned looks healthy from
+  # every angle except this ratio. #239 ran for ~9h with the only page being "Operator
+  # replica missing".
+  #
+  # THREE GUARDS, each load-bearing:
+  #   1. `and on (node) (kube_node_status_condition{condition="Ready",status="true"} == 1)`
+  #      - a NotReady node is a different (already-covered) failure and must not double-page.
+  #   2. `>= 3` target floor - on a node carrying one or two pods a single dead endpoint is
+  #      100%, which is noise, not a partition.
+  #   3. `> 0.8` for 10m - live baseline re-verified 2026-07-29 across all 5 nodes:
+  #      kubernetes-5vv07x2 0.278, nas-d0w363i 0.235, kubernetes-jhv07x2 0.174,
+  #      kubernetes-47d28x2 0.154, worker-jtw3f33 0.091. There are always some dead
+  #      endpoints, so 0.8 has real headroom. DO NOT lower it to 0.5 - that sits inside
+  #      twice the observed ceiling and would page on ordinary churn.
+  - name: "Node pod network partitioned"
+    queries:
+      - expression: |
+          (
+            count by (node) ((up == 0) * on (namespace, pod) group_left(node) kube_pod_info{node!=""})
+            /
+            count by (node) (up * on (namespace, pod) group_left(node) kube_pod_info{node!=""})
+          )
+          and on (node) (kube_node_status_condition{condition="Ready",status="true"} == 1)
+          and on (node) (count by (node) (up * on (namespace, pod) group_left(node) kube_pod_info{node!=""}) >= 3)
+    math_operator: ">"
+    threshold: 0.8
+    for: 10m
+    decimal_points: 2
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-node-pod-network-partitioned"
+      summary: "{{ index $values \"C\" }} of pod-network scrape targets on node {{ index $labels \"node\" }} are down while the node still reports Ready - suspected pod-overlay/CNI partition. Host-network kubelet stays scrapeable in this failure mode, which is why the node looks healthy everywhere else. Cordon and drain the node. Normal baseline is 0.09-0.28 per node, so this is 3x the worst healthy value."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "node"
+      severity: "critical"
+  # tatara-helmfile#245 class: the kubelet wants to mount volumes it cannot mount. Pods
+  # scheduled there sit in CreateContainerError indefinitely and the node still reports
+  # Ready. volume_manager_total_volumes is exported by the KUBELET, which is host-network
+  # and therefore stays scrapeable straight through a pod-overlay partition - the same
+  # property that made #239 diagnosable at all, so this rule keeps working during the
+  # failure mode the rule above covers.
+  #
+  # `> 0` for 15m, not `> 0` alone. tatara-helmfile#294 reported the desired-minus-actual
+  # gap as 0 on all 5 nodes. Re-verified 2026-07-29 over a 24h range at 15m resolution:
+  # 0 on every node at every sample EXCEPT the instant-now sample, where worker-jtw3f33
+  # read 1. So the PR's "0 everywhere" claim is right about the steady state and slightly
+  # too strong about the instant: a mount in progress transiently shows 1. That is exactly
+  # what `for: 15m` exists to absorb - a real wedge persists for hours (#245 ran for a
+  # working day), a mount does not. Do not tighten this to a shorter `for`.
+  - name: "Node volume plane wedged"
+    queries:
+      - expression: |
+          (
+            sum by (node) (volume_manager_total_volumes{state="desired_state_of_world"})
+            - sum by (node) (volume_manager_total_volumes{state="actual_state_of_world"})
+          )
+          and on (node) (kube_node_status_condition{condition="Ready",status="true"} == 1)
+    math_operator: ">"
+    threshold: 0
+    for: 15m
+    decimal_points: 0
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-node-volume-plane-wedged"
+      summary: "Node {{ index $labels \"node\" }} has {{ index $values \"C\" }} volume(s) the kubelet wants but cannot mount, sustained for 15m, while the node still reports Ready - CSI/volume plane wedged. Pods scheduled there will sit in CreateContainerError. Cordon and drain the node. A single volume appearing for one scrape is a mount in progress, not this condition; the 15m hold is what tells them apart."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "node"
+      severity: "critical"

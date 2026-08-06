@@ -1386,8 +1386,13 @@ rules:
   #   agent     - the agent answered the handoff turn and wrote its own note
   #   synthetic - the operator wrote the note from the last turn's finalText/pushedRepos
   #   none      - the operator held NOTHING to write; the note that landed is a placeholder
-  # Notes ARE the continuation state (A.4), so handoff=none is silent work loss - and it is
-  # the only bucket that is.
+  # Notes ARE the continuation state (A.4), so handoff=none is silent work loss.
+  #
+  # It is not the ONLY discontinuity, only the only one this metric can see. A pod lost
+  # BEFORE its TTL (crash, eviction) goes through respawnLostPod, which writes no handoff
+  # note and increments no TTL counter at all - that discontinuity is uncounted, and visible
+  # only as the operator's pod_respawn log action and Task.status.stats.podRecreations. Read
+  # this rule as "TTL stops that lost work", not "every Task that lost work".
   - name: "Operator agent pod TTL-stopped with no handoff captured"
     queries:
       - expression: |

@@ -1000,9 +1000,11 @@ PR/push triggers.
   `ttlstop.go:finish` overwrote the second with the first on any teardown error, so
   `synthetic_handoff` was structurally unreachable (`list_prometheus_label_values` over 30d
   returned only `[agent_handoff, force_deleted]`). The operator now emits a SECOND,
-  independent `handoff` label (`agent|synthetic|none`); `handoff="none"` is the only bucket
-  that means work was lost, and the new rule `Operator agent pod TTL-stopped with no handoff
-  captured` alerts on it. The old rule is KEPT, re-pointed at what it actually measures
+  independent `handoff` label (`agent|synthetic|none`); `handoff="none"` is the bucket that
+  means a TTL stop lost work, and the new rule `Operator agent pod TTL-stopped with no handoff
+  captured` alerts on it. It is not every discontinuity, and the comment block says so: a pod
+  lost BEFORE its TTL goes through the operator's respawn path, which writes no handoff note
+  and increments no TTL counter at all, so that loss is invisible to this metric entirely. The old rule is KEPT, re-pointed at what it actually measures
   (wrapper teardown health), threshold raised 0 -> 2 and `for` 5m -> 15m because a single
   force-delete with an intact handoff is not actionable. **This repo's checks could not have
   caught it:** `check_metric_provenance.py` validates metric names and the closed-set label

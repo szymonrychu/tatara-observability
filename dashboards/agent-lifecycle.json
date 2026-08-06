@@ -120,7 +120,7 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Per-second rate of Task exception events over a 15m window: parked (any stageReason - the successor to the old give-up counter) and agent-pod TTL expiry broken out by outcome (agent_handoff, synthetic_handoff, force_deleted - contract G.7, the successor to the old handover counter). tatara_lifecycle_idle_stop_total and tatara_lifecycle_implement_empty_retry_total have no successor metric in the task-centric redesign (contract K.1) and are dropped rather than mapped onto something that isn't equivalent.",
+      "description": "Per-second rate of Task exception events over a 15m window: parked (any stageReason - the successor to the old give-up counter) and agent-pod TTL expiry broken out by handoff (agent, synthetic, none - contract G.7, the successor to the old handover counter). Broken out by handoff and NOT by outcome: outcome answers how the POD was stopped (graceful|force_deleted) and says nothing about whether continuation state survived, which is the only thing an exceptions panel wants. handoff=none is the work-loss bucket (tatara-operator#527). tatara_lifecycle_idle_stop_total and tatara_lifecycle_implement_empty_retry_total have no successor metric in the task-centric redesign (contract K.1) and are dropped rather than mapped onto something that isn't equivalent.",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "palette-classic"},
@@ -173,8 +173,8 @@
         {
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "editorMode": "code",
-          "expr": "sum by (outcome) (rate(operator_agent_pod_ttl_expired_total[15m]))",
-          "legendFormat": "pod ttl / {{outcome}}",
+          "expr": "sum by (handoff) (rate(operator_agent_pod_ttl_expired_total[15m]))",
+          "legendFormat": "pod ttl / handoff={{handoff}}",
           "refId": "B"
         }
       ],

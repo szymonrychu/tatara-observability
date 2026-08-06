@@ -991,3 +991,24 @@ PR/push triggers.
   `max by (...)` on every other ks-m series used in a join. The pod-network rule's
   documented 0.09-0.28 baseline is unchanged by it (re-measured over 8h). This trap is
   invisible in review: the unhardened expression looks correct and fails only under churn.
+
+- 2026-08-06 (tatara-operator#527, the alert was measuring the wrong bucket) `Operator agent
+  pod force-deleted at TTL` fired for 19 days on `operator_agent_pod_ttl_expired_total
+  {outcome="force_deleted"}` while asserting in its summary that the G.7 stop "got neither an
+  agent handoff nor a synthetic one" - a state the operator could not produce. `outcome`
+  answered "how was the POD stopped?", not "was continuation state captured?", and
+  `ttlstop.go:finish` overwrote the second with the first on any teardown error, so
+  `synthetic_handoff` was structurally unreachable (`list_prometheus_label_values` over 30d
+  returned only `[agent_handoff, force_deleted]`). The operator now emits a SECOND,
+  independent `handoff` label (`agent|synthetic|none`); `handoff="none"` is the only bucket
+  that means work was lost, and the new rule `Operator agent pod TTL-stopped with no handoff
+  captured` alerts on it. The old rule is KEPT, re-pointed at what it actually measures
+  (wrapper teardown health), threshold raised 0 -> 2 and `for` 5m -> 15m because a single
+  force-delete with an intact handoff is not actionable. **This repo's checks could not have
+  caught it:** `check_metric_provenance.py` validates metric names and the closed-set label
+  values (`stage`, `stageReason`, `kind`, `agent_kind`) but `outcome` is not in that set, and
+  nothing at all validates a summary's CLAIM against the emitting code. The class - a rule
+  that queries a live series and describes a mechanism that does not exist - is a new one for
+  the silent-green family, and it is not lintable from inside this repo.
+  **Merge order matters:** the new rule's `runbook_url` anchor makes `check_runbook_urls.py`
+  fail until tatara-documentation@main declares it, so the docs PR merges FIRST.

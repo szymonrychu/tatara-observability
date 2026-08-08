@@ -82,6 +82,19 @@ kubelet_volume_stats_capacity_bytes
 kube_pod_spec_volumes_persistentvolumeclaims_info
 kube_persistentvolumeclaim_access_mode
 
+# --- external: grafana self-monitoring (job=prometheus-grafana), alerts/tatara-grafana.yaml ---
+# tatara-observability#94: Grafana's backing Postgres exhausted its connection slots at
+# ~03:30Z on six consecutive nights, blinding all 117 Tatara rules for ~5 minutes each
+# time, and NOTHING here selected a grafana_* series so nothing could see it. These are
+# emitted by Grafana itself and scraped under job=prometheus-grafana - "external" because
+# no tatara producer repo emits them, so reconcile_metric_provenance.py must not try to
+# reverse-check them against the 4 producer repos' Go source. All four verified live
+# against the homelab Prometheus on 2026-08-08.
+grafana_alerting_rule_evaluation_failures_total
+grafana_alerting_rule_evaluation_attempt_failures_total
+grafana_database_conn_open
+grafana_database_conn_max_open
+
 # --- external: forward-looking, not yet deployed by any producer repo ---
 # scripts/reconcile_metric_provenance.py (issue #57) treats "external" sections as exempt
 # from reverse-drift reconciliation - it never clones a repo for these, so a name here is
@@ -94,8 +107,15 @@ kube_persistentvolumeclaim_access_mode
 claude_code_api_error_total
 
 # --- operator: new (CROSS-REPO-CONTRACT K.1) ---
-operator_task_stage
-operator_task_stage_age_seconds
+# 2026-08-08 (#97): operator_task_stage / operator_task_stage_age_seconds RENAMED to
+# operator_task_state / operator_task_state_age_seconds by tatara-operator v2.0.0 (#521,
+# the 8-state Task lifecycle). Verified in that repo's internal/obs/task_metrics.go:50-57
+# at origin/main AND against live Prometheus - the old names stopped emitting at
+# 2026-08-08T06:45Z with zero overlap. The old names are DELETED here, not kept as
+# aliases: leaving them would let reconcile_metric_provenance.py's reverse-drift sweep
+# pass on names no producer emits, which is the failure this file exists to prevent.
+operator_task_state
+operator_task_state_age_seconds
 operator_illegal_stage_transition_total
 operator_task_parked_total
 operator_agent_pod_ttl_expired_total
@@ -247,13 +267,14 @@ operator_pushed_runs_evicted_total
 operator_review_findings_total
 operator_implement_ci_total
 
-# --- operator: re-labelled, NOT deleted (CROSS-REPO DEPENDENCY D1) ---
-# phase -> stage + stageReason + kind. If the operator PR drops this metric entirely,
-# the Task 6 fallback applies and this line comes back out.
-# Task 2 census: UNVERIFIED as of 2026-07-12 - the operator worktree still has this
-# metric on the OLD kind,phase,reason label set (task_metrics.go:31-33). D1 compliance
-# (the phase -> stage+stageReason+kind swap) cannot be confirmed until the operator PR
-# lands. Re-check before Task 6 ships its rule against this metric.
+# --- operator: re-labelled, NOT deleted (CROSS-REPO DEPENDENCY D1 - RESOLVED) ---
+# D1 is settled as of 2026-08-08 (#97), and NOT the way this note used to assume. The
+# metric survived and is labelled {kind,state,stateReason} (tatara-operator
+# internal/obs/task_metrics.go:42-45, origin/main). But #521 also NARROWED it: `failed`
+# and `parked` are no longer states, the terminal set is EXACTLY {done, rejected}, and a
+# failure now PARKS - so operator_task_parked_total{state,parkReason} is the only counter
+# of a failure the platform has. Every rule that read {stage="failed"} was moved onto the
+# park counter; see alerts/tatara-cd.yaml and alerts/tatara-operator.yaml.
 operator_task_terminal_total
 
 # --- wrapper (pushed through the operator receiver, prefix-allowlisted) ---

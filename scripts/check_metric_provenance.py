@@ -20,9 +20,10 @@ Every metric name found must appear in scripts/metrics_allowlist.txt. Loki queri
 (alert query_type: loki; a panel target or template variable whose datasource type is
 not prometheus) are out of scope: they select log streams, not metrics.
 
-It also validates every stageReason= / stage= / kind= / agent_kind= label VALUE used
-in an expression against the closed sets in scripts/stage_values_allowlist.txt
-(contract F.1, F.5, A.4). The metric-name check alone cannot catch a rule that
+It also validates every state= / stateReason= / parkReason= / stage= / stageReason= /
+kind= / agent_kind= label VALUE used in an expression against the closed sets in
+scripts/stage_values_allowlist.txt (tatara-operator v2.0.0's 8-state lifecycle, its
+ParkReasons / RejectReasons / DoneReasons tables, and contract A.4). The metric-name check alone cannot catch a rule that
 filters on a dead label value: the metric still exists and the rule still passes the
 name check, but the value never appears in the series, so the rule reports OK forever
 - the exact same failure class one level down. The value sweep is METRIC-AWARE: `kind`
@@ -75,8 +76,25 @@ _SUFFIXES = ("_bucket", "_sum", "_count")
 
 # Label name -> which closed set (in stage_values_allowlist.txt) its values must
 # belong to. Matches `label="value"` or `label=~"value1|value2"`.
+#
+# ORDER IS LOAD-BEARING. Python's alternation is leftmost-first, so every label
+# that is a PREFIX of another must come after it: stateReason before state, and
+# stageReason before stage. Get it wrong and `stateReason="declined"` is read as
+# label `state` with a leftover `Reason=...`, which matches nothing and silently
+# skips the check.
+#
+# state/stateReason/parkReason were added 2026-08-08 (#97). tatara-operator v2.0.0
+# renamed stage -> state and split stageReason into stateReason (terminal) and
+# parkReason (park). Until they were added here, every rule re-pointed onto the new
+# labels carried NO closed-set guard at all - the sweep silently covered nothing,
+# which is the same silent-green hole one rename later. There is a self-test in
+# test_check_metric_provenance.py asserting this tuple and the `## ` sections in
+# stage_values_allowlist.txt stay in agreement, because a section added there
+# without a label added here is a no-op that reads like coverage.
+_CLOSED_SET_LABELS = ("stateReason", "state", "parkReason", "stageReason", "stage", "agent_kind", "kind")
+
 _LABEL_VALUE = re.compile(
-    r'\b(stageReason|stage|kind|agent_kind)\s*(?:=~?|!~?)\s*"([^"]*)"'
+    r'\b(' + "|".join(_CLOSED_SET_LABELS) + r')\s*(?:=~?|!~?)\s*"([^"]*)"'
 )
 
 # `metric{...}` - a metric name followed by its label-selector body. Used to make the
@@ -125,10 +143,12 @@ def metric_names(expr: str) -> set[str]:
 
 
 def label_values(expr: str) -> dict[str, dict[str, set[str]]]:
-    """Every stageReason=/stage=/kind=/agent_kind= label value selected, by metric.
+    """Every closed-set label value selected (see _CLOSED_SET_LABELS), by metric.
 
-    Returns {metric: {label: {values}}}. The metric is carried because `kind` is an
-    overloaded label name and its closed set only applies to some metrics.
+    Returns {metric: {label: {values}}}. The metric is carried because `kind` and
+    `state` are both overloaded label names and their closed sets only apply to
+    some metrics (operator_scm_writes_total{kind="write"} is an access class;
+    operator_queue_age_seconds{state="Queued"} is a QueuedEvent bucket).
 
     A regex `=~"a|b|c"` selector is split on `|` into individual candidate values;
     PromQL regex metacharacters beyond plain alternation are left as-is and will

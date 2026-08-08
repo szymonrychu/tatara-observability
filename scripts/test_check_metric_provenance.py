@@ -7,6 +7,7 @@ import pathlib
 import tempfile
 import unittest
 
+import check_metric_provenance as check
 from check_metric_provenance import (
     dashboard_queries,
     label_values,
@@ -334,6 +335,68 @@ class LoadStageValuesTest(unittest.TestCase):
             parsed,
             {"stage": {"failed", "merging"}, "stageReason": {"merge-blocked"}},
         )
+
+
+class ClosedSetLabelCoverageTest(unittest.TestCase):
+    """The two halves of the closed-set sweep must agree, or it silently covers nothing.
+
+    scripts/check_metric_provenance.py decides WHICH labels get swept (_CLOSED_SET_LABELS);
+    scripts/stage_values_allowlist.txt decides what each one's members are. Adding a
+    `## <label>` section without adding the label to the tuple is a no-op that READS LIKE
+    COVERAGE - which is how tatara-operator v2.0.0's stage -> state rename (#97) would have
+    slipped through a second time. Assert the two agree, in both directions.
+    """
+
+    def _sections(self):
+        return load_stage_values(
+            str(pathlib.Path(__file__).resolve().parent / "stage_values_allowlist.txt")
+        )
+
+    def test_every_swept_label_has_a_section(self):
+        sections = self._sections()
+        missing = [l for l in check._CLOSED_SET_LABELS if l not in sections]
+        self.assertEqual(
+            missing,
+            [],
+            f"_CLOSED_SET_LABELS sweeps {missing} but stage_values_allowlist.txt declares "
+            "no '## <label>' section for them, so every value would be reported as unknown",
+        )
+
+    def test_every_section_is_actually_swept(self):
+        sections = self._sections()
+        labels = {s.split(":", 1)[0] for s in sections}
+        unswept = sorted(l for l in labels if l not in check._CLOSED_SET_LABELS)
+        self.assertEqual(
+            unswept,
+            [],
+            f"stage_values_allowlist.txt declares closed sets for {unswept} but "
+            "_CLOSED_SET_LABELS in check_metric_provenance.py does not sweep them, so "
+            "those sets are never enforced",
+        )
+
+    def test_prefix_labels_are_ordered_longest_first(self):
+        """stateReason must precede state, stageReason must precede stage.
+
+        Python alternation is leftmost-first, so a prefix label listed earlier
+        swallows the longer one and the longer label's values are never checked.
+        """
+        order = list(check._CLOSED_SET_LABELS)
+        for longer in order:
+            for shorter in order:
+                if longer != shorter and longer.startswith(shorter):
+                    self.assertLess(
+                        order.index(longer),
+                        order.index(shorter),
+                        f"{longer!r} must come before {shorter!r} in _CLOSED_SET_LABELS",
+                    )
+
+    def test_sweeps_the_v2_task_lifecycle_labels(self):
+        for label in ("state", "stateReason", "parkReason"):
+            self.assertIn(label, check._CLOSED_SET_LABELS)
+        values = label_values('sum by (parkReason) (operator_task_parked_total{parkReason="merge-timeout"})')
+        self.assertEqual(values, {"operator_task_parked_total": {"parkReason": {"merge-timeout"}}})
+        values = label_values('max by (task) (operator_task_state_age_seconds{state="merged"})')
+        self.assertEqual(values, {"operator_task_state_age_seconds": {"state": {"merged"}}})
 
 
 if __name__ == "__main__":

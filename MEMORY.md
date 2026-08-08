@@ -991,3 +991,69 @@ PR/push triggers.
   `max by (...)` on every other ks-m series used in a join. The pod-network rule's
   documented 0.09-0.28 baseline is unchanged by it (re-measured over 8h). This trap is
   invisible in review: the unhardened expression looks correct and fails only under churn.
+
+- 2026-08-08 (#97): tatara-operator v2.0.0 renamed stage -> state and this repo's CI could
+  not see it. `check_metric_provenance.py` validates alerts/dashboards against a snapshot
+  COMMITTED HERE, so a producer-side rename can never fail this build; the only check that
+  could was `reconcile_metric_provenance.py`, whose nightly reverse sweep did flag
+  `operator_task_stage`/`_age_seconds` as stale - but that runs at 03:23 UTC, i.e. inside
+  the nightly Grafana blackout window of #94. The 9 CD/lifecycle rules had already been
+  Normal(NoData) for 40 minutes before anyone looked. Verified the whole new vocabulary
+  against `git show origin/main:internal/obs/*.go` + `internal/stage/stage.go` AND against
+  live Prometheus rather than the issue's summary table; two of the issue's own claims did
+  not survive that (`operator_conversing_pods` is referenced NOWHERE in this repo, and
+  `operator_tasks_minted_per_sweep{stage}` genuinely KEPT its `stage` label with values
+  active|parked, so those two dashboard panels were correctly left alone).
+- 2026-08-08 (#97): a POSITIVE matcher on a renamed label goes silently OK; a NEGATIVE one
+  (`stageReason!~"a|b"`) matches EVERY series, because a series lacking the label trivially
+  satisfies it. Same rename, opposite failure, and only the loud half got noticed. Audit
+  negative matchers separately after any label rename - `## stageReason` in
+  stage_values_allowlist.txt is now kept deliberately EMPTY so any surviving reference
+  fails CI instead of being waved through by a missing section.
+- 2026-08-08 (#97): `operator_task_state_age_seconds{task,state,kind}` carries NO park
+  dimension, and the emit site sets it for every Task regardless of parkReason
+  (project_controller.go:820-833). Park being orthogonal in v2.0.0 therefore DESTROYED the
+  three stage-age wedge rules: a Task parked(awaiting-human) is indistinguishable from a
+  wedged one, and parked(backlog-sweep) never ages out at all (F.4's one deadline
+  exemption), so any threshold under ParkRetention (7d) false-fires. Resolved per rule
+  rather than uniformly - triage/approved moved onto `operator_task_parked_total`
+  (counters have no such ambiguity), "pod stage wedged" kept the gauge but at 8d, and
+  "human-wait stage wedged" is PAUSED. DO NOT re-tighten those thresholds; the unblock is
+  the operator emitting a park-age gauge or adding parkReason to the state-age gauge.
+- 2026-08-08 (#97): rule NAMES are load-bearing and were all preserved. check_runbook_urls.py
+  derives the docs anchor from the rule name, so renaming a rule needs a tatara-documentation
+  PR to land FIRST. That is also why the three NEW rules in this change fail that check
+  today - see the change's own note; it is the guard working, not a defect.
+- 2026-08-08 (#95): the pod-pool rule's `5.999` was a hand-copied sum-of-caps that was
+  already false the day it was written and describes an aggregate the operator does not
+  enforce on (admission is per (project,class)). Replaced with
+  `operator_admission_blocked_total{reason="pool_full"}`, which carries the refusal itself
+  and therefore encodes no capacity constant at all. The general lesson, and the reason the
+  literal was removed rather than corrected: a cross-repo coupling expressed as a comment
+  saying "bump both in the same change" has never once held here.
+- 2026-08-08 (#94): a detector for an outage that stops Grafana evaluating can only fire on
+  the RECOVERY edge, so it must be a counter `increase()` over a window longer than the
+  outage - never an instant gauge (Grafana is unscrapeable exactly while saturated) and
+  never a long `for:` (no evaluations happen during the blackout to accumulate Pending
+  time). Also: `grafana_database_conn_max_open` reads 0 on this deployment, which in Go's
+  database/sql means UNLIMITED - so there is no saturation RATIO to alert on, and the pool
+  never waits, it just opens connections until Postgres refuses with 53300.
+- 2026-08-08 (#93/#98): there is NO series that says "memory is intentionally disabled for
+  project X". The memory-optional gate added to three rules INFERS it from
+  `operator_memory_stacks{project,phase=~"Ready|Provisioning|Degraded|Failed"}`, which
+  works both ways a disable could land (updateMemoryStackCounts SKIPS a project whose
+  Status.Memory is nil, so the series vanishes; or a future phase outside the set becomes
+  current, so all four read 0). It is an inference, not a contract - if the operator ever
+  adds an explicit signal, switch to it.
+- 2026-08-08 (#93): `check_metric_provenance.py` strips label-selector bodies with
+  `\{[^}]*\}`, so a `{n,m}` REGEX QUANTIFIER inside a label VALUE truncates the strip and
+  the checker mis-reads the remainder as a bare metric name. Cost an hour on the new
+  coverage rule's pod regex. Avoid brace quantifiers in alert PromQL; the rule now selects
+  on `created_by_name=~"mem-[a-z0-9]+-[0-9a-f]+"` instead, which is also stabler across
+  pod restarts.
+- 2026-08-08 (#97): "Operator task failure spike" (1h) and "Operator task park spike" (3h)
+  now deliberately overlap on `operator_task_parked_total`. #521 collapsed `failed` and
+  `parked` into one counter, so a burst detector and a trickle detector on it cannot be
+  made disjoint without inventing a distinction the operator no longer draws. Same shape as
+  the error log burst/recurring pair in alerts/tatara-logs.yaml. Do not "dedupe" by
+  deleting one.

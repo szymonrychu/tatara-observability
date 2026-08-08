@@ -93,17 +93,54 @@ rules:
   # labels onto the alert instance, so `by (project, repo)` is what puts `project` on the
   # notification and lets routing attribute the alert to the project that owns the repo.
   # ---------------------------------------------------------------------------
+  # THRESHOLD 86400 -> 93600, 2026-08-08 (#98). 86400s was EXACTLY the re-ingest cron
+  # period (spec.reingestSchedule "0 6 * * *"), which is not a tuning miss, it is an
+  # identity: the gauge is stamped at ingest COMPLETION and Grafana evaluates on its own
+  # tick, so staleness immediately before each fire is necessarily 86400 + (eval_offset -
+  # stamp_offset) and therefore >= the threshold on EVERY cycle, forever, for EVERY repo.
+  # Measured over 10d on mtg-decks: a perfect daily sawtooth peaking at 86398-86402s. Over
+  # the whole retained rule history, ALL 16 enrolled repos across all 3 projects produced
+  # 87 Normal->Pending transitions and ZERO Pending->Alerting - the rule survived purely on
+  # `for: 30m` swallowing a ~60s Pending blip. Its margin was accidental, supplied by the
+  # pending window rather than by the threshold, and with zero headroom it could not
+  # distinguish "cron landed on time" from "cron is one second late", which is the exact
+  # condition it exists to detect.
+  #
+  # 93600 (26h) is NOT a new number: it is the budget tatara-operator's own chart already
+  # reasons about and ships as prometheusRule.ingestStaleAfterSeconds
+  # (charts/tatara-operator/values.yaml:284, "comfortably over the daily reingest cron").
+  # The two definitions of this one alert had drifted, and the 86400 one was the
+  # Grafana-managed rule that actually mints incident Tasks. DRIFT GUARD: nothing in CI
+  # compares these two values - alert-rules-lint.yml lints this repo in isolation and
+  # cannot see the chart. If you change this, change the chart in the same breath.
+  #
+  # MEMORY-OPTIONAL GATE (`and on (project) ... operator_memory_stacks`). A repo's recall
+  # corpus only means something while its project HAS a memory stack. The memory subsystem
+  # is being made optional; without this term, disabling it would freeze
+  # operator_repository_last_ingest_timestamp_seconds and this rule would fire permanently
+  # for every repo of that project, which is "not applicable" reported as "broken".
+  # operator_memory_stacks{project,phase} sets 1 for a project's current phase and 0 for
+  # the others, and updateMemoryStackCounts SKIPS a project whose Status.Memory is nil
+  # (tatara-operator internal/controller/project_controller.go:646), so the term is written
+  # to read false BOTH ways a disable could be implemented: the series vanishes for the
+  # project (no match, rule not applicable) OR a future phase outside this set becomes the
+  # current one (all four read 0, gate false). It cannot mask a real outage either - an
+  # operator that is down takes the ingest gauge with it, so the rule goes NoData rather
+  # than silently passing. See MEMORY.md 2026-08-08 for the caveat: no series says
+  # "memory is intentionally off" today, this INFERS it from the stack's absence.
   - name: "Repository ingest stale"
     queries:
       - expression: |
           max by (project, repo) (time() - operator_repository_last_ingest_timestamp_seconds{namespace="tatara"})
+          and on (project)
+          (max by (project) (operator_memory_stacks{namespace="tatara",job="tatara-operator",phase=~"Ready|Provisioning|Degraded|Failed"}) > 0)
     math_operator: ">"
-    threshold: 86400
+    threshold: 93600
     for: 30m
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-repository-ingest-stale"
-      summary: "Repository {{ index $labels \"repo\" }} (project {{ index $labels \"project\" }}) last successful ingest was {{ index $values \"C\" }}s ago (>24h). Its recall corpus is going stale: the per-repo re-ingest cron missed or is silently wedged. Normal live staleness is ~2.5h; 24h is a backstop. If \"Repository re-ingest gated on memory readiness\" is also firing for this project, that is the cause and this is the consequence - fix the memory stack, not the cron."
+      summary: "Repository {{ index $labels \"repo\" }} (project {{ index $labels \"project\" }}) last successful ingest was {{ index $values \"C\" }}s ago (>26h). The per-repo re-ingest cron missed or is silently wedged. NORMAL STALENESS FOR A CRON-ONLY REPO IS ~24h, NOT ~2.5h - every enrolled repo is stamped by the same 06:00 UTC batch and rides the daily sawtooth up to ~86400s, so a reading just over 24h is the healthy steady state and this backstop is deliberately 26h to leave 2h of headroom (the same budget tatara-operator's chart uses for its own TataraIngestStale). Only a reading well past 26h means the cron actually stopped. Note the gauge measures JOB-RUN RECENCY, not corpus drift from HEAD: a dormant repo whose lastIngestedCommit still equals repo HEAD is not stale in any sense a responder cares about, and its runs log \"ingest no-op: no changed files\". If \"Repository re-ingest gated on memory readiness\" is also firing for this project, that is the cause and this is the consequence - fix the memory stack, not the cron. This rule does not evaluate at all for a project with no memory stack."
     labels:
       homelab: "true"
       system: "tatara"
@@ -138,6 +175,11 @@ rules:
   # PrometheusRule on the same gauge at the same 1h. That one carries only a `severity`
   # label, so it does NOT match the system=tatara notification policy and never reaches
   # the operator incident webhook. This rule is the one that mints an incident Task.
+  # MEMORY-OPTIONAL GATE, same term and same rationale as "Repository ingest stale" above
+  # (#98). This gauge is the one MOST exposed to a memory disable: it has no Reset() (see
+  # the sharp edge below), so a repo that was gated at the moment memory was turned off
+  # would hold this alert firing forever against a gate that no longer exists.
+  #
   # KNOWN SHARP EDGE (operator-side, not fixable here): this gauge has no Reset() and no
   # DeleteLabelValues, unlike operator_memory_stacks and operator_queue_age_seconds which
   # both recompute from scratch each pass. A DELETED Repository therefore keeps its last
@@ -148,6 +190,8 @@ rules:
     queries:
       - expression: |
           max by (project, repo) (operator_repository_ingest_gated{namespace="tatara"})
+          and on (project)
+          (max by (project) (operator_memory_stacks{namespace="tatara",job="tatara-operator",phase=~"Ready|Provisioning|Degraded|Failed"}) > 0)
     math_operator: ">"
     threshold: 0
     for: 1h

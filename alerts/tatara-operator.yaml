@@ -937,7 +937,7 @@ rules:
   - name: "Operator triage stage wedged"
     queries:
       - expression: |
-          sum by (kind) (increase(operator_task_parked_total{namespace="tatara",job="tatara-operator",parkReason="triage-stalled"}[1h])) or vector(0)
+          sum (increase(operator_task_parked_total{namespace="tatara",job="tatara-operator",parkReason="triage-stalled"}[1h])) or vector(0)
     math_operator: ">"
     threshold: 0
     for: 15m

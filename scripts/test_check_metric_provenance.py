@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""Tests for check_metric_provenance. Run: python3 -m unittest scripts.test_check_metric_provenance
-or, from the scripts/ dir: python3 -m unittest test_check_metric_provenance."""
+"""Tests for check_metric_provenance. Run either
+`python3 -m unittest discover scripts -p 'test_*.py'` (what CI runs) or, from the
+scripts/ dir, `python3 -m unittest test_check_metric_provenance`. NOT
+`python3 -m unittest scripts.test_...`: these modules import each other by bare
+name, so scripts/ has to be on sys.path. That form has never worked."""
 
 import json
 import pathlib

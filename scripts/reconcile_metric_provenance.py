@@ -576,10 +576,17 @@ def check_label_names(
     metric_labels: dict[str, frozenset[str] | None],
     exemptions: dict[str, set[str]],
 ) -> list[LabelFinding]:
-    """Selectors naming a label their emitting metric does not declare."""
+    """Selectors naming a label their emitting metric does not declare.
+
+    Deduplicated per (path, context, metric, label): a ratio rule names the same
+    metric twice in one expression and a panel can carry several targets on it, and
+    a summary that lists one defect three times reads as three defects. Two rules
+    with the same dark selector stay two findings - they are two rules to fix.
+    """
     infra = exemptions.get("infra-labels", set())
     exempt = exemptions.get("label-name:exempt-metrics", set())
     out: list[LabelFinding] = []
+    seen: set[tuple[str, str, str, str]] = set()
     for path, context, expr in expressions:
         for sel in check.selector_labels(expr):
             declared = metric_labels.get(sel.metric)
@@ -589,6 +596,10 @@ def check_label_names(
                 continue
             if sel.label in declared:
                 continue
+            key = (path, context, sel.metric, sel.label)
+            if key in seen:
+                continue
+            seen.add(key)
             out.append(
                 LabelFinding(
                     path,
@@ -613,8 +624,12 @@ def check_label_values(
     A dead value in a NEGATIVE matcher is fatal too, and for the opposite reason:
     the rule means to exclude it, so a renamed vocabulary silently stops excluding
     and starts firing on exactly what the summary says it ignores.
+
+    Deduplicated per (path, context, metric, label, value), same reasoning as
+    check_label_names.
     """
     out: list[LabelFinding] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
     for path, context, expr in expressions:
         for sel in check.selector_labels(expr):
             declared = metric_labels.get(sel.metric)
@@ -626,10 +641,15 @@ def check_label_values(
             if sel.metric in exemptions.get(f"{sel.label}:exempt-metrics", set()):
                 continue  # the label name means something else on this metric
             for value in sorted(sel.values):
-                if value not in allowed:
-                    out.append(
-                        LabelFinding(path, context, sel.metric, sel.label, value=value)
-                    )
+                if value in allowed:
+                    continue
+                key = (path, context, sel.metric, sel.label, value)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(
+                    LabelFinding(path, context, sel.metric, sel.label, value=value)
+                )
     return out
 
 

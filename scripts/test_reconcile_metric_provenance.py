@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Tests for reconcile_metric_provenance. Run:
-python3 -m unittest scripts.test_reconcile_metric_provenance or, from the
-scripts/ dir: python3 -m unittest test_reconcile_metric_provenance.
+"""Tests for reconcile_metric_provenance. Run either
+`python3 -m unittest discover scripts -p 'test_*.py'` (what CI runs) or, from the
+scripts/ dir, `python3 -m unittest test_reconcile_metric_provenance`. NOT
+`python3 -m unittest scripts.test_...`: the modules under test import each other
+by bare name, so scripts/ has to be on sys.path, which the package form does not
+do. That form has never worked; the docstring used to claim it did.
 
-No network calls: derive_metric_names is exercised against synthetic .go
-fixtures written to a tempdir, never a real clone."""
+No network calls: every derivation is exercised against synthetic .go fixtures
+written to a tempdir, never a real clone. The one exception is
+ShippedLabelExemptionsTest, which reads the real scripts/label_exemptions.txt -
+deliberately, because the fixtures prove the machinery and only that test proves
+the DATA that CI actually loads."""
 
 import pathlib
 import tempfile
@@ -747,6 +753,34 @@ class CheckLabelNamesTest(unittest.TestCase):
         )
         self.assertEqual(len(found), 1)
 
+    def test_one_context_reports_a_finding_once(self):
+        # A ratio rule names the same metric twice in one expression, and a panel
+        # can carry several targets on it. lint_dashboard already deduplicates for
+        # this reason; a summary that lists the same defect three times reads as
+        # three defects.
+        found = check_label_names(
+            _expr(
+                'sum(operator_task_terminal_total{stage="failed"}) / '
+                'sum(operator_task_terminal_total{stage="failed"})'
+            ),
+            _LABELS,
+            _EXEMPTIONS,
+        )
+        self.assertEqual(len(found), 1, [str(f) for f in found])
+
+    def test_the_same_defect_in_two_contexts_is_reported_twice(self):
+        # Deduplication is per (path, context, metric, label) - two different rules
+        # with the same dark selector are two rules to fix.
+        found = check_label_names(
+            [
+                ("alerts/x.yaml", 'rule "a"', 'sum(operator_task_terminal_total{stage="x"})'),
+                ("alerts/x.yaml", 'rule "b"', 'sum(operator_task_terminal_total{stage="x"})'),
+            ],
+            _LABELS,
+            _EXEMPTIONS,
+        )
+        self.assertEqual(len(found), 2)
+
 
 class CheckLabelValuesTest(unittest.TestCase):
     def _check(self, expr: str):
@@ -766,6 +800,17 @@ class CheckLabelValuesTest(unittest.TestCase):
             'sum(operator_task_terminal_total{state=~"done|parked|rejected"})'
         )
         self.assertEqual([f.value for f in found], ["parked"])
+
+    def test_one_context_reports_a_dead_value_once(self):
+        self.assertEqual(
+            len(
+                self._check(
+                    'sum(operator_task_terminal_total{state="failed"}) / '
+                    'sum(operator_task_terminal_total{state="failed"})'
+                )
+            ),
+            1,
+        )
 
     def test_dead_value_in_a_negative_matcher_is_still_fatal(self):
         # The opposite direction of the dark-rule failure: the rule intends to

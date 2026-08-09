@@ -391,6 +391,37 @@ class DeriveMetricLabelsTest(unittest.TestCase):
             {"operator_auto_total": frozenset({"result"})},
         )
 
+    def test_promauto_with_registerer_is_parsed_like_prometheus(self):
+        # `promauto.With(reg).NewGaugeVec(...)` is the canonical promauto spelling and
+        # the module docstring claims it is handled. It must be, and not only for the
+        # label set: a metric this parser fails to SEE is absent from
+        # derive_metric_names, so its allowlist entry reads as stale and the
+        # reverse-drift check hard-fails. Missing this shape is a false FAILURE, not a
+        # skip. No producer uses promauto today, which is exactly why it needs a test.
+        self.assertEqual(
+            self._derive(
+                "internal/obs/auto.go",
+                "var G = promauto.With(reg).NewGaugeVec(prometheus.GaugeOpts{\n"
+                '    Name: "operator_promauto_total",\n'
+                '}, []string{"result"})\n',
+            ),
+            {"operator_promauto_total": frozenset({"result"})},
+        )
+
+    def test_promauto_with_registerer_is_found_by_the_name_derivation_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            path = root / "internal" / "obs" / "auto.go"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "var C = promauto.With(reg).NewCounter(prometheus.CounterOpts{\n"
+                '    Name: "operator_promauto_plain_total",\n'
+                "})\n"
+            )
+            self.assertEqual(
+                derive_metric_names(root), {"operator_promauto_plain_total"}
+            )
+
     def test_crlf_line_endings_do_not_drift_the_call_offsets(self):
         # The label slice is located by ABSOLUTE character offset into the file, so
         # a two-byte line terminator could slide every lookup past line 1 and bind

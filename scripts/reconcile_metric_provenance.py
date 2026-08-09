@@ -138,8 +138,13 @@ SECTION_REPO: dict[str, str | None] = {
 # Anchors a Prometheus metric constructor call. Group 1 is the constructor name,
 # which is what tells a *Vec (label slice as its last argument) apart from a plain
 # Counter/Gauge (no labels at all) and from NewDesc (labels third-positional).
+# `promauto\.\w+(?:\([^)]*\))?` covers both promauto spellings: the stored factory
+# (promauto.factory.NewCounterVec) and the canonical inline one
+# (promauto.With(reg).NewGaugeVec). Missing the latter is a false FAILURE, not a
+# skip: the metric goes unseen by derive_metric_names, so its allowlist entry reads
+# as stale and the reverse-drift check hard-fails on a healthy producer.
 _CTOR = re.compile(
-    r"(?:prometheus|promauto\.\w+)\.(New\w+|MustNewConstMetric)\("
+    r"(?:prometheus|promauto\.\w+(?:\([^)]*\))?)\.(New\w+|MustNewConstMetric)\("
 )
 # The constructor's Name/name field, e.g. `Name: "operator_task_stage"`.
 _NAME_FIELD = re.compile(r'(?:Name|name):\s*"([a-z][a-z0-9_]+)"')

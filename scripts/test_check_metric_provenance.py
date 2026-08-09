@@ -138,6 +138,46 @@ class SelectorLabelsTest(unittest.TestCase):
             selector_labels('sum(m{a=~"x|y"})')[0].values, frozenset({"x", "y"})
         )
 
+    def test_an_equals_value_is_a_literal_even_with_regex_metacharacters(self):
+        # `=` is an exact-match operator, so `.` in the value is a dot, not "any
+        # character". Screening it out as a non-literal would silently exempt the
+        # single most likely typo class from the value sweep:
+        # stateReason="mr-merged.externally" for "mr-merged-externally".
+        self.assertEqual(
+            selector_labels('sum(m{stateReason="mr-merged.externally"})')[0].values,
+            frozenset({"mr-merged.externally"}),
+        )
+        # A `$var` is still not a literal under either operator - but a bare `$` is a
+        # regex anchor, not a variable. `${var}` is a documented blind spot one level
+        # up: its `}` terminates _SELECTOR's body, so the whole selector goes unseen.
+        # No live expression uses that spelling; see selector_labels' docstring.
+        for value in ("$r", "[[r]]"):
+            self.assertEqual(
+                selector_labels(f'sum(m{{stateReason="{value}"}})')[0].values,
+                frozenset(),
+                value,
+            )
+
+    def test_an_anchored_alternation_still_yields_its_values(self):
+        # `=~"^(a|b)$"` is ordinary PromQL. Left whole, every alternative carries a
+        # metacharacter and the entire matcher goes value-unchecked.
+        self.assertEqual(
+            selector_labels('sum(m{state=~"^(done|rejected)$"})')[0].values,
+            frozenset({"done", "rejected"}),
+        )
+        self.assertEqual(
+            selector_labels('sum(m{state=~"^done$"})')[0].values, frozenset({"done"})
+        )
+
+    def test_a_genuine_regex_pattern_is_still_dropped(self):
+        # Anchor-stripping must not turn a real pattern into a literal to test.
+        self.assertEqual(
+            selector_labels('sum(m{state=~"under-.*"})')[0].values, frozenset()
+        )
+        self.assertEqual(
+            selector_labels('sum(m{state=~"^under-.*$"})')[0].values, frozenset()
+        )
+
     def test_grafana_template_variables_are_dropped(self):
         # kind=~"$kind" is a dashboard variable, not a literal label value. The
         # LABEL is still reported - a variable-valued matcher on a dead label name

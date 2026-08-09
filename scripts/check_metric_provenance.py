@@ -86,9 +86,20 @@ _MATCHER = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)\s*(=~|!~|!=|=)\s*"([^"]*)"')
 # nothing without knowing which metric it is on).
 _SELECTOR = re.compile(r"(?<![A-Za-z0-9_:])([a-z_][a-z0-9_]*)\s*\{([^}]*)\}")
 
-# A value that is a Grafana template variable or a real PromQL regex rather than a
-# literal. Neither can be membership-tested against a closed set.
-_NOT_A_LITERAL = re.compile(r"[$.*+?()\[\]^\\]")
+# A Grafana template variable: never a literal under any operator. It must NOT be a
+# bare `$` - that is also the regex end-anchor in `=~"^(done|rejected)$"`, and
+# treating the anchor as a variable silently exempts every anchored matcher from the
+# value sweep.
+_TEMPLATE_VAR = re.compile(r"\$\{?[A-Za-z_]|\[\[")
+# A real PromQL regex rather than a literal, once the whole-match anchors below are
+# stripped. Only meaningful for the =~ / !~ operators: under `=` the value is an
+# exact match, so a `.` in it is a dot and screening it out would silently exempt
+# the likeliest typo class (stateReason="mr-merged.externally") from the value sweep.
+_REGEX_PATTERN = re.compile(r"[.*+?()\[\]{}^$|\\]")
+# `^(a|b)$` and `^a$` are ordinary PromQL. Left whole, every alternative carries a
+# metacharacter and the entire matcher goes value-unchecked.
+_ANCHORED_GROUP = re.compile(r"^\^\((.*)\)\$$", re.S)
+_ANCHORED_BARE = re.compile(r"^\^(.*)\$$", re.S)
 
 # Grafana template-variable queries. label_values(<expr>, <label>) and query_result(<expr>)
 # carry PromQL; label_values(<label>), metrics(...) and label_names(...) do not.
@@ -170,6 +181,12 @@ def selector_labels(expr: str) -> list[Selector]:
 
     A regex `=~"a|b|c"` matcher is split on `|` into candidate values; an `=`
     matcher is one value even if it contains a bar.
+
+    KNOWN BLIND SPOT: _SELECTOR's body is `[^}]*`, so a Grafana `${var}` matcher
+    terminates it early and the whole selector goes unreported - not just its
+    values. `$var` and `[[var]]` are fine. No alert or dashboard uses the braced
+    spelling today; widening the regex for a shape nothing emits would add
+    unexercised machinery to the one parser both checks depend on.
     """
     out: list[Selector] = []
     for metric, body in _SELECTOR.findall(expr):
@@ -178,14 +195,31 @@ def selector_labels(expr: str) -> list[Selector]:
                 metric = metric[: -len(suffix)]
                 break
         for label, op, raw in _MATCHER.findall(body):
-            raw_values = raw.split("|") if op.endswith("~") else [raw]
-            values = {
-                v.strip()
-                for v in raw_values
-                if v.strip() and not _NOT_A_LITERAL.search(v)
-            }
-            out.append(Selector(metric, label, op, frozenset(values)))
+            out.append(Selector(metric, label, op, _literal_values(op, raw)))
     return out
+
+
+def _literal_values(op: str, raw: str) -> frozenset[str]:
+    """The literal candidate values of one matcher's right-hand side.
+
+    An `=` / `!=` value is exactly one literal, whatever characters it contains. A
+    `=~` / `!~` value is a regex: whole-match anchors are stripped, plain
+    alternation is split on `|`, and anything still carrying a metacharacter is
+    dropped - it cannot be membership-tested against a closed set, and guessing
+    would fail on correct work.
+    """
+    if _TEMPLATE_VAR.search(raw):
+        return frozenset()
+    if not op.endswith("~"):
+        return frozenset({raw.strip()}) if raw.strip() else frozenset()
+    m = _ANCHORED_GROUP.match(raw) or _ANCHORED_BARE.match(raw)
+    if m:
+        raw = m.group(1)
+    return frozenset(
+        v.strip()
+        for v in raw.split("|")
+        if v.strip() and not _REGEX_PATTERN.search(v)
+    )
 
 
 def template_expr(query: str) -> str:

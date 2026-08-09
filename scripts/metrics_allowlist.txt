@@ -195,6 +195,31 @@ operator_stage_drift_total
 operator_sweep_next_expected_timestamp_seconds
 agent_internal_issue_total
 
+# --- operator: stall detection, phase B1 (2026-08-09, tatara-operator #575/#577) ---
+# All three verified by declaration against tatara-operator origin/main @ ba4c26e, not
+# assumed from the plan - which got one of them wrong (see the reason note below).
+#
+# operator_stall_probe_total{outcome}  internal/obs/stall_metrics.go:48
+#   Closed set, consts at stall_metrics.go:16-37:
+#   sent|answered|unanswered|never_delivered|unsupported|error. `never_delivered` is the
+#   only member with an underscore.
+# operator_pod_recreations_total{project,kind}  internal/obs/stall_metrics.go:72
+#   Plural "recreations". Deliberately NOT labelled by task - it is a project rate signal,
+#   because the per-Task budget (maxPodRecreations) is the thing phase O3 deletes. Three
+#   emit sites: livepods.go:198, podwatch.go:241, task_stage.go:1456.
+# operator_live_entry_declined_total{project,reason}  internal/obs/task_metrics.go:85
+#   Closed set, controller/livepods.go:907-931 (LiveEntryDeclineReasons):
+#   not-a-live-state|task-parked|live-ceiling-full|rounds-exhausted|task-done.
+#   THE PLAN CALLED FOR reason="no-live-room" AND NO SUCH VALUE EXISTS on this metric.
+#   "no-live-room" is stage.DeclineNoLiveRoom (internal/stage/stage.go:1169) and it lands
+#   on the KIND label of operator_unpark_declined_total, which is a different metric
+#   guarding the same live ceiling on the un-park path. Not allowlisted here because no
+#   rule selects it - the runbook names it instead. If a rule ever does, `kind` is a
+#   closed-set label in stage_values_allowlist.txt and will need an exempt-metrics entry.
+operator_stall_probe_total
+operator_pod_recreations_total
+operator_live_entry_declined_total
+
 # --- operator: memory-degradation + saturation batch (2026-07-26, tatara-operator
 # #457/#458/#469/#470, tatara-observability P7) ---
 # All seven verified against tatara-operator origin/main @ a8255cf, by declaration:
@@ -286,6 +311,16 @@ ccw_turns_total
 ccw_commit_push_total
 ccw_http_panics_total
 ccw_claude_restarts_total
+# Stall probe, phase B1 (2026-08-09, tatara-claude-code-wrapper #156). Verified by
+# declaration against origin/main @ e662ed5, internal/metrics/metrics.go:183.
+# ccw_probe_outcomes_total{outcome} is a closed 3-set from the consts at
+# internal/transcript/probe.go:47-51: answered|delivered_unanswered|never_delivered.
+# NOT ADDED: ccw_turn_stall_suspected_total. It does NOT exist at wrapper origin/main -
+# it belongs to the unmerged phase-W4 branch feat/w4-interrupt-and-stall-suspect. Listing
+# it here would fail reconcile_metric_provenance.py, which diffs this file against the
+# producer repos' live source, and that failure would be correct. Add it in the same
+# change that ships W4; the counter is unlabelled there (prometheus.NewCounter).
+ccw_probe_outcomes_total
 # dashboard-only (2026-07-13 backfill), all verified in the wrapper worktree's
 # internal/metrics. NOT added: ccw_interjections_total - the wrapper redesign DELETES it
 # with the whole cross-pod-continuity surface, and cmd/wrapper/guard_no_s3_test.go bans the

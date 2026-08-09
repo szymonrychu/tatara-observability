@@ -1135,3 +1135,41 @@ PR/push triggers.
   cleanly because this branch never touched those lines - worth checking rather than assuming, since
   a JSON dashboard gives no compile error for a half-applied rename. Also fixed the "Parks by Reason"
   panel description, which #99 left reading stageReason while its own expr already said parkReason.
+- 2026-08-09 (B1 stall detection): the phase plan named two metrics that do not exist as written,
+  and BOTH were caught by reading the producer at origin/main rather than by CI. (1)
+  `operator_live_entry_declined_total{reason="no-live-room"}` - that metric's closed reason set is
+  `not-a-live-state|task-parked|live-ceiling-full|rounds-exhausted|task-done`
+  (tatara-operator internal/controller/livepods.go:907-931). `no-live-room` is real, but it is
+  `stage.DeclineNoLiveRoom` on the KIND label of `operator_unpark_declined_total` - the same live
+  ceiling refusing a PARKED Task on the un-park path. The rule shipped on `live-ceiling-full`; the
+  twin is named in the rule comment and the runbook, not folded in (different metric, different
+  label, and `kind` is a closed-set label that would need a stage_values_allowlist exemption). CI
+  would NOT have caught this: `reason` has no closed set, so a positive matcher on a nonexistent
+  value is exactly the silent-green class - name check green, label-NAME check green, matches
+  nothing forever. Add `reason` to stage_values_allowlist.txt if this recurs. (2)
+  `ccw_turn_stall_suspected_total` does not exist at wrapper origin/main at all - it belongs to the
+  UNMERGED phase-W4 branch. Its rule was dropped rather than written, with the reasoning left in
+  alerts/tatara-wrapper.yaml so W4 picks it up. That one CI would have caught, twice
+  (check_metric_provenance, then reconcile_metric_provenance) - the plan's rollout order had W4
+  before B1 and reality did not.
+- 2026-08-09 (B1): the plan said to "edit the park-spike regex, it currently matches
+  turn-budget-exhausted|review-loop-exhausted|pod-recreation-exhausted". It does not, and has not
+  since #97: both spike rules match parkReason NEGATIVELY (an exclusion list), so the three reasons
+  phase O3 stops emitting simply stop contributing and every other reason is still counted. No edit
+  was needed and none was made beyond recording why. The rule that DID have the positive-matcher
+  problem was "Operator task pod-recreation budget exhausted"
+  (`parkReason="pod-recreation-exhausted"`), which is deleted here and replaced by
+  "Operator agent pod recreation loop" on `operator_pod_recreations_total`. Residual, stated in the
+  file rather than papered over: until O3 lands a single Task can still spend maxPodRecreations=3
+  and park without reaching 6/h, and that case is covered only by the two park-spike rules.
+- 2026-08-09 (B1): three of the four new rules have NO SERIES IN PROMETHEUS at merge time and that
+  is expected, not broken. `operator_stall_probe_total` and `operator_pod_recreations_total` are
+  labelled vecs with zero series until something first stalls or respawns; `ccw_probe_outcomes_total`
+  is written only TERMINALLY (on answer, on supersede, or at shutdown via probes.Finalize), so a
+  fleet where no probe has yet finished has never incremented it. The evidence that the code is
+  actually deployed rather than the family being dark is `ccw_probe_answer_seconds_count`, an
+  UNLABELLED histogram, which IS present - an unlabelled metric exists at registration. Use that
+  trick to tell "not deployed" from "deployed and nothing has happened yet"; a labelled counter
+  cannot distinguish the two. `operator_live_entry_declined_total` is the one with live data
+  (~85/week, all `not-a-live-state`; `live-ceiling-full` has been flat 0 over 7d, so rule 3 is
+  measuring from a genuine zero baseline).

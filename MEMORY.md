@@ -1088,6 +1088,7 @@ PR/push triggers.
   with better-labelled Prometheus signal ("Tatara ingest job failing", "Tatara ingest run failure ratio
   high", "Repository ingest stale", "Repository stuck in failing ingest state") that attributes to a
   project/repo and to full/incremental mode - a raw ERROR-log count keyed only on `msg` would be a
-  strictly worse duplicate. Left "Tatara operator error log burst" (same file, unscoped selector,
-  5m/threshold 20) untouched - same theoretical container-mixing exposure, but ingest volume (~1.3/hr)
-  is nowhere near its 20-in-5m bar and narrowing it was out of this fix's scope.
+  strictly worse duplicate. Also scoped the sibling "Tatara operator error log burst" (same file,
+  5m/threshold 20) to `container="tatara-operator"`: tatara-operator#558's own fix-target table names
+  both rules under the same selector defect. Its threshold is nowhere near ingest's ~1.3 lines/hr
+  volume so it was not observed firing from this cause, but the selector was wrong regardless.

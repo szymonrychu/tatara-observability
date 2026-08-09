@@ -1,0 +1,114 @@
+---
+# GRAFANA WATCHING ITSELF (tatara-observability#94, 2026-08-08).
+#
+# Every other file here alerts on tatara. This one alerts on the thing that runs every
+# other file, because on six consecutive nights (2026-07-27 -> 08-01, and again on 08-07
+# and 08-08) Grafana's own backing Postgres - `grafana-database-cluster`, CNPG, ns
+# monitoring - exhausted its connection slots at ~03:30 UTC for about five minutes.
+# Grafana resolves a datasource from that DB on EVERY rule-evaluator build, so while it is
+# saturated no rule can evaluate and no alert state can be persisted: all 117 rules in the
+# Tatara folder are blind, and the state history for the window is lost too ("Failed to
+# save history batch"). Nothing alerted on it, because nothing in this repo selected a
+# single grafana_* series. "No alert fired overnight" was not evidence of health.
+#
+# WHY IT IS ITS OWN FILE. The rulegroup name is derived from the filename
+# (grafana.tf: rulegroup_name = split(".", split("/", f)[1])[0]), and terraform's fileset
+# glob picks up alerts/*.yaml automatically, so a new file needs no wiring. Folding these
+# into tatara-operator.yaml would put component=observability rules in an operator group
+# and give them the operator group's evaluation interval and defaults.
+#
+# THE HARD PART, AND WHY THESE ARE COUNTER RULES RATHER THAN GAUGE RULES:
+# a rule cannot evaluate during the outage it is meant to detect, so it can only fire on
+# the RECOVERY edge. A `for:` shorter than the ~5-minute blackout never accumulates
+# Pending time (there are no evaluations to accumulate it from); a threshold on an instant
+# gauge sees nothing, because Grafana is unscrapeable exactly while it is saturated
+# (up{job="prometheus-grafana"} has a gap through the event). increase() over a 30m window
+# solves both: the counter is cumulative and survives the blackout in Prometheus, so once
+# Grafana comes back the window still contains the spike for another ~25 minutes - long
+# enough for a short `for:` to be satisfied post-recovery. Do not "tighten" these to
+# instant gauges or a long `for:`; either change makes them unable to fire.
+#
+# NO no_data_state / exec_err_state OVERRIDE IS SET, deliberately. This file inherits
+# default_no_data_state: "OK" and grafana.tf's default_exec_err_state: "OK". NoData here
+# means Grafana is not being scraped, which is a Prometheus problem these rules cannot
+# distinguish from health and must not page for; the blackout itself is caught on the
+# recovery edge by the counter, above.
+#
+# THE ROOT CAUSE IS NOT IN ANY tatara-* REPO. Grafana, grafana-database-cluster and
+# Prometheus are deployed by the infra helmfile (infra/helmfile/helmfiles/coding), and the
+# trigger is a cluster-wide pod-recreation event at ~03:30Z (178 pods across 23 namespaces,
+# with node_boot_time_seconds unchanged - not a reboot) that restarts every Grafana replica
+# at once against a DB whose own instances are being re-scheduled. Grafana's startup path
+# does not retry: `initialize resource DB: run migrations: pq: ...53300` exits the
+# container, turning a self-healing 5-minute saturation into a 12-restart crash-loop.
+# These rules are the DETECTOR, not the fix; the fix belongs to the monitoring-stack owner.
+interval_seconds: 60
+default_no_data_state: "OK"
+rules:
+  # THE PRIMARY DETECTOR. Six-for-six on the nightly event and essentially silent
+  # otherwise, measured on live Prometheus 2026-08-08 over the retained window:
+  #   08-07 03:30-04:00Z  351.5      08-08 03:30-04:00Z  245.0
+  # against a ceiling of 17.3 in the noisiest ordinary bucket (a 10h band on 08-05 running
+  # 4-17). Threshold 50 sits an order of magnitude below the event and 3x above the worst
+  # ordinary bucket, so it separates "the alerting subsystem went dark" from "one rule's
+  # query flaked".
+  #
+  # DELIBERATELY NOT grafana_alerting_rule_evaluation_attempt_failures_total, which is the
+  # noisier sibling (it counts each retried ATTEMPT, and shows 11-37 in ordinary buckets
+  # on the same window). Use it as a magnitude cross-check when this fires, not as the
+  # trigger.
+  #
+  # NOT grouped by rule_group/org: during the event EVERY rule fails, so a per-group split
+  # would fan one incident out into dozens of notifications for the same cause.
+  - name: "Grafana alert rule evaluation failing"
+    queries:
+      - expression: |
+          sum(increase(grafana_alerting_rule_evaluation_failures_total{job="prometheus-grafana"}[30m])) or vector(0)
+    math_operator: ">"
+    threshold: 50
+    for: 5m
+    decimal_points: 0
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-grafana-alert-rule-evaluation-failing"
+      summary: "Grafana failed {{ index $values \"C\" }} alert-rule evaluations in the last 30m (>50). While that was happening NO rule in the Tatara folder could evaluate and no alert state or state history could be persisted, so every tatara alert was blind and any condition that started and cleared inside the window produced no alert and left no history. THIS FIRES ON THE RECOVERY EDGE - the outage is already over by the time you read it; treat the preceding 30m as a blind window, do not read the absence of other alerts in it as health. Most likely cause on this cluster: Grafana's own backing Postgres (grafana-database-cluster, CNPG, ns monitoring) exhausting its connection slots, which has recurred nightly at ~03:30 UTC. Confirm: `sum by (pod) (count_over_time({namespace=\"monitoring\", pod=~\"grafana-database-cluster-.*\"} |= \"53300\" [5m]))` on the Loki (Working) datasource - GROUP BY POD, because that query string also self-matches Loki's own query log, and check log_time inside the record because those streams carry INGEST time, not event time. The fix is infra (Grafana + CNPG sizing and whatever recreates 178 pods at 03:30Z), not a tatara repo."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "observability"
+      severity: "critical"
+  # THE LEADING INDICATOR, on the connection pool itself. It is a plain absolute threshold
+  # and NOT a ratio, because grafana_database_conn_max_open reads 0 on this deployment -
+  # Go's database/sql uses 0 to mean UNLIMITED, so there is no denominator to divide by and
+  # a saturation ratio is not expressible. That is also the mechanism: with no client-side
+  # cap the pool never waits (grafana_database_conn_wait_count_total stays flat), it just
+  # keeps opening connections until Postgres refuses with SQLSTATE 53300.
+  #
+  # Steady state is 2 open connections per Grafana pod. max_over_time over the retained 3d
+  # window reaches 81 on a single pod - against a server-side max_connections of 100 shared
+  # with two other replicas, which is the exhaustion. 40 sits an order of magnitude above
+  # steady state and comfortably below the observed peak, so it catches the climb rather
+  # than only the wreckage.
+  #
+  # HONEST LIMIT: Grafana is unscrapeable for part of the saturation, so this can miss the
+  # peak entirely and stay silent while the rule above fires. It is a companion, not a
+  # replacement - it is what turns "the alerting subsystem went dark" into "and here is
+  # why". The authoritative server-side view (cnpg_backends_total,
+  # cnpg_pg_settings_setting{name="max_connections"}) does NOT exist for this cluster:
+  # `grafana-database-cluster` has no Prometheus scrape target at all, which is itself
+  # worth fixing infra-side.
+  - name: "Grafana database connection pool saturating"
+    queries:
+      - expression: |
+          max(grafana_database_conn_open{job="prometheus-grafana"}) or vector(0)
+    math_operator: ">"
+    threshold: 40
+    for: 2m
+    decimal_points: 0
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-grafana-database-connection-pool-saturating"
+      summary: "A Grafana replica is holding {{ index $values \"C\" }} open connections to its backing Postgres (>40; steady state is 2 per pod). Grafana's pool is UNCAPPED here - grafana_database_conn_max_open reads 0, which in Go's database/sql means unlimited - so it will keep opening connections until grafana-database-cluster refuses with SQLSTATE 53300, at which point no Grafana rule can evaluate and every tatara alert goes blind (see \"Grafana alert rule evaluation failing\"). Grafana's startup path does not retry that error, so a replica restarting into it crash-loops instead of waiting. This is INFRA, not tatara: the levers are Grafana's database.max_open_conn and grafana-database-cluster's max_connections in infra/helmfile/helmfiles/coding. Route it to the monitoring-stack owner."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "observability"
+      severity: "warning"

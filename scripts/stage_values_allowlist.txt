@@ -1,40 +1,94 @@
 # Closed-set label VALUE allowlist for scripts/check_metric_provenance.py.
 #
 # metrics_allowlist.txt validates metric NAMES only. A rule can select a metric
-# that IS emitted while filtering on a stageReason=/stage=/kind=/agent_kind= value
-# that is NOT a member of the contract's closed set - the series never appears,
-# and because every alert file sets default_no_data_state: "OK" the rule reports
-# OK forever. Same failure class as a dead metric name, one level down (fix V7-7:
-# this is exactly how a v6-era rule shipped a reference to the retired
-# "pod-not-ready" stageReason and would have passed a name-only provenance check).
+# that IS emitted while filtering on a label value that is NOT a member of the
+# contract's closed set - the series never appears, and because every alert file
+# sets default_no_data_state: "OK" the rule reports OK forever. Same failure class
+# as a dead metric name, one level down (fix V7-7: this is exactly how a v6-era
+# rule shipped a reference to the retired "pod-not-ready" stageReason and would
+# have passed a name-only provenance check).
 #
-# Sections below are `## <label name>` followed by one value per line. Regenerate
-# by re-reading the named contract section in
-# docs/superpowers/plans/2026-07-12-task-centric-CROSS-REPO-CONTRACT.md and
-# reconciling by hand; these are closed sets, not samples.
+# 2026-08-08 (#97) - THIS FILE DID NOT CATCH THE stage -> state RENAME, AND THAT
+# IS WHY THE state/stateReason/parkReason SECTIONS BELOW EXIST. tatara-operator
+# v2.0.0 (#521) replaced the 16-stage machine with 8 states plus an orthogonal
+# park flag, renaming the labels stage -> state and stageReason -> stateReason
+# (terminal) / parkReason (park). The sweep only knew about the OLD four label
+# names, so every rule re-pointed onto the new ones would have shipped with NO
+# closed-set guard at all - re-opening the exact hole this file was written to
+# close, one rename later. The label list is now driven by _LABEL_VALUE in
+# scripts/check_metric_provenance.py; adding a section here without adding the
+# label there is a no-op, and there is a self-test asserting the two agree.
+#
+# Sections below are `## <label name>` followed by one value per line, optionally
+# `## <label name>:exempt-metrics` naming metrics on which that label means
+# something else entirely. Regenerate against tatara-operator's own source of
+# truth - internal/stage/stage.go (the Reasons / ParkReasons / RejectReasons /
+# DoneReasons tables) and internal/stage/liveness.go (AllStates) - and reconcile
+# by hand; these are closed sets, not samples.
 
-## stage
-# contract F.1 - the Task stage enum. Terminal: rejected, failed, parked.
-triaging
-brainstorming
-clarifying
-investigating
-refining
-approved
-implementing
-reviewing
-merging
-deploying
-delivered
-documenting
+## state
+# tatara-operator v2.0.0, api/v1alpha1/task_types.go:203-219 and
+# internal/stage/liveness.go:AllStates - the 8-member Task state enum, in
+# lifecycle order. It replaced the 16-stage F.1 enum wholesale (#521).
+#
+# `parked` and `failed` ARE DELIBERATELY ABSENT and must not be re-added. Park is
+# an orthogonal FLAG (status.parkReason, the parkReason section below), liveness
+# is a property (stage.Live), and TaskDone is EXACTLY {done, rejected} - folding
+# all three axes into one value is the bug #521 fixed.
+#
+# NAMING TRAP, verbatim from the enum's own doc comment: `merged` and `deployed`
+# name the PHASE, not the milestone. merged means the verdict is approve and the
+# operator owns the merge cursor, NOT that every MR is merged.
+#
+# The three LIVE (pod-bearing) states are refined, under-implementation and
+# awaiting-review (internal/stage/liveness.go:18-21). merged and deployed are
+# operator-driven. new is the operator's own triage pass.
+new
+refined
+under-implementation
+awaiting-review
+merged
+deployed
+done
 rejected
-failed
-parked
 
-## stageReason
-# contract F.5 - closed set. "pod-not-ready" is EXPLICITLY NOT a member (fix
-# V7-7): a never-Ready pod respawns, it does not terminate; the terminal is
-# pod-recreation-exhausted. "head-moving" IS a member (fix M3-9).
+## state:exempt-metrics
+# `state` is an OVERLOADED label name, same trap as `kind` below. On the Task
+# family it is the 8-value enum above; on these it means something else, so the
+# closed-set sweep must not be applied to them. The default is to CHECK.
+#
+# queue_metrics.go: state = the QueuedEvent's own lifecycle bucket
+# (Queued|Admitted|...), not a Task state.
+operator_queue_age_seconds
+# kubelet volume manager: state = desired_state_of_world|actual_state_of_world,
+# the two halves of the volume reconciler's world view (alerts/tatara-nodes.yaml).
+volume_manager_total_volumes
+
+## stateReason
+# internal/stage/stage.go - the vocabulary of status.stateReason, which is ONLY
+# ever stamped on the two terminal states. It is RejectReasons (6, mandatory on
+# `rejected`) + DoneReasons (2, optional on `done` - most deliveries carry no
+# reason at all). It is DISJOINT from parkReason: the 28 park reasons belong to a
+# different field with its own enum, and stage.Enter refuses a cross-over.
+declined
+false-positive
+tracked-elsewhere
+issue-closed
+mr-closed-externally
+mr-taken-over
+doc-timeout
+mr-merged-externally
+
+## parkReason
+# internal/stage/stage.go:110 ParkReasons - the 28-member vocabulary of
+# status.parkReason, verbatim, in source order. This is where every reason that
+# used to be a `failed` or `parked` stageReason went: since #521 a failure PARKS,
+# so operator_task_parked_total{parkReason} is the ONLY counter of a failure the
+# platform has.
+#
+# "pod-not-ready" is EXPLICITLY NOT a member (fix V7-7): a never-Ready pod
+# respawns, it does not terminate. Neither are the 6 reject reasons or the 2 done
+# reasons - those are stateReason values, above.
 backlog-sweep
 triage-stalled
 name-too-long
@@ -56,10 +110,52 @@ object-too-large
 fold-adoption-unverified
 admission-starved
 agent-contract-mismatch
-doc-timeout
 operator-error
 head-moving
 handoff-stalled
+ownership-lost
+merge-auth-refused
+ci-red
+ci-blocked
+
+## stage
+# `stage` SURVIVED v2.0.0 on exactly two metrics, with two different meanings,
+# neither of which is the dead 16-stage enum:
+#   operator_stage_drift_total{stage}  - internal/obs/stage_metrics.go:487. The
+#     CACHED (stale) task state a reconcile was about to derive an edge from, so
+#     its values are the 8-state enum. Confirmed live 2026-08-08.
+#   operator_tasks_minted_per_sweep{project,stage} - internal/obs/sweep_metrics.go:24.
+#     The MINT CLASS, values active|parked. Exempted below rather than unioned in,
+#     so a Task state cannot be silently accepted there.
+# The old F.1 values (triaging, brainstorming, clarifying, investigating, refining,
+# approved, implementing, reviewing, merging, deploying, delivered, documenting,
+# failed, parked) are GONE. Do not restore them.
+new
+refined
+under-implementation
+awaiting-review
+merged
+deployed
+done
+rejected
+
+## stage:exempt-metrics
+# sweep_metrics.go: stage = the sweep's MINT CLASS (active|parked), i.e. whether
+# the pass minted working Tasks or zero-cost backlog owners - never a Task state.
+operator_tasks_minted_per_sweep
+
+## stageReason
+# RETIRED by tatara-operator v2.0.0 (#521): the label no longer exists on any
+# metric. The section is kept, deliberately EMPTY, so that any expression still
+# selecting a stageReason value fails CI loudly instead of being waved through by
+# an absent section. Its members moved to parkReason and stateReason above.
+#
+# THE NEGATIVE-MATCHER TRAP THIS SECTION EXISTS TO CATCH (#97): a POSITIVE matcher
+# on a dead label selects nothing and reports OK forever, but a NEGATIVE one
+# (stageReason!~"a|b") matches EVERY series, because a series with no stageReason
+# label trivially satisfies it. "Operator task park spike" spent 2026-08-08 firing
+# on the benign parks its own summary said it excluded, for exactly that reason.
+# Audit every negative matcher separately after any label rename.
 
 ## kind
 # contract A.4 - Task.spec.kind (the ORIGIN kind, immutable, baked into the
@@ -73,9 +169,15 @@ review
 documentation
 
 ## agent_kind
-# contract F.2 - which agent kind each pod-spawning stage spawns. Derived from
-# the stage table (triaging/approved/merging/deploying/delivered/rejected/failed/
-# parked spawn no pod, so they have no agent_kind value).
+# internal/stage/liveness.go AgentKindFor - which agent kind runs in a given
+# state. Only the three LIVE states spawn a pod, so new/merged/deployed/done/
+# rejected have no agent_kind value at all (AgentKindFor returns "" for them,
+# which is a FAIL-CLOSED, not an oversight).
+#
+# `clarify` is retained here ONLY because Task.spec.kind values of `clarify` are
+# still live on the cluster from before v2.0.0; the clarify AGENT kind itself was
+# deleted by #521 ("its three decisions became action values on the implement
+# outcome"). Drop it once no clarify-kind Task remains.
 brainstorm
 clarify
 incident

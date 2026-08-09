@@ -1014,3 +1014,103 @@ PR/push triggers.
   the silent-green family, and it is not lintable from inside this repo.
   **Merge order matters:** the new rule's `runbook_url` anchor makes `check_runbook_urls.py`
   fail until tatara-documentation@main declares it, so the docs PR merges FIRST.
+- 2026-08-08 (#97): tatara-operator v2.0.0 renamed stage -> state and this repo's CI could
+  not see it. `check_metric_provenance.py` validates alerts/dashboards against a snapshot
+  COMMITTED HERE, so a producer-side rename can never fail this build; the only check that
+  could was `reconcile_metric_provenance.py`, whose nightly reverse sweep did flag
+  `operator_task_stage`/`_age_seconds` as stale - but that runs at 03:23 UTC, i.e. inside
+  the nightly Grafana blackout window of #94. The 9 CD/lifecycle rules had already been
+  Normal(NoData) for 40 minutes before anyone looked. Verified the whole new vocabulary
+  against `git show origin/main:internal/obs/*.go` + `internal/stage/stage.go` AND against
+  live Prometheus rather than the issue's summary table; two of the issue's own claims did
+  not survive that (`operator_conversing_pods` is referenced NOWHERE in this repo, and
+  `operator_tasks_minted_per_sweep{stage}` genuinely KEPT its `stage` label with values
+  active|parked, so those two dashboard panels were correctly left alone).
+- 2026-08-08 (#97): a POSITIVE matcher on a renamed label goes silently OK; a NEGATIVE one
+  (`stageReason!~"a|b"`) matches EVERY series, because a series lacking the label trivially
+  satisfies it. Same rename, opposite failure, and only the loud half got noticed. Audit
+  negative matchers separately after any label rename - `## stageReason` in
+  stage_values_allowlist.txt is now kept deliberately EMPTY so any surviving reference
+  fails CI instead of being waved through by a missing section.
+- 2026-08-08 (#97): `operator_task_state_age_seconds{task,state,kind}` carries NO park
+  dimension, and the emit site sets it for every Task regardless of parkReason
+  (project_controller.go:820-833). Park being orthogonal in v2.0.0 therefore DESTROYED the
+  three stage-age wedge rules: a Task parked(awaiting-human) is indistinguishable from a
+  wedged one, and parked(backlog-sweep) never ages out at all (F.4's one deadline
+  exemption), so any threshold under ParkRetention (7d) false-fires. Resolved per rule
+  rather than uniformly - triage/approved moved onto `operator_task_parked_total`
+  (counters have no such ambiguity), "pod stage wedged" kept the gauge but at 8d, and
+  "human-wait stage wedged" is PAUSED. DO NOT re-tighten those thresholds; the unblock is
+  the operator emitting a park-age gauge or adding parkReason to the state-age gauge.
+- 2026-08-08 (#97): rule NAMES are load-bearing and were all preserved. check_runbook_urls.py
+  derives the docs anchor from the rule name, so renaming a rule needs a tatara-documentation
+  PR to land FIRST. That is also why the three NEW rules in this change fail that check
+  today - see the change's own note; it is the guard working, not a defect.
+- 2026-08-08 (#95): the pod-pool rule's `5.999` was a hand-copied sum-of-caps that was
+  already false the day it was written and describes an aggregate the operator does not
+  enforce on (admission is per (project,class)). Replaced with
+  `operator_admission_blocked_total{reason="pool_full"}`, which carries the refusal itself
+  and therefore encodes no capacity constant at all. The general lesson, and the reason the
+  literal was removed rather than corrected: a cross-repo coupling expressed as a comment
+  saying "bump both in the same change" has never once held here.
+- 2026-08-08 (#94): a detector for an outage that stops Grafana evaluating can only fire on
+  the RECOVERY edge, so it must be a counter `increase()` over a window longer than the
+  outage - never an instant gauge (Grafana is unscrapeable exactly while saturated) and
+  never a long `for:` (no evaluations happen during the blackout to accumulate Pending
+  time). Also: `grafana_database_conn_max_open` reads 0 on this deployment, which in Go's
+  database/sql means UNLIMITED - so there is no saturation RATIO to alert on, and the pool
+  never waits, it just opens connections until Postgres refuses with 53300.
+- 2026-08-08 (#93/#98): there is NO series that says "memory is intentionally disabled for
+  project X". The memory-optional gate added to three rules INFERS it from
+  `operator_memory_stacks{project,phase=~"Ready|Provisioning|Degraded|Failed"}`, which
+  works both ways a disable could land (updateMemoryStackCounts SKIPS a project whose
+  Status.Memory is nil, so the series vanishes; or a future phase outside the set becomes
+  current, so all four read 0). It is an inference, not a contract - if the operator ever
+  adds an explicit signal, switch to it.
+- 2026-08-08 (#93): `check_metric_provenance.py` strips label-selector bodies with
+  `\{[^}]*\}`, so a `{n,m}` REGEX QUANTIFIER inside a label VALUE truncates the strip and
+  the checker mis-reads the remainder as a bare metric name. Cost an hour on the new
+  coverage rule's pod regex. Avoid brace quantifiers in alert PromQL; the rule now selects
+  on `created_by_name=~"mem-[a-z0-9]+-[0-9a-f]+"` instead, which is also stabler across
+  pod restarts.
+- 2026-08-08 (#97): "Operator task failure spike" (1h) and "Operator task park spike" (3h)
+  now deliberately overlap on `operator_task_parked_total`. #521 collapsed `failed` and
+  `parked` into one counter, so a burst detector and a trickle detector on it cannot be
+  made disjoint without inventing a distinction the operator no longer draws. Same shape as
+  the error log burst/recurring pair in alerts/tatara-logs.yaml. Do not "dedupe" by
+  deleting one.
+- 2026-08-09 (#100): the label NAME was the one dimension of a PromQL selector nothing
+  guarded. `check_metric_provenance.py`'s value sweep hard-codes its own four label names
+  (`stageReason|stage|kind|agent_kind`), so `stage` appearing in that regex read as "stage is
+  checked" when only its VALUES ever were - and when operator v2.0.0 renamed stage -> state
+  while KEEPING `operator_task_terminal_total`, 5 rules selected a label that cannot exist on
+  a metric that does, with every check green. New `check_label_provenance.py` derives each
+  metric's declared label set from the `[]string{...}` closing argument of the same
+  constructor call `reconcile_metric_provenance.py` already parses for the name, off the same
+  clones - paren-matched, not line-windowed, because the slice sits after a Help string that
+  can run several concatenated lines. It FAILS CLOSED (clone failure, undeclared metric, or a
+  label slice built from a variable are all errors, not skips) precisely because both earlier
+  guards shipped reporting OK when they could not see. Measured on main: 34 findings - 20
+  label-name, 14 dead-metric - all cleared by #99. It also covers `by (...)` when the binding
+  is unambiguous, which found the one thing #99 does NOT fix: "Operator triage stage wedged"
+  groups `operator_task_parked_total{state,parkReason}` `by (kind)`, a label it has never
+  carried, so the grouping is a silent no-op. Reported on #99 rather than fixed here - those
+  lines do not exist on main.
+- 2026-08-09 (tatara-operator#558): "Tatara operator error recurring" (alerts/tatara-logs.yaml) scoped
+  its Loki selector to `container="tatara-operator"`. The operator launches each repo's ingest Job
+  under its own `app="tatara-operator"` label (only `container`/`component`/`pod` differ), so the
+  ingest binary's `ingest failed` ERROR lines (container="ingest", a different binary entirely -
+  internal/ingest in tatara-memory-repo-ingester) counted against a rule meant to police the operator's
+  own reconcile loop. Measured over 24h: 32 `ingest failed` lines alone cleared the rule's >=2/hour bar,
+  and after the operator's own ERROR classes were fixed it was the only msg still able to trip it.
+  Verified `container` is a genuine top-level Loki label on this datasource (list_loki_label_names) and
+  that both streams carry it with distinct values (query_loki_logs), so the new selector satisfies the
+  label-NAME provenance guard (tatara-observability#101, not yet merged). Did NOT add a dedicated Loki
+  rule for the ingest Job's ERROR lines: alerts/tatara-ingester.yaml already covers that failure mode
+  with better-labelled Prometheus signal ("Tatara ingest job failing", "Tatara ingest run failure ratio
+  high", "Repository ingest stale", "Repository stuck in failing ingest state") that attributes to a
+  project/repo and to full/incremental mode - a raw ERROR-log count keyed only on `msg` would be a
+  strictly worse duplicate. Also scoped the sibling "Tatara operator error log burst" (same file,
+  5m/threshold 20) to `container="tatara-operator"`: tatara-operator#558's own fix-target table names
+  both rules under the same selector defect. Its threshold is nowhere near ingest's ~1.3 lines/hr
+  volume so it was not observed firing from this cause, but the selector was wrong regardless.

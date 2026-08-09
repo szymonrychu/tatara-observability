@@ -23,10 +23,16 @@ tatara_exec_err_justification: >-
 # together - `or vector(0)` alone (old default OK) or the state flip alone (no
 # `or vector(0)`) each break one side of this.
 rules:
+  # SCOPED TO container="tatara-operator" (tatara-operator#558, fix target 5, which names
+  # this rule alongside "Tatara operator error recurring" below - same {app="tatara-operator"}
+  # selector, same cross-binary exposure: the ingest Job's pods share app="tatara-operator"
+  # with the operator Deployment and differ only by container/component/pod. Not currently
+  # OBSERVED to fire from ingest volume alone (~1.3 ingest-failed lines/hr, nowhere near this
+  # rule's 20-in-5m bar), but the selector was wrong regardless and #558 calls it out by name.
   - name: "Tatara operator error log burst"
     queries:
       - expression: |
-          sum(count_over_time({namespace="tatara", app="tatara-operator"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | level="ERROR" [5m])) or vector(0)
+          sum(count_over_time({namespace="tatara", app="tatara-operator", container="tatara-operator"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | level="ERROR" [5m])) or vector(0)
         datasource_uid: "efihqbqlmroqod"
         query_type: "loki"
     math_operator: ">"
@@ -35,7 +41,7 @@ rules:
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-operator-error-log-burst"
-      summary: "tatara-operator logged {{ index $values \"C\" }} ERROR lines in 5m (>20). Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\"} | pattern `<_> <_> <_> <body>` | line_format `{{\"{{\"}}.body{{\"}}\"}}` | json | level=\"ERROR\"."
+      summary: "tatara-operator logged {{ index $values \"C\" }} ERROR lines in 5m (>20). Scoped to container=\"tatara-operator\" so the ingest Job's own ERROR lines (container=\"ingest\", see alerts/tatara-ingester.yaml) cannot trip this rule. Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\", container=\"tatara-operator\"} | pattern `<_> <_> <_> <body>` | line_format `{{\"{{\"}}.body{{\"}}\"}}` | json | level=\"ERROR\"."
     labels:
       homelab: "true"
       system: "tatara"
@@ -78,10 +84,39 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "warning"
+  # SPLIT PER PROJECT 2026-08-08 (tatara-observability#93). It was a single namespace-wide
+  # sum across every Project's memory stack, which made its coverage a per-Project LOTTERY
+  # decided by node placement: the rule looked fleet-wide but could only see the Projects
+  # whose memory pod happened to sit on one of the 3-of-5 nodes that run a log collector.
+  # A Project on a blind node contributed a structural 0 that is indistinguishable from
+  # health, and the `or vector(0)` guard - correctly there to tell a real zero from a Loki
+  # outage - made the exclusion invisible too. At the time #93 was filed mem-mtg was the
+  # excluded one, which is precisely the Project three open trackers were being diagnosed
+  # against; when this fix was written all THREE memory API pods were on blind nodes
+  # (mem-tatara on nas-d0w363i, mem-infrastructure and mem-mtg on worker-jtw3f33), so the
+  # aggregate was reading a clean zero for the entire fleet.
+  #
+  # `project` comes from the `instance` stream label (mem-tatara, mem-infrastructure,
+  # mem-mtg) via label_format, verified live against this datasource on 2026-08-08 - it
+  # yields exactly {tatara, infrastructure, mtg}. Deliberately NOT derived from `pod`: the
+  # pod name carries a ReplicaSet hash that changes on every rollout.
+  #
+  # The threshold is unchanged at 20, which makes it STRICTER than before: 20 ERROR lines
+  # in 5m now has to come from ONE Project rather than from all of them added together.
+  #
+  # `or on() vector(0)` (not the bare `or vector(0)`) because this is now a `sum by (...)`:
+  # same form as "Tatara approval refusals elevated" and "Tatara operator error recurring"
+  # in this file, and required so the fabricated zero matches an empty grouped result.
+  #
+  # SPLITTING IS ONLY HALF THE FIX. It stops one Project masking another, but a Project
+  # whose pod ships nothing STILL reads as a healthy zero here, and no Loki query can
+  # detect its own blind spot. That half is "Tatara memory logs unscraped for a project"
+  # below, which reads Prometheus. The two rules are a pair: this one is only trustworthy
+  # for a Project the other one is silent about.
   - name: "Tatara memory error log burst"
     queries:
       - expression: |
-          sum(count_over_time({namespace="tatara", app="tatara-memory"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | level="ERROR" [5m])) or vector(0)
+          sum by (project) (count_over_time({namespace="tatara", app="tatara-memory"} | label_format project=`{{ trimPrefix "mem-" .instance }}` | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | level="ERROR" [5m])) or on() vector(0)
         datasource_uid: "efihqbqlmroqod"
         query_type: "loki"
     math_operator: ">"
@@ -90,7 +125,7 @@ rules:
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-memory-error-log-burst"
-      summary: "tatara-memory logged {{ index $values \"C\" }} ERROR lines in 5m (>20). Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-memory\"} | pattern `<_> <_> <_> <body>` | line_format `{{\"{{\"}}.body{{\"}}\"}}` | json | level=\"ERROR\"."
+      summary: "tatara-memory logged {{ index $values \"C\" }} ERROR lines in 5m (>20) for project {{ index $labels \"project\" }}. This rule is PER-PROJECT and only covers Projects whose memory pod is on a node that runs a log collector - check \"Tatara memory logs unscraped for a project\" before reading any OTHER project's silence as health. Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-memory\", instance=\"mem-{{ index $labels \"project\" }}\"} | pattern `<_> <_> <_> <body>` | line_format `{{\"{{\"}}.body{{\"}}\"}}` | json | level=\"ERROR\"."
     labels:
       homelab: "true"
       system: "tatara"
@@ -103,10 +138,28 @@ rules:
   # message masking a quiet one - verified safe to group by msg: only 11 distinct ERROR
   # msg values over a live 24h window (2026-07-19, via grafana MCP against datasource
   # efihqbqlmroqod), so cardinality is bounded and does not need topk/coarsening.
+  # SCOPED TO container="tatara-operator" (tatara-operator#558). The bare
+  # {namespace="tatara", app="tatara-operator"} selector also matches the ingest Job's pods:
+  # the operator launches each repo's ingest Job under its own `app=tatara-operator` label
+  # (only `container`/`component`/`pod` differ - verified live via query_loki_logs against
+  # this datasource, 2026-08-09), so `ingest failed` ERROR lines from container="ingest" (a
+  # completely different binary, internal/ingest in tatara-memory-repo-ingester) counted
+  # against a rule that is supposed to be about the operator's own reconcile loop. Measured
+  # over 24h: 32 `ingest failed` lines from container="ingest" alone would satisfy this
+  # rule's >=2-per-hour bar on their own, and after the operator's own ERROR classes were
+  # fixed (tatara-operator#558) `ingest failed` was the only msg still able to trip it.
+  # container is a genuine top-level Loki label here (confirmed via list_loki_label_names),
+  # so this satisfies the label-NAME provenance guard (tatara-observability#101). Ingest
+  # Job failures are not dropped, just out of this rule's scope - they already have richer,
+  # per-repo Prometheus coverage in alerts/tatara-ingester.yaml ("Tatara ingest job failing",
+  # "Tatara ingest run failure ratio high", "Repository ingest stale", "Repository stuck in
+  # failing ingest state"), which attribute failures to a project/repo and to full/incremental
+  # mode - strictly better signal than a raw ERROR-log count keyed only on `msg` could give.
+  # A duplicate Loki-log rule for the ingest Job was considered and rejected as redundant.
   - name: "Tatara operator error recurring"
     queries:
       - expression: |
-          sum by (msg) (count_over_time({namespace="tatara", app="tatara-operator"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | level="ERROR" [1h])) or on() vector(0)
+          sum by (msg) (count_over_time({namespace="tatara", app="tatara-operator", container="tatara-operator"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | level="ERROR" [1h])) or on() vector(0)
         datasource_uid: "efihqbqlmroqod"
         query_type: "loki"
     math_operator: ">="
@@ -115,7 +168,7 @@ rules:
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-operator-error-recurring"
-      summary: "tatara-operator logged {{ index $values \"C\" }} ERROR line(s) with msg=\"{{ index $labels \"msg\" }}\" in the last 1h (>=2). Below the 20-in-5m burst threshold but recurring - a chronic trickle. Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\"} | pattern `<_> <_> <_> <body>` | line_format `{{\"{{\"}}.body{{\"}}\"}}` | json | level=\"ERROR\" | msg=\"{{ index $labels \"msg\" }}\"."
+      summary: "tatara-operator logged {{ index $values \"C\" }} ERROR line(s) with msg=\"{{ index $labels \"msg\" }}\" in the last 1h (>=2). Below the 20-in-5m burst threshold but recurring - a chronic trickle. Scoped to container=\"tatara-operator\" so the ingest Job's own ERROR lines (container=\"ingest\", see alerts/tatara-ingester.yaml) cannot trip this rule. Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\", container=\"tatara-operator\"} | pattern `<_> <_> <_> <body>` | line_format `{{\"{{\"}}.body{{\"}}\"}}` | json | level=\"ERROR\" | msg=\"{{ index $labels \"msg\" }}\"."
     labels:
       homelab: "true"
       system: "tatara"
@@ -201,7 +254,83 @@ rules:
     exec_err_state: "Error"
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-log-collector-node-coverage-incomplete"
-      summary: "{{ index $values \"C\" }} Ready node(s) have no ready log-collector pod, so every pod scheduled there ships NO logs to Loki. Every Loki-based rule in alerts/tatara-logs.yaml is blind on those nodes and reports a clean zero regardless - an empty Loki result for a pod there PROVES NOTHING. Find them: compare `count by (node) (kube_node_info)` against `count by (node) (kube_pod_info{namespace=\"monitoring\", created_by_name=\"promtail\"})`, then check the collector DaemonSet's nodeSelector/tolerations against those nodes' taints. This is an infra fix (the collector is not deployed by any tatara-* repo); until it lands, treat namespace-wide Loki queries as covering only part of the fleet."
+      summary: "IF THIS ARRIVED AS alertname=DatasourceError, STOP AND READ annotations.Error FIRST: the rest of this summary is the FIRING-case template rendered against an empty result set and every number in it is a lie (counts read 0, label values read empty). Grafana could not evaluate the rule at all. If Error mentions `pq:` or SQLSTATE 53300 (\"remaining connection slots are reserved\"), the failure is GRAFANA'S OWN backing Postgres (grafana-database-cluster, ns monitoring) - not this rule's datasource, not tatara, and not anything in the query below. See \"Grafana alert rule evaluation failing\" in alerts/tatara-grafana.yaml; that is the detector for it, and it recurs nightly around 03:30 UTC. OTHERWISE: {{ index $values \"C\" }} Ready node(s) have no ready log-collector pod, so every pod scheduled there ships NO logs to Loki. Every Loki-based rule in alerts/tatara-logs.yaml is blind on those nodes and reports a clean zero regardless - an empty Loki result for a pod there PROVES NOTHING. Find them: compare `count by (node) (kube_node_info)` against `count by (node) (kube_pod_info{namespace=\"monitoring\", created_by_name=\"promtail\"})`, then check the collector DaemonSet's nodeSelector/tolerations against those nodes' taints. This is an infra fix (the collector is not deployed by any tatara-* repo); until it lands, treat namespace-wide Loki queries as covering only part of the fleet. For the tatara memory stack the exclusion is SYSTEMATIC, not a pod unluckily landing: tatara-operator's componentAffinity (internal/memory/scheduling.go) deliberately spreads memory-stack pods across nodes for availability and is coverage-unaware, so maximising spread also maximises the chance a given Project's memory pod is blind. \"Tatara memory logs unscraped for a project\" reports which Projects that currently costs."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "observability"
+      severity: "warning"
+  # THE PER-PROJECT HALF OF THE COVERAGE GAP (tatara-observability#93). The meta-rule above
+  # counts BLIND NODES; this one names the PROJECTS that blindness actually costs, which is
+  # the question every Loki-based memory rule needs answered before its zero can be read as
+  # health. It is the companion to "Tatara memory error log burst" above: that rule is only
+  # trustworthy for a project this one is silent about.
+  #
+  # PROMETHEUS, not Loki, for the same reason the meta-rule is: a Loki query cannot detect
+  # its own blind spot - a pod that ships nothing has no stream to select, so an unscraped
+  # project and a healthy project are the same empty result. kube-state-metrics is the only
+  # surface that knows about a pod on a node the collector never reached.
+  #
+  # THE EXPRESSION, term by term:
+  #   - it selects on created_by_name, NOT pod. The memory API SERVER's ReplicaSet is named
+  #     `mem-<project>-<rs-hash>`, and `mem-[a-z0-9]+-[0-9a-f]+` (Prometheus regexes are
+  #     fully anchored) matches that and nothing else in the stack: mem-*-lightrag-<hash>
+  #     fails because the middle segment would have to contain a literal `-`, and
+  #     mem-*-pg / mem-*-neo4j are StatefulSets (created_by_kind filters them out, and
+  #     `pg`/`neo4j` are not hex anyway). No alert rule selects the neo4j/lightrag/pg log
+  #     streams, so their coverage is not this rule's business.
+  #     Using created_by_name rather than pod also keeps the name stable across restarts -
+  #     only the ReplicaSet hash moves, and that is what the capture discards.
+  #   - label_replace lifts the project out of that name, because kube_pod_info carries no
+  #     project label. Verified live 2026-08-08: it yields exactly {tatara, infrastructure,
+  #     mtg}. NO `{n,m}` REGEX QUANTIFIERS ANYWHERE IN THIS EXPRESSION, deliberately:
+  #     scripts/check_metric_provenance.py strips label-selector bodies with `\{[^}]*\}`,
+  #     so a brace quantifier inside a label VALUE truncates the strip and makes the
+  #     checker mis-read the remainder as a bare metric name.
+  #   - `unless on (node)` drops every memory pod whose node DOES run a collector. What is
+  #     left is exactly the blind ones. The daemonset alternation mirrors the meta-rule's,
+  #     so swapping promtail for alloy/vector cannot silently turn this into a permanent
+  #     firing.
+  #   - the operator_memory_stacks term is the MEMORY-OPTIONAL GATE, identical in form and
+  #     rationale to the one on "Repository ingest stale" in alerts/tatara-ingester.yaml:
+  #     a project with no memory stack has no memory logs to be blind about, and must read
+  #     as NOT APPLICABLE rather than permanently broken once the subsystem is disabled.
+  #     It reads false both ways a disable could land (series absent for the project, or a
+  #     future phase outside this set becoming current). See MEMORY.md 2026-08-08.
+  #
+  # Verified live 2026-08-08 (grafana MCP, uid=prometheus): this exact expression returns
+  # {tatara=1, infrastructure=1, mtg=1} - all three memory API pods are currently on the
+  # two nodes that have never shipped a line.
+  #
+  # PROMETHEUS RULE IN A LOKI FILE, so it opts OUT of this file's Loki-shaped defaults the
+  # same way the meta-rule above does: a query error here is a Prometheus/Grafana problem,
+  # not evidence of a coverage gap, and NoData means kube-state-metrics is gone rather than
+  # that every project is covered.
+  #
+  # for: 30m rides out a rollout that reschedules a memory pod. The condition it reports is
+  # structural (the operator's anti-affinity is coverage-unaware by design), so a slow rule
+  # loses nothing.
+  - name: "Tatara memory logs unscraped for a project"
+    queries:
+      - expression: |
+          count by (project) (
+            (label_replace(
+               kube_pod_info{namespace="tatara", created_by_kind="ReplicaSet", created_by_name=~"mem-[a-z0-9]+-[0-9a-f]+"},
+               "project", "$1", "created_by_name", "mem-(.+)-[0-9a-f]+")
+             unless on (node)
+             count by (node) (kube_pod_info{namespace="monitoring", created_by_name=~"promtail|alloy|grafana-agent|vector|fluent-bit"}))
+            and on (project)
+            (max by (project) (operator_memory_stacks{namespace="tatara",job="tatara-operator",phase=~"Ready|Provisioning|Degraded|Failed"}) > 0)
+          )
+    math_operator: ">"
+    threshold: 0
+    for: 30m
+    decimal_points: 0
+    no_data_state: "NoData"
+    exec_err_state: "Error"
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-memory-logs-unscraped-for-a-project"
+      summary: "Project {{ index $labels \"project\" }} has {{ index $values \"C\" }} tatara-memory API pod(s) on a node with no log collector, so it ships NO logs to Loki. \"Tatara memory error log burst\" therefore reports a structural zero for this project and an empty Loki result for it PROVES NOTHING - do not read it as health, and re-read any investigation that concluded from it. This is not a pod unluckily landing: tatara-operator's componentAffinity (internal/memory/scheduling.go) spreads memory-stack pods across nodes for availability and is coverage-unaware, so on a cluster where only 3 of 5 nodes run a collector the spread systematically produces this. Find the pod and its node: count by (node, pod) (kube_pod_info{namespace=\"tatara\", pod=~\"mem-.*\"}). The real fix is infra - give the collector DaemonSet the toleration set that prometheus-prometheus-node-exporter uses to reach 5/5 - and is tracked by \"Log collector node coverage incomplete\" in this same file. A project with no memory stack is not evaluated by this rule at all."
     labels:
       homelab: "true"
       system: "tatara"

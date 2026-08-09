@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""Tests for lint_alert_rules. Run: python3 -m unittest scripts.test_lint_alert_rules
-or, from the scripts/ dir: python3 -m unittest test_lint_alert_rules."""
+"""Tests for lint_alert_rules. Run either
+`python3 -m unittest discover scripts -p 'test_*.py'` (what CI runs) or, from the
+scripts/ dir, `python3 -m unittest test_lint_alert_rules`. NOT
+`python3 -m unittest scripts.test_...`: this module imports its subject by bare
+name, so scripts/ has to be on sys.path."""
 
 import pathlib
 import tempfile

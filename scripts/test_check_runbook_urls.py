@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Tests for check_runbook_urls. Run:
-python3 -m unittest scripts.test_check_runbook_urls or, from the scripts/ dir:
-python3 -m unittest test_check_runbook_urls.
+"""Tests for check_runbook_urls. Run either
+`python3 -m unittest discover scripts -p 'test_*.py'` (what CI runs) or, from the
+scripts/ dir, `python3 -m unittest test_check_runbook_urls`. NOT
+`python3 -m unittest scripts.test_...`: this module imports its subject by bare
+name, so scripts/ has to be on sys.path.
 
 No network calls: the cross-repo half is exercised by feeding parse_declared_anchors a
 markdown string, never a real clone."""

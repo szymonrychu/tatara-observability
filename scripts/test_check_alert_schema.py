@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""Tests for check_alert_schema. Run: python3 -m unittest scripts.test_check_alert_schema
-or, from the scripts/ dir: python3 -m unittest test_check_alert_schema."""
+"""Tests for check_alert_schema. Run either
+`python3 -m unittest discover scripts -p 'test_*.py'` (what CI runs) or, from the
+scripts/ dir, `python3 -m unittest test_check_alert_schema`. NOT
+`python3 -m unittest scripts.test_...`: this module imports its subject by bare
+name, so scripts/ has to be on sys.path."""
 
 import pathlib
 import tempfile

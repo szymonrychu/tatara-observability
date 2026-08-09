@@ -19,6 +19,12 @@ name: alert-rules-lint
 # script shallow-clones the 4 producer repos at main and fails on any allowlist entry
 # they no longer emit. A metric removal never touches this repo's paths-filtered
 # triggers below, so it also runs on a nightly schedule.
+#
+# #100 added the third dimension to that same script. A PromQL selector has three
+# (metric name, label name, label value) and the label NAME had never been guarded at
+# all: five rules selected operator_task_terminal_total{stage=...} on a metric labelled
+# {kind,state,stateReason} since v2.0.0 and both provenance guards reported OK. Both
+# label dimensions are now derived per run from the clone this job already takes.
 
 on:
   pull_request:
@@ -35,7 +41,7 @@ on:
       - "scripts/reconcile_metric_provenance.py"
       - "scripts/test_reconcile_metric_provenance.py"
       - "scripts/metrics_allowlist.txt"
-      - "scripts/stage_values_allowlist.txt"
+      - "scripts/label_exemptions.txt"
       - "scripts/check_runbook_urls.py"
       - "scripts/test_check_runbook_urls.py"
       - ".github/workflows/alert-rules-lint.yml"
@@ -54,7 +60,7 @@ on:
       - "scripts/reconcile_metric_provenance.py"
       - "scripts/test_reconcile_metric_provenance.py"
       - "scripts/metrics_allowlist.txt"
-      - "scripts/stage_values_allowlist.txt"
+      - "scripts/label_exemptions.txt"
       - "scripts/check_runbook_urls.py"
       - "scripts/test_check_runbook_urls.py"
       - ".github/workflows/alert-rules-lint.yml"
@@ -97,17 +103,27 @@ jobs:
       - name: check alert keys against the module schema
         run: python3 scripts/check_alert_schema.py
 
-      # Covers alerts/*.yaml AND dashboards/*.json. A dashboard panel on a deleted metric
-      # renders empty, silently, forever, with no CI signal at all - the same silent-green
-      # failure class as a dark alert rule, one surface over.
+      # Dimension 1 of 3: the metric NAME, against scripts/metrics_allowlist.txt. Covers
+      # alerts/*.yaml AND dashboards/*.json. A dashboard panel on a deleted metric renders
+      # empty, silently, forever, with no CI signal at all - the same silent-green failure
+      # class as a dark alert rule, one surface over. Since #100 this script is NAME-only:
+      # the label VALUE sweep it used to run moved into the step below, because it was a
+      # membership test against a hand-maintained snapshot and the snapshot had rotted
+      # across two contract versions without a single check going red.
       - name: check metric provenance (alerts + dashboards)
         run: python3 scripts/check_metric_provenance.py
 
-      # Reverse-drift gate (issue #57): the check above only validates alerts/dashboards
-      # against the allowlist. This validates the allowlist against the 4 producer repos'
-      # live source, and fails on any entry none of them emit any more. Clone failures
-      # (network blip, GitHub outage) are a neutral skip inside the script itself, never
-      # a hard failure here.
+      # Dimensions 2 and 3, plus the reverse direction of dimension 1. This shallow-clones
+      # the 4 producer repos at main and derives, from the SAME Prometheus constructor call:
+      # the metric names they emit (issue #57 - fails on any allowlist entry none of them
+      # emit any more) and each metric's declared []string{...} label set (#100 - fails on
+      # any alert/dashboard selector naming a label its emitting metric does not carry).
+      # The closed-set label VALUES come off the operator CRD's +kubebuilder:validation:Enum=
+      # markers in the same clone, so nothing about the label contract is copied into this
+      # repo any more. Clone failures (network blip, GitHub outage) are a neutral skip inside
+      # the script itself, never a hard failure here, and a metric whose constructor was not
+      # located - or whose label slice was built from a variable - is excluded from both
+      # label checks rather than guessed at.
       - name: reconcile metric provenance against producer repos
         run: python3 scripts/reconcile_metric_provenance.py
 

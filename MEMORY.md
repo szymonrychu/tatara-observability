@@ -991,3 +991,57 @@ PR/push triggers.
   `max by (...)` on every other ks-m series used in a join. The pod-network rule's
   documented 0.09-0.28 baseline is unchanged by it (re-measured over 8h). This trap is
   invisible in review: the unhardened expression looks correct and fails only under churn.
+- 2026-08-09 (#100): the LABEL NAME was the third dimension of a PromQL selector and had
+  never been guarded. `operator_task_terminal_total` carries `{kind,state,stateReason}`
+  since v2.0.0; 5 rules were still selecting `{stage="failed"}` / `{stage="parked"}` on it
+  and BOTH provenance guards reported OK - the metric name was emitted, `stage` was one of
+  the four label names the old value sweep knew, and `failed`/`parked` were both still
+  members of the `## stage` section of `stage_values_allowlist.txt`, which was still the
+  pre-#521 16-value enum. The root cause is not snapshot staleness (that is #99's
+  diagnosis, and it explains the OTHER 7 rules, the ones on two REMOVED names): it is that
+  a membership test against a hand-maintained SUPERSET is silent by construction, and no
+  amount of re-running it catches a superset that is too big. All four sections were stale
+  in the same direction, and the file's own "re-run the grep once the operator PR lands"
+  note had stood open across two contract versions (`phase -> stage -> state`).
+  Fix: both label dimensions are now DERIVED, off the clone `reconcile_metric_provenance.py`
+  already takes. The label set is the closing `[]string{...}` argument of the same
+  Prometheus constructor the name parser already anchors on (146/146 operator metrics, and
+  228/228 across all four repos, resolve a literal slice - zero unresolved, so the
+  "skip loudly" path has no live cases). The closed sets come off the operator CRD's
+  `+kubebuilder:validation:Enum=` markers keyed by (struct, field): `TaskSpec.Kind` 7,
+  `TaskStatus.State` 8, `TaskStatus.ParkReason` 28, `TaskStatus.AgentKind` 6. **`stateReason`
+  has NO CRD enum** - it is `RejectReasons` (6) + `DoneReasons` (2) in
+  `internal/stage/stage.go`, resolved through the `const Reason* = "..."` block, so B1
+  needed a second derivation source. `stage_values_allowlist.txt` is now
+  `label_exemptions.txt` and carries no vocabulary at all.
+  Three findings worth keeping:
+  (1) MEASURED 12 dark selectors on main, not the 5 the issue predicted. The extra class
+  is `operator_task_parked_total{stageReason=...}` (that metric is `{state,parkReason}`) in
+  `tatara-cd.yaml`, `tatara-operator.yaml` and `dashboards/operator.json`. 11 are fatal;
+  the 12th is a NEGATIVE matcher, and a negative matcher on an absent label matches EVERY
+  series, so it is a no-op filter, not a dark rule - reported informational, never fatal,
+  because that is also the forward-compat idiom ROADMAP blesses for a matcher written
+  before the producer adds the label (tatara-memory#92's `class`). Its rule
+  ("Operator task park spike") still promises an exclusion it is not making; #99 repoints
+  it anyway.
+  (2) RESTRICTING BOTH CHECKS to metrics whose constructor was located AND whose slice
+  resolved is what makes them quiet: it deletes the whole kube-state-metrics /
+  `volume_manager_total_volumes{state="desired_state_of_world"}` noise class with zero
+  allowlist entries. A metric no tatara repo emits is the stale-NAME check's problem and
+  nothing else's. The one list that IS needed is the infra labels (`job`, `namespace`,
+  `pod`, `service`, `exported_pod`, ...) - without it the check reports ~280 findings on a
+  healthy rule set, which is exactly how a guard gets downgraded to a warning.
+  (3) `stage` binds to the State enum rather than being exempted wholesale (a deliberate
+  deviation from the issue's C1, which asked for three exemptions).
+  `operator_stage_drift_total{stage}` is passed `task.Status.State` verbatim
+  (`task_controller.go:439`), so it is genuinely checkable; only
+  `operator_rest_takeover_error_total` (`mint|ownerref|stamp`) and
+  `operator_tasks_minted_per_sweep` (`active|parked`) are real overloads. Two exemptions,
+  not three - strictly stronger. The derived value sweep then flags exactly one live
+  overload of its own, `operator_queue_age_seconds{state="Queued"}`
+  (`queue_metrics.go:37`, a QueuedEvent state, not a Task state), now exempted.
+  RESIDUAL, stated in CONVENTIONS.md 5.2 and not papered over: after this, a label name and
+  a label value are mechanical, and a rule whose THRESHOLD or SUMMARY describes a mechanism
+  that does not exist is still caught only by a human. Three green dimensions are three
+  green dimensions, not a correct alert. MR #96 reached the same conclusion from the
+  `outcome` label and chose to record it here rather than claim more; so does this.

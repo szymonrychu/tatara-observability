@@ -57,13 +57,17 @@ Planned work not yet started. Move items out when shipped (note in MEMORY.md if 
   `scripts/check_metric_provenance.py` + `scripts/metrics_allowlist.txt` +
   `scripts/stage_values_allowlist.txt` wired into CI as a new build-failure guardrail. See MEMORY.md
   2026-07-12 (the dead-alert class entry) for the full account.
-- `planned`, OPEN before the release train ships (D1, see MEMORY.md 2026-07-12): re-verify
-  `operator_task_terminal_total` survives the operator redesign with `phase` swapped for `stage` +
-  `stageReason` + `kind`. As of this PR the operator worktree still declares the OLD `{kind,phase,reason}`
-  label set (`internal/obs/task_metrics.go:31-33`) - several `tatara-cd.yaml`/`tatara-operator.yaml`
-  rules and both repointed dashboards are built on an UNVERIFIED assumption. Re-run Task 2 step 3's
-  grep against the actual merged operator branch before cutover; if the metric or its labels differ,
-  every rule built on it changes in the same PR (Task 6's documented fallback).
+- `closed by mechanisation` (2026-08-09, #100), was `planned` (D1, see MEMORY.md 2026-07-12):
+  re-verify `operator_task_terminal_total` survives the operator redesign with `phase` swapped for
+  `stage` + `stageReason` + `kind`. This item IS the reason #100 exists. It stood open across TWO
+  contract versions (`phase -> stage -> state`), the hand-verification never ran, and the 5 rules
+  built on the UNVERIFIED assumption read green the whole time: the metric name was emitted and the
+  dead `stage` values were still members of a stale `stage_values_allowlist.txt` superset. It is not
+  closed because someone finally ran the grep; it is closed because there is no grep left to run.
+  `reconcile_metric_provenance.py` re-derives this metric's label set from its own Prometheus
+  constructor on every PR, push and nightly run, and hard-fails on any selector naming a label it
+  does not declare. Do NOT re-add a "re-check when the producer PR lands" note under `scripts/` - if
+  a cross-repo contract needs re-checking by hand, that is the bug, not the process.
 - `planned`: threshold/config coupling not enforced by anything mechanical - the agent-pod saturation
   threshold (`alerts/tatara-operator.yaml`, `5.999` = `2 x maxConcurrentAgents`) hardcodes
   `tatara-helmfile`'s `maxConcurrentAgents: 3` on both Projects. Bumping `maxConcurrentAgents` in
@@ -95,6 +99,20 @@ Planned work not yet started. Move items out when shipped (note in MEMORY.md if 
   fails when the allowlist carries a name none of them emit any more - the hole `check_metric_
   provenance.py` never covered (it only validates alerts/dashboards against the allowlist, not the
   allowlist against reality). See MEMORY.md 2026-07-18.
+- `shipped` (2026-08-09, issue #100): the THIRD dimension. A PromQL selector says three things
+  (metric name, label name, label value) and the label NAME had never been guarded at all - five
+  rules selected `operator_task_terminal_total{stage=...}` on a metric labelled
+  `{kind,state,stateReason}` since v2.0.0 with both guards green. `reconcile_metric_provenance.py`
+  now also reads the closing `[]string{...}` argument of the same constructor it already anchors on,
+  and derives the closed-set label VALUES from the operator CRD's `+kubebuilder:validation:Enum=`
+  markers plus `internal/stage`'s reason slices (`stateReason` has no CRD enum). The value sweep
+  moved out of `check_metric_provenance.py`, which is now NAME-only, and
+  `stage_values_allowlist.txt` became `label_exemptions.txt`, carrying deliberate per-metric
+  exemptions and the infra-label list but no vocabulary. Both label checks apply only to metrics
+  whose constructor was located in a clone and whose slice resolved, which is what keeps the
+  foreign-exporter noise class out without any allowlist. See MEMORY.md 2026-08-09 and
+  CONVENTIONS.md 5.1-5.2. **Not covered and not claimed**: a rule whose threshold or summary
+  describes a mechanism that does not exist is still human-only.
 - `planned`: audit the remaining `alerts/*.yaml` files (`tatara-cd.yaml`, `tatara-ingester.yaml`,
   `tatara-memory.yaml`, `tatara-operator.yaml`, `tatara-quality.yaml`, `tatara-usage-gate.yaml`,
   `tatara-wrapper.yaml`) for the same OK/OK NoData+ExecErr blindness `tatara-logs.yaml` just fixed

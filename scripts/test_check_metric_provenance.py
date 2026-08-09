@@ -8,22 +8,15 @@ import tempfile
 import unittest
 
 from check_metric_provenance import (
+    alert_queries,
     dashboard_queries,
-    label_values,
+    iter_expressions,
     lint_dashboard,
     lint_rule,
-    load_stage_values,
     metric_names,
+    selector_labels,
     template_expr,
 )
-
-_STAGE_VALUES = {
-    "stage": {"failed", "merging", "deploying"},
-    "stageReason": {"merge-blocked", "head-moving"},
-    "kind": {"clarify", "review"},
-    "agent_kind": {"implement", "review"},
-    "kind:exempt-metrics": {"operator_scm_writes_total"},
-}
 
 
 class MetricNamesTest(unittest.TestCase):
@@ -95,112 +88,88 @@ class LintRuleTest(unittest.TestCase):
         self.assertIsNone(lint_rule("alerts/x.yaml", rule, set()))
 
 
-class LabelValuesTest(unittest.TestCase):
-    def test_extracts_single_and_alternation_values_per_metric(self):
-        expr = 'max(operator_task_stage{stage=~"merging|deploying",kind="clarify"})'
+class SelectorLabelsTest(unittest.TestCase):
+    """selector_labels reports EVERY label a selector names, not a fixed four.
+
+    The pre-#100 extractor hardcoded stageReason|stage|kind|agent_kind, so the
+    post-v2.0.0 vocabulary (state, stateReason, parkReason, park_reason) was
+    invisible to it, and no label name was ever validated at all. The consumer
+    (reconcile_metric_provenance) decides which labels it can say anything about;
+    this function just reports what the expression asks for.
+    """
+
+    def test_reports_every_label_with_its_operator_and_metric(self):
+        expr = 'max(operator_task_terminal_total{state=~"done|rejected",kind="refine"})'
         self.assertEqual(
-            label_values(expr),
-            {
-                "operator_task_stage": {
-                    "stage": {"merging", "deploying"},
-                    "kind": {"clarify"},
-                }
-            },
+            sorted(selector_labels(expr)),
+            [
+                ("operator_task_terminal_total", "kind", "=", frozenset({"refine"})),
+                (
+                    "operator_task_terminal_total",
+                    "state",
+                    "=~",
+                    frozenset({"done", "rejected"}),
+                ),
+            ],
         )
 
-    def test_ignores_labels_outside_the_tracked_set(self):
-        expr = 'max(operator_task_stage{stage="failed",namespace="tatara"})'
+    def test_reports_labels_the_old_four_name_regex_could_not_see(self):
+        expr = 'sum(operator_task_parked_total{parkReason="merge-blocked",state="merged"})'
         self.assertEqual(
-            label_values(expr), {"operator_task_stage": {"stage": {"failed"}}}
+            {s.label for s in selector_labels(expr)}, {"parkReason", "state"}
         )
 
-    def test_ignores_grafana_template_variable_values(self):
-        # kind=~"$kind" is a dashboard variable, not a literal label value.
-        expr = 'sum by (kind) (operator_task_terminal_total{kind=~"$kind"})'
-        self.assertEqual(label_values(expr), {})
+    def test_negative_matchers_are_reported_and_flagged_as_such(self):
+        # `!=` was never matched by the pre-#100 regex at all: `!~?` consumes the
+        # "!" and then requires a quote, so `label!="v"` fell through silently.
+        found = sorted(selector_labels('sum(m{a!="x",b!~"y",c="z"})'))
+        self.assertEqual([s.op for s in found], ["!=", "!~", "="])
+        self.assertEqual([s.positive for s in found], [False, False, True])
+
+    def test_only_regex_operators_split_on_the_alternation_bar(self):
+        # A literal `=` value is one value even if it contains a bar.
+        self.assertEqual(
+            selector_labels('sum(m{a="x|y"})')[0].values, frozenset({"x|y"})
+        )
+        self.assertEqual(
+            selector_labels('sum(m{a=~"x|y"})')[0].values, frozenset({"x", "y"})
+        )
+
+    def test_grafana_template_variables_are_dropped(self):
+        # kind=~"$kind" is a dashboard variable, not a literal label value. The
+        # LABEL is still reported - a variable-valued matcher on a dead label name
+        # is exactly as dark as a literal one.
+        found = selector_labels('sum by (kind) (operator_task_terminal_total{kind=~"$kind"})')
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].values, frozenset())
 
     def test_histogram_suffix_resolves_to_the_base_metric(self):
         expr = 'histogram_quantile(0.95, rate(operator_bundle_bytes_bucket{agent_kind="review"}[5m]))'
         self.assertEqual(
-            label_values(expr), {"operator_bundle_bytes": {"agent_kind": {"review"}}}
+            selector_labels(expr),
+            [("operator_bundle_bytes", "agent_kind", "=", frozenset({"review"}))],
         )
 
+    def test_a_selector_with_no_labels_reports_nothing(self):
+        self.assertEqual(selector_labels("sum(operator_task_terminal_total)"), [])
 
-class StageValueLintTest(unittest.TestCase):
-    def test_dead_stage_reason_is_a_violation(self):
-        # pod-not-ready was removed from the F.5 closed set (fix V7-7): a never-
-        # Ready pod respawns, it does not terminate. A rule still filtering on it
-        # would report OK forever - the metric name is fine, only the value is dead.
-        rule = {
-            "name": "stale reason",
-            "queries": [
-                {
-                    "expression": 'sum(operator_task_parked_total{stageReason="pod-not-ready"})'
-                }
-            ],
-        }
-        v = lint_rule(
-            "alerts/x.yaml",
-            rule,
-            {"operator_task_parked_total"},
-            _STAGE_VALUES,
-        )
-        self.assertIsNotNone(v)
-        self.assertIn("pod-not-ready", str(v))
-
-    def test_live_stage_reason_is_clean(self):
-        rule = {
-            "name": "live reason",
-            "queries": [
-                {
-                    "expression": 'sum(operator_task_parked_total{stageReason="merge-blocked"})'
-                }
-            ],
-        }
-        self.assertIsNone(
-            lint_rule(
-                "alerts/x.yaml",
-                rule,
-                {"operator_task_parked_total"},
-                _STAGE_VALUES,
-            )
+    def test_a_grouping_clause_is_not_a_label_matcher(self):
+        # `by (le)` carries a label LIST, not a matcher, and lives outside any
+        # `{...}` body - so it must not be reported as a selected label.
+        self.assertEqual(
+            selector_labels(
+                "histogram_quantile(0.95, sum(rate(m_bucket[5m])) by (le, route))"
+            ),
+            [],
         )
 
-    def test_stage_value_sweep_is_opt_in(self):
-        # Callers that pass no stage_values argument (e.g. the plan's original
-        # three-positional-arg call sites) get metric-name checking only - the
-        # value sweep must not break that contract.
-        rule = {
-            "name": "live reason",
-            "queries": [
-                {
-                    "expression": 'sum(operator_task_parked_total{stageReason="pod-not-ready"})'
-                }
-            ],
-        }
-        self.assertIsNone(
-            lint_rule("alerts/x.yaml", rule, {"operator_task_parked_total"})
+    def test_matching_starts_on_an_identifier_boundary(self):
+        # Without the boundary guard the matcher could start mid-identifier and
+        # report a truncated label name, which would read as an undeclared label.
+        self.assertEqual(
+            [s.label for s in selector_labels('sum(m{stageReason="x",agent_kind="y"})')],
+            ["stageReason", "agent_kind"],
         )
-
-    def test_overloaded_kind_label_is_exempt_per_metric(self):
-        # operator_scm_writes_total{kind="write"} is an ACCESS CLASS, not a Task kind.
-        # The exemption is per-metric: the same value on a Task-family metric still fails.
-        ok = {
-            "name": "scm writes",
-            "queries": [
-                {"expression": 'sum(rate(operator_scm_writes_total{kind="write"}[5m]))'}
-            ],
-        }
-        self.assertIsNone(
-            lint_rule("alerts/x.yaml", ok, {"operator_scm_writes_total"}, _STAGE_VALUES)
-        )
-        bad = {
-            "name": "task stage",
-            "queries": [{"expression": 'sum(operator_task_stage{kind="write"})'}],
-        }
-        v = lint_rule("alerts/x.yaml", bad, {"operator_task_stage"}, _STAGE_VALUES)
-        self.assertIsNotNone(v)
-        self.assertIn('kind="write"', str(v))
 
 
 class TemplateExprTest(unittest.TestCase):
@@ -293,9 +262,7 @@ class LintDashboardTest(unittest.TestCase):
         # empty forever with no CI signal. A nested (row) panel must not escape the sweep.
         with tempfile.TemporaryDirectory() as tmp:
             violations = lint_dashboard(
-                _write_dashboard(tmp, _DASHBOARD),
-                {"operator_task_stage"},
-                _STAGE_VALUES,
+                _write_dashboard(tmp, _DASHBOARD), {"operator_task_stage"}
             )
         rendered = [str(v) for v in violations]
         self.assertEqual(len(rendered), 2, rendered)
@@ -315,24 +282,51 @@ class LintDashboardTest(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(
-                lint_dashboard(
-                    _write_dashboard(tmp, clean), {"operator_task_stage"}, _STAGE_VALUES
-                ),
-                [],
+                lint_dashboard(_write_dashboard(tmp, clean), {"operator_task_stage"}), []
             )
 
 
-class LoadStageValuesTest(unittest.TestCase):
-    def test_parses_sectioned_value_file(self):
-        text = "# comment\n## stage\nfailed\nmerging\n\n## stageReason\nmerge-blocked\n"
+_ALERT_YAML = """\
+rules:
+  - name: "prom rule"
+    queries:
+      - expression: 'sum(operator_task_terminal_total{state="done"})'
+  - name: "loki rule"
+    queries:
+      - query_type: loki
+        expression: 'sum(count_over_time({app="x"}[5m]))'
+"""
 
+
+class AlertQueriesTest(unittest.TestCase):
+    def test_walks_prometheus_queries_and_skips_loki(self):
         with tempfile.TemporaryDirectory() as tmp:
-            p = pathlib.Path(tmp) / "values.txt"
-            p.write_text(text)
-            parsed = load_stage_values(str(p))
+            p = pathlib.Path(tmp) / "a.yaml"
+            p.write_text(_ALERT_YAML)
+            self.assertEqual(
+                alert_queries(str(p)),
+                [('rule "prom rule"', 'sum(operator_task_terminal_total{state="done"})')],
+            )
+
+
+class IterExpressionsTest(unittest.TestCase):
+    def test_dispatches_on_suffix_so_reconcile_reuses_one_walk(self):
+        # reconcile_metric_provenance's label checks must not re-implement the
+        # alert-YAML and dashboard-JSON walks: two walks that drift are two
+        # different definitions of "every expression this repo ships".
+        with tempfile.TemporaryDirectory() as tmp:
+            alert = pathlib.Path(tmp) / "a.yaml"
+            alert.write_text(_ALERT_YAML)
+            dash = _write_dashboard(tmp, _DASHBOARD)
+            found = list(iter_expressions([str(alert), dash]))
         self.assertEqual(
-            parsed,
-            {"stage": {"failed", "merging"}, "stageReason": {"merge-blocked"}},
+            [(pathlib.Path(p).name, ctx) for p, ctx, _ in found],
+            [
+                ("a.yaml", 'rule "prom rule"'),
+                ("d.json", 'panel "live"'),
+                ("d.json", 'panel "nested dead"'),
+                ("d.json", 'variable "kind"'),
+            ],
         )
 
 

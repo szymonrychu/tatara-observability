@@ -14,8 +14,13 @@
 # Histogram/summary suffixes (_bucket/_sum/_count) are stripped by the checker; list the
 # BASE name only.
 #
-# See also scripts/stage_values_allowlist.txt for the closed-set label VALUE sweep
-# (stageReason/stage/kind/agent_kind) - this file only validates metric NAMES.
+# This file validates metric NAMES only, and that is now the whole of this script's job.
+# The other two dimensions of a PromQL selector - the label NAME and the closed-set label
+# VALUE - are DERIVED per run from the producer clones by
+# scripts/reconcile_metric_provenance.py (#100), off the same Prometheus constructor call
+# this allowlist's own regenerate-one-liner below anchors on, plus the operator CRD's
+# +kubebuilder:validation:Enum= markers. scripts/label_exemptions.txt carries only the
+# deliberate per-metric exemptions, never a copy of a vocabulary.
 #
 # 2026-07-13 DASHBOARD SWEEP. The checker now walks dashboards/*.json too (panel targets,
 # row-collapsed sub-panel targets, and templating query variables). A dashboard panel on a
@@ -30,8 +35,11 @@
 # \|agent_kind\|priority" internal/obs/*.go` is empty; none of the K.1 "operator: new" metrics
 # below are emitted; operator_task_terminal_total still carries kind,phase,reason
 # (internal/obs/task_metrics.go:33), not the D1 stage+stageReason+kind swap. This section is
-# therefore built entirely off contract K.1, not off a grep of a rewritten operator - re-run
-# the grep above once the operator PR lands and reconcile again before Task 4-8 alerts ship.
+# therefore built entirely off contract K.1, not off a grep of a rewritten operator. The
+# "re-run the grep once the operator PR lands" instruction that used to close this paragraph
+# stood open across TWO contract versions (phase -> stage -> state) and is now mechanical:
+# reconcile_metric_provenance.py re-derives both the names and the label sets on every PR,
+# push and nightly run.
 # The seven metrics below (tatara_cd_cascade_failed, tatara_cd_cascade_stalled,
 # tatara_scan_items_total, tatara_scan_tasks_created_total, operator_writeback_outcome_total,
 # operator_tasks_inflight, tatara_lifecycle_giveup_total) ARE still emitted today (confirmed
@@ -239,7 +247,7 @@ operator_task_turns_total
 # D1-UNVERIFIED, same as operator_task_terminal_total below: this sibling counter is
 # labelled {project,repo,outcome,model,type} with outcome=delivered|churned|abandoned
 # (task_metrics.go). The redesign does not retire it, but the operator PR that swaps
-# phase -> stage may re-label `outcome`. Re-check when the operator PR lands.
+# phase -> stage may re-label `outcome`. Mechanical since #100: the label set is derived per run.
 operator_task_terminal_tokens_total
 operator_pushed_runs_evicted_total
 
@@ -250,10 +258,11 @@ operator_implement_ci_total
 # --- operator: re-labelled, NOT deleted (CROSS-REPO DEPENDENCY D1) ---
 # phase -> stage + stageReason + kind. If the operator PR drops this metric entirely,
 # the Task 6 fallback applies and this line comes back out.
-# Task 2 census: UNVERIFIED as of 2026-07-12 - the operator worktree still has this
-# metric on the OLD kind,phase,reason label set (task_metrics.go:31-33). D1 compliance
-# (the phase -> stage+stageReason+kind swap) cannot be confirmed until the operator PR
-# lands. Re-check before Task 6 ships its rule against this metric.
+# The label set is NO LONGER hand-verified: reconcile_metric_provenance.py derives it from
+# this metric's own constructor on every run, and #100 is the record of what happened while
+# it was ("UNVERIFIED as of 2026-07-12 ... re-check before Task 6 ships" stood open until
+# the label set had moved phase -> stage -> state, and five rules on {stage=...} read green
+# the whole time).
 operator_task_terminal_total
 
 # --- wrapper (pushed through the operator receiver, prefix-allowlisted) ---

@@ -1,0 +1,117 @@
+# Label exemptions for scripts/reconcile_metric_provenance.py.
+#
+# This file used to be stage_values_allowlist.txt and used to CARRY the closed sets
+# themselves - a hand-maintained copy of the operator's stage/stageReason/kind/
+# agent_kind enums. That copy is what #100 is about. Every one of its four sections
+# had rotted in the same direction (the `## stage` set was still the pre-#521
+# 16-value enum, `## kind` still listed `clarify` and was missing `implement` and
+# `takeover`) and no check went red, because a membership test against a stale
+# SUPERSET is silent by construction. The sets are now DERIVED per run from the
+# operator clone's `+kubebuilder:validation:Enum=` markers plus internal/stage's
+# reason slices, so there is nothing left here to rot.
+#
+# What remains is the exemption machinery, which stays hand-maintained because it
+# is a set of DELIBERATE judgements, each with a reason, not a copy of a
+# vocabulary. The default is always to CHECK: a new metric that overloads a
+# closed-set label, or that carries a relabelled label name, fails CI until
+# someone lands it here on purpose.
+#
+# Sections are `## <name>` followed by one entry per line.
+
+## infra-labels
+# Label NAMES no producer constructor can ever declare, because they are attached
+# after the fact. Without this section the label-NAME check reports ~280 findings
+# on a completely healthy rule set and gets turned off inside a week.
+#
+# Synthesised by the Prometheus CLIENT LIBRARY, so they can never appear in a
+# `[]string{...}` slice no matter how the producer is written: `le` on every
+# histogram bucket series, `quantile` on every summary, and the reserved
+# metric-name label. `..._bucket{le="0.5"}` is completely ordinary PromQL and
+# hard-failing it would be a false failure on correct work.
+le
+quantile
+__name__
+# Added by Prometheus itself on every scrape:
+job
+instance
+# Added by the kubernetes_sd_configs relabelling in the scrape config:
+namespace
+pod
+container
+service
+endpoint
+node
+# Prometheus honor_labels=false collision prefix. The operator's push receiver
+# re-exposes wrapper series that already carry a `pod` label, so the scrape
+# renames the wrapper's to exported_pod (dashboards/wrapper.json relies on it).
+exported_pod
+exported_namespace
+exported_job
+
+## label-name:exempt-metrics
+# Metrics whose DECLARED label set is not the whole truth, because labels are
+# added by recording/alerting-rule relabelling (label_replace, label_format) or by
+# a metric_relabel_configs stanza rather than by the Go constructor. Empty today,
+# by design: the escape hatch has to exist before it is needed, or the first
+# legitimate case argues for weakening the check to a warning instead.
+#
+# An entry here disables the label-NAME check for that metric ENTIRELY, so prefer
+# a per-label ## <label>:exempt-metrics entry where the label is a closed-set one.
+
+## kind:exempt-metrics
+# `kind` is an OVERLOADED label name. On the Task family it is the CRD's
+# TaskSpec.Kind enum; on the metrics below it means something else entirely.
+# Each entry names what its `kind` label actually carries, verified in
+# tatara-operator internal/obs.
+#
+# scm_metrics.go: kind = the ACCESS CLASS of an SCM call ("write"|"read"), which is
+# how dashboards/operator.json splits the write path out of the SCM counter.
+operator_scm_writes_total
+# operator_metrics.go: kind = the reconciled CR kind (Task|Project|Repository|...).
+operator_reconcile_total
+# contract K.1: kind = the CR kind whose etcd object is being sized / rejected /
+# spilled / adopted, not the Task's origin kind.
+operator_object_size_bytes
+operator_object_too_large_total
+operator_comment_spill_total
+operator_orphan_adopted_total
+# objbudget_metrics.go: kind = the guarded CR kind being written, exactly
+# Issue|MergeRequest|Task (objbudget.go's per-Fit* `const kind`). Same family as
+# operator_object_too_large_total above, same reason.
+operator_objbudget_spill_blocked_total
+# mirror_metrics.go: kind = the mirror WRITE TARGET, and it is not even a clean CR
+# kind - the comment_append site passes resolveMirrorTarget's runtime value, so the
+# live set is Issue|MergeRequest|issue_comment|mr_comment|mr_review. Never a
+# TaskSpec.Kind value.
+operator_mirror_write_dropped_total
+# task_metrics.go: kind = the DECLINE CLASS of a refused un-park, guard|rule, on a
+# metric whose other label (parkReason) IS a real closed set. This is the case the
+# #100 pre-mortem called: derive parkReason label-name-wide and you reproduce the
+# `kind` overload one label over unless exemption is metric-aware from day one.
+operator_unpark_declined_total
+
+## stage:exempt-metrics
+# `stage` SURVIVED v2.0.0 as a label name with three different meanings, so it is
+# not exempted wholesale. It binds to the TaskStatus.State enum, because
+# operator_stage_drift_total{stage} is passed task.Status.State verbatim
+# (internal/controller/task_controller.go:439) and is therefore genuinely
+# checkable - exempting it would throw away a real guard. The two below are the
+# actual overloads.
+#
+# restapi_metrics_v2.go: stage = which step of the OP9 mr-takeover endpoint failed,
+# mint|ownerref|stamp.
+operator_rest_takeover_error_total
+# sweep_metrics.go: stage = the MINT bucket, active|parked (sweep.go's
+# mintedBucket), not a Task state.
+operator_tasks_minted_per_sweep
+
+## state:exempt-metrics
+# queue_metrics.go: state = the QueuedEvent's own state (Queued|Admitted|...), a
+# different CR's lifecycle from TaskStatus.State. This is the single live overload
+# the derived value sweep surfaced.
+operator_queue_age_seconds
+# task_metrics.go SetIssueState: state = the SCM ISSUE's state, stamped from
+# issueStateFor(), not the Task's. Nothing selects a literal value on it today;
+# listed so the first rule that does is not met with a spurious failure. Its
+# `kind` label IS the TaskSpec.Kind enum and stays checked.
+tatara_issue_state

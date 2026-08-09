@@ -20,19 +20,20 @@ Every metric name found must appear in scripts/metrics_allowlist.txt. Loki queri
 (alert query_type: loki; a panel target or template variable whose datasource type is
 not prometheus) are out of scope: they select log streams, not metrics.
 
-It also validates every stageReason= / stage= / kind= / agent_kind= label VALUE used
-in an expression against the closed sets in scripts/stage_values_allowlist.txt
-(contract F.1, F.5, A.4). The metric-name check alone cannot catch a rule that
-filters on a dead label value: the metric still exists and the rule still passes the
-name check, but the value never appears in the series, so the rule reports OK forever
-- the exact same failure class one level down. The value sweep is METRIC-AWARE: `kind`
-is an overloaded label name (operator_scm_writes_total{kind="write"} is a verb class,
-not a Task kind), so a metric may be exempted from one label's closed set via a
-`## <label>:exempt-metrics` section in stage_values_allowlist.txt. The default is to
-CHECK - a new metric that overloads a closed-set label fails CI until someone
-explicitly exempts it.
+THIS FILE OWNS ONE DIMENSION: the metric NAME. A PromQL selector has three
+(name, label name, label value) and the other two are checked in
+reconcile_metric_provenance.py, because both are DERIVED from a producer clone
+rather than from a hand-maintained snapshot in this repo. Until #100 the label
+VALUE sweep lived here against scripts/stage_values_allowlist.txt; that file was
+a copy of the operator's enums and had rotted across two contract versions
+without a single check going red, which is the whole reason the derivation moved.
 
-Exit 0 = clean, 1 = unknown metric or label value, 2 = usage/parse error.
+This file is therefore also the SHARED PARSER. selector_labels() and
+iter_expressions() are the surface reconcile_metric_provenance.py consumes, so
+"every Prometheus expression this repo ships" has exactly one definition and two
+walks cannot drift apart.
+
+Exit 0 = clean, 1 = unknown metric, 2 = usage/parse error.
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ import json
 import pathlib
 import re
 import sys
+from typing import Iterator, NamedTuple
 
 import yaml
 
@@ -73,15 +75,20 @@ _KEYWORDS = frozenset(
 # Histogram/summary suffixes: alert on _bucket/_sum/_count, allowlist the base name.
 _SUFFIXES = ("_bucket", "_sum", "_count")
 
-# Label name -> which closed set (in stage_values_allowlist.txt) its values must
-# belong to. Matches `label="value"` or `label=~"value1|value2"`.
-_LABEL_VALUE = re.compile(
-    r'\b(stageReason|stage|kind|agent_kind)\s*(?:=~?|!~?)\s*"([^"]*)"'
-)
+# One label matcher inside a selector body. The operator alternatives are ordered
+# longest-first: `=~` and `!~` must win over `=` and `!=`, and the pre-#100 regex
+# (`(?:=~?|!~?)`) silently matched NOTHING for `label!="v"` because `!~?` consumed
+# the "!" and then demanded a quote.
+_MATCHER = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)\s*(=~|!~|!=|=)\s*"([^"]*)"')
 
-# `metric{...}` - a metric name followed by its label-selector body. Used to make the
-# closed-set label sweep metric-aware (see the module docstring).
+# `metric{...}` - a metric name followed by its label-selector body. Carries the
+# metric so both label checks can be metric-aware (an overloaded label name means
+# nothing without knowing which metric it is on).
 _SELECTOR = re.compile(r"(?<![A-Za-z0-9_:])([a-z_][a-z0-9_]*)\s*\{([^}]*)\}")
+
+# A value that is a Grafana template variable or a real PromQL regex rather than a
+# literal. Neither can be membership-tested against a closed set.
+_NOT_A_LITERAL = re.compile(r"[$.*+?()\[\]^\\]")
 
 # Grafana template-variable queries. label_values(<expr>, <label>) and query_result(<expr>)
 # carry PromQL; label_values(<label>), metrics(...) and label_names(...) do not.
@@ -124,30 +131,60 @@ def metric_names(expr: str) -> set[str]:
     return out
 
 
-def label_values(expr: str) -> dict[str, dict[str, set[str]]]:
-    """Every stageReason=/stage=/kind=/agent_kind= label value selected, by metric.
+class Selector(NamedTuple):
+    """One label matcher, with the metric it constrains.
 
-    Returns {metric: {label: {values}}}. The metric is carried because `kind` is an
-    overloaded label name and its closed set only applies to some metrics.
-
-    A regex `=~"a|b|c"` selector is split on `|` into individual candidate values;
-    PromQL regex metacharacters beyond plain alternation are left as-is and will
-    simply fail to match anything in the allowlist (a false positive is preferable
-    to silently skipping a real value). A `$var` value is a Grafana template variable,
-    not a literal, and is skipped.
+    `values` holds only LITERALS: a `$var` (Grafana template variable) and a real
+    regex pattern are both dropped, because neither can be membership-tested
+    against a closed set. The label is still reported with an empty value set - a
+    variable-valued matcher on a label name that does not exist is exactly as dark
+    as a literal one, so the NAME check must still see it.
     """
-    out: dict[str, dict[str, set[str]]] = {}
+
+    metric: str
+    label: str
+    op: str
+    values: frozenset[str]
+
+    @property
+    def positive(self) -> bool:
+        """False for `!=` / `!~`.
+
+        A negative matcher on a label the metric does not carry matches EVERY
+        series, so it is a no-op filter, not a dark selector. reconcile_metric_
+        provenance.py relies on this distinction: hard-failing it would break the
+        forward-compatible idiom of writing the matcher before the producer adds
+        the label (see ROADMAP, tatara-memory#92).
+        """
+        return not self.op.startswith("!")
+
+
+def selector_labels(expr: str) -> list[Selector]:
+    """Every label matcher in a PromQL expression, with its metric and operator.
+
+    This reports EVERY label name, not a fixed list: which labels are actually
+    checkable is the consumer's decision (reconcile_metric_provenance.py, which
+    knows what the producer clone declares). The pre-#100 extractor hardcoded four
+    names, so the post-v2.0.0 vocabulary was invisible to it and no label NAME was
+    ever validated at all.
+
+    A regex `=~"a|b|c"` matcher is split on `|` into candidate values; an `=`
+    matcher is one value even if it contains a bar.
+    """
+    out: list[Selector] = []
     for metric, body in _SELECTOR.findall(expr):
         for suffix in _SUFFIXES:
             if metric.endswith(suffix):
                 metric = metric[: -len(suffix)]
                 break
-        for label, raw in _LABEL_VALUE.findall(body):
-            for val in raw.split("|"):
-                val = val.strip()
-                if not val or val.startswith("$"):
-                    continue
-                out.setdefault(metric, {}).setdefault(label, set()).add(val)
+        for label, op, raw in _MATCHER.findall(body):
+            raw_values = raw.split("|") if op.endswith("~") else [raw]
+            values = {
+                v.strip()
+                for v in raw_values
+                if v.strip() and not _NOT_A_LITERAL.search(v)
+            }
+            out.append(Selector(metric, label, op, frozenset(values)))
     return out
 
 
@@ -205,6 +242,44 @@ def dashboard_queries(path: str) -> list[tuple[str, str]]:
     return out
 
 
+def _rule_queries(rule: dict) -> list[str]:
+    """Every Prometheus expression in one alert rule (loki streams are not metrics)."""
+    return [
+        q.get("expression") or ""
+        for q in rule.get("queries") or []
+        if (q.get("query_type") or "prometheus") == "prometheus"
+    ]
+
+
+def alert_queries(path: str) -> list[tuple[str, str]]:
+    """(context, PromQL) for every Prometheus expression in an alert rule file."""
+    data = yaml.safe_load(pathlib.Path(path).read_text())
+    if not data or not isinstance(data, dict):
+        return []
+    out: list[tuple[str, str]] = []
+    for rule in data.get("rules") or []:
+        context = f'rule "{rule.get("name", "<unnamed>")}"'
+        for expr in _rule_queries(rule):
+            if expr:
+                out.append((context, expr))
+    return out
+
+
+def iter_expressions(paths: list[str]) -> Iterator[tuple[str, str, str]]:
+    """(path, context, PromQL) for every Prometheus expression this repo ships.
+
+    The single definition of that set. reconcile_metric_provenance.py's label
+    checks consume it rather than re-walking alerts/*.yaml and dashboards/*.json,
+    so the three dimensions can never disagree about what they cover.
+    """
+    for path in paths:
+        queries = (
+            dashboard_queries(path) if path.endswith(".json") else alert_queries(path)
+        )
+        for context, expr in queries:
+            yield path, context, expr
+
+
 def load_allowlist(path: str) -> set[str]:
     out: set[str] = set()
     for line in pathlib.Path(path).read_text().splitlines():
@@ -215,120 +290,59 @@ def load_allowlist(path: str) -> set[str]:
     return out
 
 
-def load_stage_values(path: str) -> dict[str, set[str]]:
-    """Parse stage_values_allowlist.txt into {label_name: {allowed values}}.
-
-    Format: `## <label_name>` section headers, then one value per line.
-    """
-    out: dict[str, set[str]] = {}
-    current: str | None = None
-    for line in pathlib.Path(path).read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            if line.startswith("## "):
-                current = line[3:].strip()
-                out.setdefault(current, set())
-            continue
-        if current is not None:
-            out[current].add(line)
-    return out
-
-
 class Violation:
-    def __init__(self, path: str, context: str, kind: str, value: str):
+    def __init__(self, path: str, context: str, value: str):
         self.path = path
         self.context = context
-        self.kind = kind
         self.value = value
 
     def __str__(self) -> str:
-        if self.kind == "metric":
-            return (
-                f"{self.path}: {self.context} selects `{self.value}`, which is not in "
-                f"scripts/metrics_allowlist.txt. Either the metric is not emitted (an alert on "
-                f"an absent series reports OK forever; a dashboard panel renders empty forever, "
-                f"silently, with no CI signal - see the file header), or the allowlist needs the "
-                f"new name adding in the same PR as the service that emits it."
-            )
-        label, value = self.kind, self.value
         return (
-            f'{self.path}: {self.context} selects {label}="{value}", which is not in the '
-            f"closed set for {label} in scripts/stage_values_allowlist.txt (contract F.1/F.5/A.4). "
-            f"A query filtering on a dead label value reports OK / renders empty forever, same as "
-            f"a dead metric name - the metric-name check alone cannot catch this. If the label is "
-            f"overloaded on this metric (kind= is), exempt the metric under "
-            f"`## {label}:exempt-metrics`."
+            f"{self.path}: {self.context} selects `{self.value}`, which is not in "
+            f"scripts/metrics_allowlist.txt. Either the metric is not emitted (an alert on "
+            f"an absent series reports OK forever; a dashboard panel renders empty forever, "
+            f"silently, with no CI signal - see the file header), or the allowlist needs the "
+            f"new name adding in the same PR as the service that emits it."
         )
 
 
-def lint_expr(
-    path: str,
-    context: str,
-    expr: str,
-    allowed: set[str],
-    stage_values: dict[str, set[str]] | None = None,
-) -> list[Violation]:
-    """Every metric-name and closed-set label-value violation in one PromQL expression."""
-    out: list[Violation] = []
-    for name in sorted(metric_names(expr)):
-        if name not in allowed:
-            out.append(Violation(path, context, "metric", name))
-    if not stage_values:
-        return out
-    for metric, labels in sorted(label_values(expr).items()):
-        for label, values in sorted(labels.items()):
-            allowed_values = stage_values.get(label)
-            if allowed_values is None:
-                continue  # label not in the closed-set scope (e.g. a non-contract label)
-            if metric in stage_values.get(f"{label}:exempt-metrics", set()):
-                continue  # the label name is overloaded on this metric
-            for value in sorted(values):
-                if value not in allowed_values:
-                    out.append(Violation(path, context, label, value))
-    return out
+def lint_expr(path: str, context: str, expr: str, allowed: set[str]) -> list[Violation]:
+    """Every metric-name violation in one PromQL expression."""
+    return [
+        Violation(path, context, name)
+        for name in sorted(metric_names(expr))
+        if name not in allowed
+    ]
 
 
-def lint_rule(
-    path: str,
-    rule: dict,
-    allowed: set[str],
-    stage_values: dict[str, set[str]] | None = None,
-) -> Violation | None:
+def lint_rule(path: str, rule: dict, allowed: set[str]) -> Violation | None:
     context = f'rule "{rule.get("name", "<unnamed>")}"'
-    for q in rule.get("queries") or []:
-        if (q.get("query_type") or "prometheus") != "prometheus":
-            continue  # loki streams are not metrics
-        violations = lint_expr(
-            path, context, q.get("expression") or "", allowed, stage_values
-        )
+    for expr in _rule_queries(rule):
+        violations = lint_expr(path, context, expr, allowed)
         if violations:
             return violations[0]
     return None
 
 
-def lint_file(
-    path: str, allowed: set[str], stage_values: dict[str, set[str]] | None = None
-) -> list[Violation]:
+def lint_file(path: str, allowed: set[str]) -> list[Violation]:
     data = yaml.safe_load(pathlib.Path(path).read_text())
     if not data or not isinstance(data, dict):
         return []
     out = []
     for rule in data.get("rules") or []:
-        v = lint_rule(path, rule, allowed, stage_values)
+        v = lint_rule(path, rule, allowed)
         if v is not None:
             out.append(v)
     return out
 
 
-def lint_dashboard(
-    path: str, allowed: set[str], stage_values: dict[str, set[str]] | None = None
-) -> list[Violation]:
+def lint_dashboard(path: str, allowed: set[str]) -> list[Violation]:
     """Every violation in a dashboard, deduplicated - one panel can repeat a metric."""
     out: list[Violation] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str]] = set()
     for context, expr in dashboard_queries(path):
-        for v in lint_expr(path, context, expr, allowed, stage_values):
-            key = (v.context, v.kind, v.value)
+        for v in lint_expr(path, context, expr, allowed):
+            key = (v.context, v.value)
             if key in seen:
                 continue
             seen.add(key)
@@ -353,32 +367,30 @@ def main(argv: list[str]) -> int:
         return 2
     try:
         allowed = load_allowlist(str(_root() / "scripts" / "metrics_allowlist.txt"))
-        stage_values = load_stage_values(
-            str(_root() / "scripts" / "stage_values_allowlist.txt")
-        )
         violations: list[Violation] = []
         alerts = dashboards = 0
         for path in paths:
             if path.endswith(".json"):
                 dashboards += 1
-                violations += lint_dashboard(path, allowed, stage_values)
+                violations += lint_dashboard(path, allowed)
             else:
                 alerts += 1
-                violations += lint_file(path, allowed, stage_values)
+                violations += lint_file(path, allowed)
     except (OSError, yaml.YAMLError, json.JSONDecodeError) as exc:
         print(f"check_metric_provenance: {exc}", file=sys.stderr)
         return 2
     if violations:
         print(
-            f"FAIL: {len(violations)} alert rule(s) / dashboard panel(s) select a metric or "
-            f"label value nobody emits:\n"
+            f"FAIL: {len(violations)} alert rule(s) / dashboard panel(s) select a metric "
+            f"nobody emits:\n"
         )
         for v in violations:
             print(f"  - {v}")
         return 1
     print(
-        f"OK: {alerts} alert file(s) + {dashboards} dashboard(s) select only emitted metrics "
-        f"and live label values."
+        f"OK: {alerts} alert file(s) + {dashboards} dashboard(s) select only allowlisted "
+        f"metric NAMES. Label names and label values are checked against the producer "
+        f"clones by scripts/reconcile_metric_provenance.py."
     )
     return 0
 

@@ -115,7 +115,7 @@ When you add or change instrumentation or an alert, before opening the PR:
 - Adding a quantile/latency alert: guard against idle NaN, e.g.
   `... and on() (sum(rate(<metric>_count[w])) > 0)`. This is linted - see 6.2.
 
-## 5. The CI provenance check: no alert AND NO PANEL on a metric nobody emits
+## 5. The CI provenance checks: no alert AND NO PANEL on a metric, label or value nobody emits
 
 `scripts/check_metric_provenance.py` runs in CI on every PR that touches
 `alerts/**` or `dashboards/**`. It extracts every metric name from every
@@ -143,27 +143,75 @@ Adding an alert on a new metric means adding the metric to
 point: the allowlist is the thing that forces the producer and the consumer to
 move together.
 
-**The same check also validates label VALUES**, not just metric names, for
-`stageReason=`/`stage=`/`kind=`/`agent_kind=` selectors, against the closed sets
-in `scripts/stage_values_allowlist.txt` (CROSS-REPO-CONTRACT F.1, F.5, A.4). A
-rule can select a metric that IS emitted while filtering on a label value that
-never appears in the series - same "reports OK forever" failure, one level
-down, and the metric-name check alone cannot see it (fix V7-7 is the concrete
-case this closes: a stale `stageReason="pod-not-ready"` reference would pass a
-name-only check).
+### 5.1 A selector has three dimensions, and all three are guarded
 
-The value sweep is **metric-aware**: `kind` is an overloaded label name
-(`operator_scm_writes_total{kind="write"}` is an access class, not a Task kind),
-so a metric can be exempted from one label's closed set under a
-`## <label>:exempt-metrics` section in `scripts/stage_values_allowlist.txt`. The
-default is to CHECK - a new metric that overloads a closed-set label fails CI
-until someone exempts it deliberately, with a reason.
+A PromQL selector says three separate things, each of which can go dark on its
+own. Until #100 this repo guarded two of them and had never looked at the third.
+
+| Dimension | Derived from | Enforced by |
+|---|---|---|
+| metric NAME | the Prometheus constructor's `Name:` field | `check_metric_provenance.py` (alerts/dashboards -> allowlist) + `reconcile_metric_provenance.py` (allowlist -> producer source) |
+| label NAME | the SAME constructor's `[]string{...}` slice | `reconcile_metric_provenance.py` |
+| label VALUE | the operator CRD's `+kubebuilder:validation:Enum=` markers, plus `internal/stage`'s reason slices for `stateReason` (which has no CRD enum) | `reconcile_metric_provenance.py` |
+
+`operator_task_terminal_total` is the case that motivated it. Five rules selected
+`{stage="failed"}` and `{stage="parked"}` on a metric labelled
+`{kind,state,stateReason}` since v2.0.0, and both guards reported OK: the metric
+name was emitted, `stage` was one of the four label names the old value sweep
+knew about, and `failed`/`parked` were both still members of the `## stage`
+section of the hand-maintained `stage_values_allowlist.txt`. **A membership test
+against a stale SUPERSET is silent by construction**, which is why that file no
+longer carries any vocabulary: both label dimensions are re-derived from the
+producer clone `reconcile_metric_provenance.py` already takes, on every PR, every
+push, and nightly. `scripts/label_exemptions.txt` holds only the deliberate
+per-metric exemptions and the infra-label list.
+
+Three rules make the label checks quiet enough to stay switched on:
+
+1. **They apply only to metrics whose constructor was located in a clone AND
+   whose label slice resolved.** That one rule removes the entire foreign-exporter
+   noise class without a single allowlist entry - no tatara repo declares
+   `volume_manager_total_volumes` or `kube_pod_status_ready`, so their labels are
+   never these checks' business. A slice built from a variable maps to "unknown",
+   reported loudly in the job summary, never a failure. Guessing the empty set
+   there would turn every live selector on that metric dark.
+2. **Infra labels are exempt by name, once.** `job`, `instance`, `namespace`,
+   `pod`, `container`, `service`, `endpoint`, `node` and the `exported_*` collision
+   prefix are attached by Prometheus and by the scrape config's relabelling; no
+   constructor can ever declare them. Without that list the label-NAME check
+   reports ~280 findings on a completely healthy rule set.
+3. **Both checks are metric-aware, defaulting to CHECK.** `kind` is the CRD's
+   `TaskSpec.Kind` enum on the Task family and an access class, a CR kind or a
+   decline class elsewhere; `stage` survived v2.0.0 as a label name carrying three
+   different vocabularies. A new metric that overloads a closed-set label, or that
+   carries a relabelled label name, fails CI until someone lands it in
+   `label_exemptions.txt` on purpose, with the reason. `stage` itself is NOT
+   exempted wholesale: it binds to the `TaskStatus.State` enum, because
+   `operator_stage_drift_total{stage}` is passed `task.Status.State` verbatim.
+
+A **negative** matcher (`!=`, `!~`) on a label the metric does not carry matches
+every series, so it is a no-op filter rather than a dark selector - reported as
+informational, never fatal, because it is also the forward-compatible idiom for a
+matcher written before the producer adds the label. A dead closed-set VALUE in a
+negative matcher IS fatal: the rule means to exclude it, so a renamed vocabulary
+silently stops excluding and starts firing on exactly what the summary says it
+ignores.
+
+### 5.2 What three green dimensions do NOT certify
+
+**A label name and a label value are mechanical. A threshold and a summary are
+not.** Nothing in CI catches a rule whose threshold is wrong for the mechanism it
+watches, or whose summary describes a mechanism that does not exist - that is
+still a human reading the rule, and it stays that way. Do not read a green
+`alert-rules-lint` as "this alert is correct"; read it as "this alert selects a
+metric that is emitted, on labels that exist, with values that are live".
 
 Run it locally:
 
 ```sh
 pip install pyyaml
-python3 scripts/check_metric_provenance.py            # alerts/*.yaml AND dashboards/*.json
+python3 scripts/check_metric_provenance.py            # dimension 1: metric NAMES
+python3 scripts/reconcile_metric_provenance.py        # dimensions 2 + 3 (clones 4 repos)
 python3 -m unittest discover scripts -p 'test_*.py'    # linter self-tests (both checkers)
 ```
 

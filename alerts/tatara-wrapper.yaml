@@ -171,6 +171,67 @@ rules:
       system: "tatara"
       component: "wrapper"
       severity: "warning"
+  # THE IN-POD HALF OF THE STALL PROBE, AND IT IS A DIAGNOSIS RATHER THAN A TIMEOUT.
+  # ccw_probe_outcomes_total{outcome} (tatara-claude-code-wrapper #156,
+  # internal/metrics/metrics.go:183) takes exactly three values, from the consts at
+  # internal/transcript/probe.go:47-51: answered|delivered_unanswered|never_delivered.
+  # Only never_delivered is selected here, and it means something specific and
+  # positive - it is NOT "we heard nothing":
+  #
+  #   The probe is written onto the PTY and the claude session logs a `queue-operation`
+  #   ENQUEUE line for it immediately, before anything reaches the model. Delivery happens
+  #   at the NEXT TOOL-CALL BOUNDARY, at which point a matching remove/dequeue line is
+  #   written. never_delivered is enqueue-with-no-remove: the session took the text and
+  #   then never reached another tool-call boundary. The agent is BLOCKED INSIDE ONE
+  #   SINGLE LONG-RUNNING TOOL CALL. Measured: a 70s sleep buffered a probe 58.2s and it
+  #   was then delivered normally; a tool call that never returns is never delivered at all.
+  #
+  # delivered_unanswered is deliberately NOT selected here. It is the weak signal (the
+  # model saw the probe and did not reply, which a busy turn does legitimately) and the
+  # operator-side rule "Operator agent stall probe unanswered" already carries it, keyed
+  # by outcome, with the fleet-wide view. Alerting on it from both sides would double-page
+  # one event.
+  #
+  # NO SERIES YET AS OF 2026-08-09, and that is expected, not broken. The outcome counter
+  # is written only TERMINALLY - on answer, on supersede by a later probe, or at shutdown
+  # via probes.Finalize() - so a fleet in which no probe has ever finished has never
+  # incremented any of the three. ccw_probe_answer_seconds_count IS present in Prometheus
+  # (an unlabelled histogram exists at registration), which is how we know the probe build
+  # is actually deployed rather than the family being dark. default_no_data_state: "OK"
+  # keeps this green until the first probe completes.
+  - name: "Wrapper agent blocked inside a tool call"
+    queries:
+      - expression: |
+          sum(increase(ccw_probe_outcomes_total{outcome="never_delivered"}[1h]))
+    math_operator: ">"
+    threshold: 3
+    for: 15m
+    decimal_points: 0
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-wrapper-agent-blocked-inside-a-tool-call"
+      summary: "{{ index $values \"C\" }} stall probe(s) never delivered in 1h (>3). This is a DIAGNOSIS, not a timeout: the probe's queue-operation enqueue line was written and no matching remove followed, so the agent never reached another tool-call boundary and is blocked inside ONE long-running tool call - an MCP or forge call with no client-side timeout, a git/package command waiting on a prompt nobody answers, a shell read from an empty stdin, or a genuinely enormous build. The wrapper is healthy, the session and its context are intact, and killing the pod is the wrong move: `kubectl -n tatara exec <pod> -c wrapper -- ps -eo pid,etimes,args --sort=-etimes | head` names the culprit, because the longest-running child of the claude process IS the tool call that has not returned. If ps shows no long-running child at all, the transcript tailer is missing the remove line - that is a wrapper bug, escalate it."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "wrapper"
+      severity: "warning"
+  # ccw_turn_stall_suspected_total HAS NO RULE HERE, DELIBERATELY, AND THIS COMMENT IS THE
+  # REASON. Phase B1 was specified to alert on it, but the counter does not exist at
+  # tatara-claude-code-wrapper origin/main (e662ed5): it is added by the UNMERGED phase-W4
+  # branch feat/w4-interrupt-and-stall-suspect, where the inactivity timer stops failing
+  # turns and calls markStallSuspected instead. On main, session.go leaves the companion
+  # Snapshot field stallSuspectedSince "intentionally left zero" and subagents_test.go
+  # asserts "nothing marks a stall in this phase".
+  #
+  # Writing the rule now would not merely be premature, it would FAIL CI in two places and
+  # for the right reasons: check_metric_provenance.py rejects an alert on a metric absent
+  # from scripts/metrics_allowlist.txt, and adding it to the allowlist to satisfy that would
+  # then fail reconcile_metric_provenance.py, which diffs the allowlist against the producer
+  # repos' live source. Both guards exist precisely to stop a rule shipping against a metric
+  # nobody emits, since default_no_data_state: "OK" would make it report green forever.
+  # Add it in the same change that ships W4 (the counter is unlabelled -
+  # prometheus.NewCounter, metrics.go:203 on that branch - so the rule is a bare
+  # sum(increase(ccw_turn_stall_suspected_total[1h]))), not before.
   # The "Wrapper token spend runaway" rule was MOVED to alerts/tatara-operator.yaml
   # 2026-07-04 as "Agent token spend runaway ($/s)": it read the dead/ephemeral
   # ccw_turn_tokens_total push family and thresholded on a flat token/s number;

@@ -518,9 +518,20 @@ rules:
   #   awaiting-human  - a human not having replied yet
   #   merge-timeout   - owned by "Tatara delivery parked on a merge or deploy timeout"
   #   deploy-timeout    (alerts/tatara-cd.yaml, severity critical, threshold 0)
-  # Splitting by parkReason is what makes it actionable: turn-budget-exhausted is a cost
-  # problem, pod-recreation-exhausted is an infrastructure problem, agent-contract-mismatch
-  # is a skewed release train.
+  # Splitting by parkReason is what makes it actionable: stage-deadline is a budget problem,
+  # admission-starved is a capacity problem, agent-contract-mismatch is a skewed release
+  # train.
+  #
+  # THE MATCHER IS NEGATIVE, AND THAT IS WHY PHASE O3 DOES NOT DARKEN THIS RULE. O3 deletes
+  # the enforcement behind turn-budget-exhausted, review-loop-exhausted and
+  # pod-recreation-exhausted, so all three stop being emitted. A POSITIVE matcher on any of
+  # them would then match nothing and report OK forever - that is what happened to
+  # "Operator task pod-recreation budget exhausted", which is why the rule above replaces
+  # it with a counter that survives. An EXCLUSION list has the opposite failure mode: the
+  # three simply stop contributing and every other parkReason is still counted, so no edit
+  # is needed here and none was made. The three literals stay in stage.ParkReasons and in
+  # scripts/stage_values_allowlist.txt regardless - removing an enum member breaks
+  # validation on the next status write of every Task already parked with one.
   #
   # KNOWN, DELIBERATE OVERLAP with "Operator task park spike" further down this file, which
   # is the same counter over a 3h window excluding only the two benign reasons. #521
@@ -666,24 +677,127 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "warning"
-  # Was reason="PodLost" on the phase-keyed metric. The v2.0.0 equivalent is
-  # parkReason=pod-recreation-exhausted: the pod vanished mid-state and the recreation
-  # budget (maxPodRecreations, default 3) is spent, so the Task PARKS (#521 - it no longer
-  # terminates, so operator_task_terminal_total cannot see it). Work in flight is
-  # destroyed. Distinct from the boot-crash-budget and agent-unreachable rules, which cover
-  # pods that never came up rather than pods that vanished mid-task. Also depends on D1 -
-  # see the comment above "Operator task failure spike".
-  - name: "Operator task pod-recreation budget exhausted"
+  # REPLACES "Operator task pod-recreation budget exhausted", which keyed on
+  # operator_task_parked_total{parkReason="pod-recreation-exhausted"} - a POSITIVE matcher
+  # on a park reason the operator stops emitting at phase O3, when the maxPodRecreations
+  # cap is deleted. A positive matcher on a dead value matches nothing and, with
+  # default_no_data_state: "OK", reports OK forever: exactly the silent-green class
+  # check_metric_provenance.py exists to catch. It is removed here rather than at O3 so the
+  # successor is watching BEFORE the cap it replaces goes away, not after.
+  #
+  # THE CAP IS NOT BEING REPLACED BY ANOTHER CAP. O3's premise is "TTL always decides" - no
+  # feature exceeds the 24h residency cap and nothing else terminates work early. The
+  # accepted, explicit cost (owner decision 2026-08-09) is that a boot-crash loop is then
+  # bounded only by that 24h cap: ~288 pods at a 5-minute respawn cycle, which is STRICTLY
+  # WORSE than the maxPodRecreations behaviour it replaces. No backstop cap was added. This
+  # alert is the entire mitigation, which is why it is CRITICAL while the park rule it
+  # replaces was a warning - it has to page, not accumulate.
+  #
+  # operator_pod_recreations_total{project,kind} (tatara-operator #575,
+  # internal/obs/stall_metrics.go:72) counts all three respawn paths: a live pod that ended
+  # with no agent handoff (livepods.go:198), a pod lost mid-state (podwatch.go:241), and a
+  # pod that never became Ready inside podReadyTimeout (task_stage.go:1456). Deliberately
+  # NOT labelled by task, so this is a project rate signal and not a per-Task budget - the
+  # per-Task budget is the thing being deleted.
+  #
+  # RESIDUAL GAP, stated rather than papered over: until O3 lands, a SINGLE Task can still
+  # spend the default maxPodRecreations of 3 and park without reaching 6/h here. That case
+  # is still counted by "Operator task failure spike" (1h) and "Operator task park spike"
+  # (3h), both of which match parkReason NEGATIVELY and therefore still see
+  # pod-recreation-exhausted today and simply stop seeing it once O3 stops emitting it.
+  # Neither goes dark at O3, and neither needed an edit for it.
+  - name: "Operator agent pod recreation loop"
     queries:
       - expression: |
-          sum(increase(operator_task_parked_total{namespace="tatara",job="tatara-operator",parkReason="pod-recreation-exhausted"}[1h])) or vector(0)
+          sum by (project) (increase(operator_pod_recreations_total{namespace="tatara",job="tatara-operator"}[1h])) or vector(0)
     math_operator: ">"
-    threshold: 0
-    for: 5m
+    threshold: 6
+    for: 15m
     decimal_points: 0
     annotations:
-      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-task-pod-recreation-budget-exhausted"
-      summary: "tatara-operator parked {{ index $values \"C\" }} Task(s) in 1h with parkReason=pod-recreation-exhausted - the agent pod was lost mid-state and the recreation budget ran out. Investigate pod evictions, node pressure and OOM-kills on the wrapper workload."
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-agent-pod-recreation-loop"
+      summary: "Project {{ index $labels \"project\" }} recreated {{ index $values \"C\" }} agent pod(s) in 1h (>6). This is the replacement for the maxPodRecreations cap, and it is the ONLY bound on pod churn once phase O3 removes that cap - an unattended crash loop runs to the 24h residency cap, ~288 pods at a 5-minute cycle. Split by the three recreation paths before acting, they need different fixes: a pod that never becomes Ready is a boot failure (bad image pin, missing secret, bootstrap clone failing - check the wrapper --previous log); a pod lost mid-state is node-level (eviction, memory pressure, OOM-kill); a live pod that ended with no agent handoff is the path most likely to loop indefinitely, since nothing about it is self-limiting. Break it down with sum by (project, kind) (increase(operator_pod_recreations_total[1h]))."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "critical"
+  # THE PROBE IS A DIAGNOSIS, NOT A TIMEOUT, AND THE TWO OUTCOMES MEAN DIFFERENT THINGS.
+  # operator_stall_probe_total{outcome} (tatara-operator #575/#577,
+  # internal/obs/stall_metrics.go:48) takes exactly six values:
+  # sent|answered|unanswered|never_delivered|unsupported|error. Only two of them are
+  # selected here and the split is the whole point:
+  #
+  #   never_delivered - the probe text was written onto the PTY and the session logged its
+  #     `queue-operation` enqueue line immediately, but no matching remove/dequeue ever
+  #     followed. Delivery happens at the NEXT TOOL-CALL BOUNDARY, so this is a positive
+  #     statement about where the agent is: blocked inside ONE long-running tool call. It
+  #     is not "the wrapper is unresponsive" and it is not "the model is slow" (measured: a
+  #     70s sleep buffered a probe 58.2s and it was then delivered normally).
+  #   unanswered - the probe WAS delivered, a tool-call boundary was reached, and no
+  #     TATARA-ALIVE reply came back inside stallProbeGraceSeconds. Much weaker: a busy turn
+  #     legitimately declines to answer.
+  #
+  # DELIBERATELY EXCLUDED: `sent` is the denominator (every probe increments it), `answered`
+  # is the healthy case, `unsupported` means the pod runs a pre-probe wrapper build and the
+  # operator fell back to the old stall handling - a rollout-skew signal, not a stall - and
+  # `error` is a transport failure that the agent-HTTP rules already own. Grouping by
+  # outcome keeps the two diagnoses in separate alert instances rather than summing two
+  # unrelated failures into one threshold.
+  #
+  # Neither outcome kills a turn on its own: the operator probes, waits
+  # stallProbeGraceSeconds, re-probes, and only past stallProbeMaxAttempts interrupts and
+  # runs the ordinary stop sequence. So this reports the escalation path being exercised,
+  # not work already lost - hence warning, and hence a 1h window rather than any occurrence.
+  - name: "Operator agent stall probe unanswered"
+    queries:
+      - expression: |
+          sum by (outcome) (increase(operator_stall_probe_total{namespace="tatara",job="tatara-operator",outcome=~"unanswered|never_delivered"}[1h])) or vector(0)
+    math_operator: ">"
+    threshold: 3
+    for: 15m
+    decimal_points: 0
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-agent-stall-probe-unanswered"
+      summary: "{{ index $values \"C\" }} stall probe(s) with outcome={{ index $labels \"outcome\" }} in 1h (>3). Read the outcome, they are different diagnoses: never_delivered means the probe's enqueue line was written and no remove followed, i.e. the agent never reached another tool-call boundary and IS BLOCKED INSIDE ONE LONG-RUNNING TOOL CALL (an MCP or forge call with no client timeout, a command waiting on a prompt, a shell read from an empty stdin) - the wrapper is fine and the session is intact. unanswered means the probe was delivered and simply not replied to inside stallProbeGraceSeconds, which a busy turn does legitimately; treat a rising unanswered rate with no never_delivered alongside as the grace window being too tight, not as a hang. `kubectl exec <pod> -c wrapper -- ps -eo pid,etimes,args --sort=-etimes` names the hung tool call outright."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # WHETHER RAISING THE CEILING BOUGHT ANYTHING. A human event arrived for a Task that would
+  # have been taken live - a reply on an issue or an MR, the thing a live pod exists to
+  # answer - and the operator refused because the project was already at maxLivePods. The
+  # event is not lost, the Task waits; but this is the most expensive latency the platform
+  # produces, because a human was at the keyboard when it happened. MaxLivePods clamps to
+  # maxConcurrentAgents-1, so an agent-ceiling raise that does not move maxLivePods buys the
+  # live lane nothing - if these refusals do not fall across the H1b raise, the raise did
+  # not reach live work.
+  #
+  # reason="live-ceiling-full" IS THE ONLY SATURATION VALUE, verified against
+  # tatara-operator internal/controller/livepods.go:907-931 (LiveEntryDeclineReasons). The
+  # closed set is not-a-live-state|task-parked|live-ceiling-full|rounds-exhausted|task-done,
+  # and the other four are ordinary refusals - not-a-live-state alone runs ~85/week and
+  # would swamp any threshold set here.
+  #
+  # "no-live-room" IS NOT A VALUE OF THIS LABEL, and the plan this rule came from assumed it
+  # was. It is stage.DeclineNoLiveRoom (internal/stage/stage.go:1169) and it lands on the
+  # KIND label of operator_unpark_declined_total - the same live ceiling refusing a PARKED
+  # Task that a human event would have woken, one door over. Deliberately not folded in
+  # here: different metric, different label, different label set, and `kind` is a closed-set
+  # label in stage_values_allowlist.txt that would need an exemption. The runbook names it
+  # so an on-call checks both; neither rule can see the other's refusals.
+  - name: "Operator live entry blocked"
+    queries:
+      - expression: |
+          sum by (project) (increase(operator_live_entry_declined_total{namespace="tatara",job="tatara-operator",reason="live-ceiling-full"}[1h])) or vector(0)
+    math_operator: ">"
+    threshold: 10
+    for: 15m
+    decimal_points: 0
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-live-entry-blocked"
+      summary: "Project {{ index $labels \"project\" }} refused {{ index $values \"C\" }} live entries in 1h (>10) with reason=live-ceiling-full - human events arriving for Tasks that would have gone live, turned away because the project is at maxLivePods. Work is not lost, but a person was waiting. Check first whether the live pods holding the ceiling are serving live conversations or merely sitting inside their conversation-idle budget with nobody talking to them: if it is the latter, the idle budget is the knob, not the ceiling. If they are genuinely busy this is a capacity call - raise maxLivePods (and maxConcurrentAgents with it, since maxLivePods clamps to maxConcurrentAgents-1) in tatara-helmfile values/project-*/common.yaml, knowing it raises the ceiling on concurrent model spend too. The un-park side of the same ceiling is counted separately as operator_unpark_declined_total{kind=\"no-live-room\"}; check it alongside."
     labels:
       homelab: "true"
       system: "tatara"
@@ -858,8 +972,19 @@ rules:
   #     (status.parkReason), liveness is a PROPERTY (stage.Live(state)). A failure PARKS.
   #   - Work-clock budgets (internal/stage/stage.go:640): new 5m, the three LIVE states
   #     (refined, under-implementation, awaiting-review) run the conversation IDLE clock
-  #     (60m default) with absolute residency caps of 24h/6h/4h, merged 4h, deployed 2h,
+  #     (60m default) with a single absolute residency cap of 24h, merged 4h, deployed 2h,
   #     done 48h, rejected 24h.
+  #
+  #     THE THREE LIVE CAPS COLLAPSE TO ONE 24h (phase O3, liveness.go:157-162). They were
+  #     24h refined / 6h under-implementation / 4h awaiting-review; they become 24h for all
+  #     three, as a CONSTANT and not a CRD field, because "no feature exceeds 24h ever" is a
+  #     platform invariant and a constant cannot be silently pruned. Recorded here because
+  #     the state-age rules below cite the caps in their own reasoning and a stale 6h/4h
+  #     claim is how a threshold gets "harmonised" down onto a cap that no longer exists.
+  #     NO THRESHOLD MOVES FOR IT: operator_task_state_age_seconds resets on every state
+  #     transition, so the per-state worst case is that state's own cap, never their sum -
+  #     4h -> 24h on awaiting-review raises the healthy ceiling to the same ~48h the
+  #     refined path already had, which the 8d threshold below already clears.
   #
   # THE CONSEQUENCE FOR EVERY STATE-AGE RULE BELOW, AND IT IS STRUCTURAL:
   # operator_task_state_age_seconds is labelled {task,state,kind} ONLY. It carries NO park
@@ -960,8 +1085,14 @@ rules:
   # a Task legitimately parked(awaiting-human) in a live state - budget ParkRetention,
   # 7d, then Reap - is indistinguishable from one that is wedged. 36h would false-fire on
   # every one of them. 8d (691200s) sits just past ParkRetention, so:
-  #   - un-parked live Task: 24h admission (clock 1) + 3 x 5m readiness respawn (clock 2)
-  #     + at most the 24h residency cap on `refined` (liveness.go:153-157) = ~48h. Never 8d.
+  #   - un-parked live Task: 24h admission (clock 1) + 5m readiness respawns (clock 2)
+  #     + at most the single 24h residency cap that O3 gives ALL THREE live states
+  #     (liveness.go:157-162) = ~48h. Never 8d. This was already the worst case before O3,
+  #     because it was `refined`'s cap; O3 only brings under-implementation (was 6h) and
+  #     awaiting-review (was 4h) up to the same number, so the bound is unchanged. The
+  #     respawn term is no longer "3 x" - O3 deletes maxPodRecreations, and unbounded
+  #     respawn is now watched by "Operator agent pod recreation loop" above rather than
+  #     capped; it still cannot push a Task past its own state's 24h residency cap.
   #   - parked Task: reaped at ParkRetention 7d. Never 8d.
   # so anything past 8d means NO deadline is running at all - not the state budget, not
   # the residency cap, not the park-retention reaper. That is still the failure this rule
@@ -984,7 +1115,7 @@ rules:
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-pod-stage-wedged"
-      summary: "Task {{ index $labels \"task\" }} has been in state={{ index $labels \"state\" }} for {{ index $values \"C\" }}s (>8d). These are the three LIVE states (a live agent pod, idle clock + absolute residency cap). Worst-case HEALTHY is ~48h un-parked (24h admission + respawns + a 24h residency cap) and 7d parked (ParkRetention, then the reaper). Past 8d NONE of those is being enforced: no state budget, no residency cap, no park-retention reap. The Task is holding a pod slot or a queue slot with no exit. This threshold is deliberately coarse - operator_task_state_age_seconds carries no park dimension in v2.0.0, so a tighter one would page on every legitimately parked Task."
+      summary: "Task {{ index $labels \"task\" }} has been in state={{ index $labels \"state\" }} for {{ index $values \"C\" }}s (>8d). These are the three LIVE states (a live agent pod, idle clock + a single absolute 24h residency cap on all three since phase O3, previously 24h/6h/4h). Worst-case HEALTHY is ~48h un-parked (24h admission + respawns + the 24h residency cap) and 7d parked (ParkRetention, then the reaper). Past 8d NONE of those is being enforced: no state budget, no residency cap, no park-retention reap. The Task is holding a pod slot or a queue slot with no exit. This threshold is deliberately coarse - operator_task_state_age_seconds carries no park dimension in v2.0.0, so a tighter one would page on every legitimately parked Task."
     labels:
       homelab: "true"
       system: "tatara"

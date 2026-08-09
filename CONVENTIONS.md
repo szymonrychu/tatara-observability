@@ -167,6 +167,65 @@ python3 scripts/check_metric_provenance.py            # alerts/*.yaml AND dashbo
 python3 -m unittest discover scripts -p 'test_*.py'    # linter self-tests (both checkers)
 ```
 
+### 5.1 The third dimension: label NAMES (`check_label_provenance.py`)
+
+A PromQL selector has three dimensions and the checks above cover two of them:
+the metric NAME, and - for the four label names the value sweep happens to
+hard-code - the label VALUE. The label NAME was never checked at all, and issue
+#100 is what that costs. tatara-operator v2.0.0 renamed the label `stage` ->
+`state` while KEEPING `operator_task_terminal_total`, so five rules selected
+`operator_task_terminal_total{stage="failed"}` - a series that cannot exist -
+and every check was green: the name check passed because the metric is still
+emitted, and the value check passed because `stage` was one of its four known
+label names and `failed` was still a member of a 28-day-stale closed set.
+
+The trap worth naming: because `stage` appears in the value sweep's regex,
+everyone read it as "`stage` is checked". Only its VALUES were.
+
+`scripts/check_label_provenance.py` closes it. Every label NAME an expression
+uses must be one the producing metric declares, and the declared set is read
+out of the producer's Go source - the `[]string{...}` closing argument of the
+same constructor call `reconcile_metric_provenance.py` already parses for the
+name, from the same shallow clones. Not a vendored golden file: a snapshot rots
+in exactly the direction this issue documents. Not live Prometheus: a labelled
+vec that has never been written to has no series and would look identical to a
+deleted one.
+
+Two forms count as naming a label:
+
+- a matcher in a selector body - `metric{label="v"}`, `=~`, `!=`, `!~`. A
+  positive matcher on a label the metric does not carry matches NOTHING and the
+  rule reports OK forever; a negative one matches EVERYTHING and the rule goes
+  falsely NOISY. Both are the same defect;
+- a `by (...)` grouping clause, but only when the expression selects exactly one
+  allowlisted metric and mints no labels with `label_replace`/`label_join`.
+  Grouping by an absent label is not dark - it collapses everything into one
+  group with the label set to `""` - but it destroys the dimension the rule
+  claims to report and blanks any `{{ index $labels "..." }}` built on it.
+  `without (...)` is deliberately not checked: removing an absent label is a
+  genuine no-op and defensive `without (le)` is idiomatic.
+
+**It fails CLOSED, and that is the whole point.** This repo has shipped two
+guards that reported OK when they could not see - `check_metric_provenance.py`
+said OK while nine rules were dark, and `reconcile_metric_provenance.py`'s
+nightly 03:23 UTC sweep sits inside #94's Grafana blackout window. So a clone
+that fails all three attempts, a metric no producer declares, and a label slice
+built from a variable rather than a literal are each a hard failure here, not
+the neutral skip the reconcile script takes. The only exemption is the
+`external` allowlist section (kube-state-metrics, kubelet, the forward-looking
+OTel entry), which no tatara repo emits and which is therefore not derivable
+from anything; that exemption is the `SECTION_REPO` mapping already owned by
+`reconcile_metric_provenance.py`, not a second hand-maintained list, and the
+count of exempted metrics is printed on every run.
+
+Scrape-pipeline labels (`job`, `instance`, `namespace`, `pod`, `container`,
+`node`, ... ) and the client library's `le`/`quantile` are legal on every metric
+because the producer never declares them.
+
+```sh
+python3 scripts/check_label_provenance.py   # needs network: clones the 4 producer repos
+```
+
 ## 6. Structural alert-shape checks
 
 `scripts/lint_alert_rules.py` enforces three more conventions beyond section 3's

@@ -1057,3 +1057,20 @@ PR/push triggers.
   made disjoint without inventing a distinction the operator no longer draws. Same shape as
   the error log burst/recurring pair in alerts/tatara-logs.yaml. Do not "dedupe" by
   deleting one.
+- 2026-08-09 (#100): the label NAME was the one dimension of a PromQL selector nothing
+  guarded. `check_metric_provenance.py`'s value sweep hard-codes its own four label names
+  (`stageReason|stage|kind|agent_kind`), so `stage` appearing in that regex read as "stage is
+  checked" when only its VALUES ever were - and when operator v2.0.0 renamed stage -> state
+  while KEEPING `operator_task_terminal_total`, 5 rules selected a label that cannot exist on
+  a metric that does, with every check green. New `check_label_provenance.py` derives each
+  metric's declared label set from the `[]string{...}` closing argument of the same
+  constructor call `reconcile_metric_provenance.py` already parses for the name, off the same
+  clones - paren-matched, not line-windowed, because the slice sits after a Help string that
+  can run several concatenated lines. It FAILS CLOSED (clone failure, undeclared metric, or a
+  label slice built from a variable are all errors, not skips) precisely because both earlier
+  guards shipped reporting OK when they could not see. Measured on main: 34 findings - 20
+  label-name, 14 dead-metric - all cleared by #99. It also covers `by (...)` when the binding
+  is unambiguous, which found the one thing #99 does NOT fix: "Operator triage stage wedged"
+  groups `operator_task_parked_total{state,parkReason}` `by (kind)`, a label it has never
+  carried, so the grouping is a silent no-op. Reported on #99 rather than fixed here - those
+  lines do not exist on main.

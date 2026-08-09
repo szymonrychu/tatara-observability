@@ -19,6 +19,13 @@ name: alert-rules-lint
 # script shallow-clones the 4 producer repos at main and fails on any allowlist entry
 # they no longer emit. A metric removal never touches this repo's paths-filtered
 # triggers below, so it also runs on a nightly schedule.
+#
+# check_label_provenance.py (issue #100) closes the LAST dimension. All three checks
+# above are about the metric NAME (plus four hard-coded label VALUES); nothing has
+# ever validated a label NAME. A producer that renames a label while keeping the
+# metric leaves every selector on the old name matching nothing, forever, with all
+# three green. It derives the declared label set from the same clones and fails
+# CLOSED - a repo it cannot clone is an error here, not a neutral skip.
 
 on:
   pull_request:
@@ -34,6 +41,8 @@ on:
       - "scripts/test_check_metric_provenance.py"
       - "scripts/reconcile_metric_provenance.py"
       - "scripts/test_reconcile_metric_provenance.py"
+      - "scripts/check_label_provenance.py"
+      - "scripts/test_check_label_provenance.py"
       - "scripts/metrics_allowlist.txt"
       - "scripts/stage_values_allowlist.txt"
       - "scripts/check_runbook_urls.py"
@@ -53,6 +62,8 @@ on:
       - "scripts/test_check_metric_provenance.py"
       - "scripts/reconcile_metric_provenance.py"
       - "scripts/test_reconcile_metric_provenance.py"
+      - "scripts/check_label_provenance.py"
+      - "scripts/test_check_label_provenance.py"
       - "scripts/metrics_allowlist.txt"
       - "scripts/stage_values_allowlist.txt"
       - "scripts/check_runbook_urls.py"
@@ -110,6 +121,23 @@ jobs:
       # a hard failure here.
       - name: reconcile metric provenance against producer repos
         run: python3 scripts/reconcile_metric_provenance.py
+
+      # Label-NAME provenance (issue #100). The two checks above guard the metric
+      # NAME and, via stage_values_allowlist.txt, four hard-coded label VALUES. The
+      # third dimension of a PromQL selector - the label NAME - was never guarded at
+      # all, and tatara-operator v2.0.0 renamed stage -> state while KEEPING
+      # operator_task_terminal_total, so 5 rules selected a label that does not exist
+      # on a metric that does. Name check green, value check green, 5 rules matching
+      # nothing forever. This derives each metric's declared label set from the same
+      # producer clones, from the `[]string{...}` closing argument of the same
+      # constructor call the reconcile step already parses for the name, and fails on
+      # any selector or `by (...)` clause naming a label the producer does not declare.
+      # It FAILS CLOSED: a clone that never succeeds, a metric no producer declares,
+      # or a label slice built from a variable is a failure here, not a skip - unlike
+      # the neutral skip above, because "could not see" reported as OK is the exact
+      # failure both this repo's earlier guards shipped with.
+      - name: check label provenance (alerts + dashboards)
+        run: python3 scripts/check_label_provenance.py
 
       # Issue #81: the incident skill's mandatory phase-2 "Runbook check" is a no-op unless
       # rules carry a runbook_url, and a runbook_url is worthless unless the anchor it names

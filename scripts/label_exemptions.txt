@@ -16,7 +16,8 @@
 # closed-set label, or that carries a relabelled label name, fails CI until
 # someone lands it here on purpose.
 #
-# Sections are `## <name>` followed by one entry per line.
+# Sections are `## <name>` followed by one entry per line. See CONVENTIONS.md 5.1 for
+# the three dimensions and 5.2 for what a green run does NOT certify.
 
 ## infra-labels
 # Label NAMES no producer constructor can ever declare, because they are attached

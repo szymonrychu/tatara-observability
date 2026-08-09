@@ -7,12 +7,31 @@
 # have gone stale - they would have reported OK forever, leaving the merge/deploy path to
 # a cluster-admin-scoped runner with zero alert coverage. See CROSS-REPO-CONTRACT K.
 #
-# The delivery path is now: implementing -> reviewing -> merging -> deploying -> delivered.
-# The operator merges each repo in Task.spec.mergeOrder sequentially against the reviewed
-# head SHA (contract C.5), persisting its position in status.mergeCursor. Stage budgets
-# (contract F.4): merging 4h -> parked(merge-timeout); deploying 2h -> parked(deploy-timeout).
+# 2026-08-08 (issue #97): repointed onto the tatara-operator v2.0.0 8-STATE lifecycle.
+# v2.0.0 renamed status.stage -> status.state and took the metric surface with it, so every
+# rule here was querying names that no longer exist: operator_task_stage_age_seconds ->
+# operator_task_state_age_seconds, and the stage/stageReason labels -> state / stateReason
+# (terminal) / parkReason (park). Because this file sets default_no_data_state: "OK" those
+# rules did not fail - they reported Normal(NoData) forever, which is what silenced the
+# merge/deploy wedge detector at 2026-08-08T06:45Z.
 #
-# These rules page BEFORE the stage budget elapses, so a human sees a wedged deploy while it
+# The delivery path is now: under-implementation -> awaiting-review -> merged -> deployed -> done.
+# NAMING TRAP, straight from the operator's own enum doc: `merged` and `deployed` name the
+# PHASE, not the milestone. `merged` means the verdict is approve and the operator owns the
+# merge cursor, NOT that every MR is merged - per-MR truth stays on mr.status.state. They are
+# the direct successors of the old `merging` and `deploying` stages and carry the same F.4
+# budgets, so the thresholds below are unchanged: merged 4h -> park(merge-timeout);
+# deployed 2h -> park(deploy-timeout).
+#
+# The operator merges each repo in Task.spec.mergeOrder sequentially against the reviewed
+# head SHA (contract C.5), persisting its position in status.mergeCursor.
+#
+# THE OTHER HALF OF THE RENAME (#521): `failed` is GONE as a state. The terminal set is now
+# EXACTLY done|rejected, and a failure PARKS instead of terminating. So every rule here that
+# read operator_task_terminal_total{stage="failed",...} now reads operator_task_parked_total
+# {parkReason=...} - the only counter of a failure the platform still has.
+#
+# These rules page BEFORE the state budget elapses, so a human sees a wedged deploy while it
 # is still a deploy and not yet a park. The park counter below is the backstop that catches
 # the case where they missed it.
 interval_seconds: 60
@@ -21,14 +40,14 @@ rules:
   - name: "Tatara delivery parked on a merge or deploy timeout"
     queries:
       - expression: |
-          sum by (stageReason) (increase(operator_task_parked_total{namespace="tatara",job="tatara-operator",stageReason=~"merge-timeout|deploy-timeout"}[30m])) or vector(0)
+          sum by (parkReason) (increase(operator_task_parked_total{namespace="tatara",job="tatara-operator",parkReason=~"merge-timeout|deploy-timeout"}[30m])) or vector(0)
     math_operator: ">"
     threshold: 0
     for: 5m
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-delivery-parked-on-a-merge-or-deploy-timeout"
-      summary: "{{ index $values \"C\" }} park event(s) (park/un-park transitions, not distinct Tasks) with stageReason={{ index $labels \"stageReason\" }} in 30m - a park/un-park flap on one Task counts several times here, so this is an upper bound on Tasks affected, not a Task count. A merge or deploy stage blew its budget (merging 4h, deploying 2h; each re-park gets a fresh 30m re-entry window, up to 3 per timeout cycle) and the Task was parked. Merged component code is NOT reaching the cluster. Un-parking re-enters merging/deploying cursor-resumed (contract F.6), it never re-enters implementing - so check the owned MergeRequest CRs and the tatara-helmfile apply run, not the agent."
+      summary: "{{ index $values \"C\" }} park event(s) (park/un-park transitions, not distinct Tasks) with parkReason={{ index $labels \"parkReason\" }} in 30m - a park/un-park flap on one Task counts several times here, so this is an upper bound on Tasks affected, not a Task count. A merge or deploy state blew its budget (merged 4h, deployed 2h; each re-park gets a fresh 30m re-entry window, up to 3 per timeout cycle) and the Task was parked. Merged component code is NOT reaching the cluster. Un-parking re-enters merged/deployed cursor-resumed (contract F.6), it never re-enters under-implementation - so check the owned MergeRequest CRs and the tatara-helmfile apply run, not the agent."
     labels:
       homelab: "true"
       system: "tatara"
@@ -37,14 +56,14 @@ rules:
   - name: "Tatara merge stage wedged"
     queries:
       - expression: |
-          max by (task) (operator_task_stage_age_seconds{namespace="tatara",job="tatara-operator",stage="merging"})
+          max by (task) (operator_task_state_age_seconds{namespace="tatara",job="tatara-operator",state="merged"})
     math_operator: ">"
     threshold: 7200
     for: 10m
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-merge-stage-wedged"
-      summary: "Task {{ index $labels \"task\" }} has been in stage=merging for {{ index $values \"C\" }}s (>2h, half the 4h budget). The sequential merge over spec.mergeOrder has stopped advancing: a required check is red, the reviewed head SHA moved (409 -> stage reverts to reviewing), or the forge is refusing the merge. It parks at 4h."
+      summary: "Task {{ index $labels \"task\" }} has been in state=merged for {{ index $values \"C\" }}s (>2h, half the 4h budget). state=merged names the PHASE, not the milestone: the verdict is approve and the operator owns the merge cursor, NOT that every MR is merged. The sequential merge over spec.mergeOrder has stopped advancing: a required check is red, the reviewed head SHA moved (409 -> state reverts to awaiting-review), or the forge is refusing the merge. It parks(merge-timeout) at 4h."
     labels:
       homelab: "true"
       system: "tatara"
@@ -53,14 +72,14 @@ rules:
   - name: "Tatara deploy stage wedged"
     queries:
       - expression: |
-          max by (task) (operator_task_stage_age_seconds{namespace="tatara",job="tatara-operator",stage="deploying"})
+          max by (task) (operator_task_state_age_seconds{namespace="tatara",job="tatara-operator",state="deployed"})
     math_operator: ">"
     threshold: 3600
     for: 10m
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-deploy-stage-wedged"
-      summary: "Task {{ index $labels \"task\" }} has been in stage=deploying for {{ index $values \"C\" }}s (>1h, half the 2h budget). The merged code is not reaching the cluster: the component release job, the pin propagation, or the tatara-helmfile apply has not completed. It parks at 2h."
+      summary: "Task {{ index $labels \"task\" }} has been in state=deployed for {{ index $values \"C\" }}s (>1h, half the 2h budget). state=deployed names the PHASE, not the milestone: the merge landed and the operator is waiting on the deploy, NOT that the code is live. The merged code is not reaching the cluster: the component release job, the pin propagation, or the tatara-helmfile apply has not completed. It parks(deploy-timeout) at 2h."
     labels:
       homelab: "true"
       system: "tatara"
@@ -82,44 +101,55 @@ rules:
       system: "tatara"
       component: "cd"
       severity: "warning"
-  # v6 addition (fix M3-9). reviewing <-> merging on a moved head is the FOURTH
+  # v6 addition (fix M3-9). awaiting-review <-> merged on a moved head is the FOURTH
   # cycle in the F.4 cycle-cap table and the ONLY one that spawns a review pod
-  # every lap: merging -> reviewing on a moved head does NOT touch mergeReentries
+  # every lap: merged -> awaiting-review on a moved head does NOT touch mergeReentries
   # (only the parked path does), so nothing else in this file would catch it
-  # accruing cost. headMoveReentries caps at 3 -> failed(head-moving).
+  # accruing cost. headMoveReentries caps at 3 -> park(head-moving).
+  #
+  # #97: `failed` is gone as a state (#521 narrowed the terminal set to done|rejected and
+  # made a failure PARK instead), and head-moving is now a member of the 28-value
+  # status.parkReason vocabulary, verified in tatara-operator internal/stage/stage.go:96.
+  # So this counts parks, not terminals. Grouped by the state the Task was in when it
+  # parked, which is the closest thing to the old `failed` context: it will read
+  # state=merged for the merge-cursor path.
   - name: "Tatara merge head kept moving"
     queries:
       - expression: |
-          sum(increase(operator_task_terminal_total{namespace="tatara",job="tatara-operator",stage="failed",stageReason="head-moving"}[1h])) or vector(0)
+          sum by (state) (increase(operator_task_parked_total{namespace="tatara",job="tatara-operator",parkReason="head-moving"}[1h])) or vector(0)
     math_operator: ">"
     threshold: 0
     for: 5m
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-merge-head-kept-moving"
-      summary: "tatara-operator failed {{ index $values \"C\" }} Task(s) in 1h with stageReason=head-moving - the reviewed PR's head kept moving across 3 reviewing<->merging laps, spawning a fresh review pod every time before giving up. Check for a human pushing to the branch or a flapping CI autocommit on the PR."
+      summary: "tatara-operator parked {{ index $values \"C\" }} Task(s) in 1h with parkReason=head-moving (from state={{ index $labels \"state\" }}) - the reviewed PR's head kept moving across 3 awaiting-review<->merged laps, spawning a fresh review pod every time before giving up. Check for a human pushing to the branch or a flapping CI autocommit on the PR."
     labels:
       homelab: "true"
       system: "tatara"
       component: "cd"
       severity: "warning"
-  # v6 / K.2 minimum alert set: "merge / deploy BLOCKED (WARNING)". K.2's own text
-  # names the query as operator_task_parked_total{stageReason=~"merge-blocked|
-  # deploy-blocked"} - that query can never fire. F.3 defines both reasons as
-  # FAILED terminals (mergeReentries/deployReentries > 3, fix H7); parked only
-  # ever carries merge-timeout/deploy-timeout (the F.4 budget table). Implemented
-  # here against operator_task_terminal_total instead - see the v6 + v7 delta section.
+  # v6 / K.2 minimum alert set: "merge / deploy BLOCKED (WARNING)". K.2's own text named
+  # the query as operator_task_parked_total{...=~"merge-blocked|deploy-blocked"}, which
+  # under the OLD 16-stage machine could never fire (F.3 defined both reasons as `failed`
+  # terminals, and parked only ever carried merge-timeout/deploy-timeout), so this rule
+  # was implemented against operator_task_terminal_total{stage="failed"} instead.
+  #
+  # #97/#521 INVERTED THAT: `failed` is gone as a state, a failure now PARKS, and both
+  # merge-blocked and deploy-blocked are members of the status.parkReason vocabulary
+  # (tatara-operator internal/stage/stage.go:84,86 and the ParkReasons list at :110).
+  # K.2's original formulation is now the correct one and this is it.
   - name: "Tatara merge or deploy cycle exhausted"
     queries:
       - expression: |
-          sum by (stageReason) (increase(operator_task_terminal_total{namespace="tatara",job="tatara-operator",stage="failed",stageReason=~"merge-blocked|deploy-blocked"}[1h])) or vector(0)
+          sum by (parkReason) (increase(operator_task_parked_total{namespace="tatara",job="tatara-operator",parkReason=~"merge-blocked|deploy-blocked"}[1h])) or vector(0)
     math_operator: ">"
     threshold: 0
     for: 5m
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-merge-or-deploy-cycle-exhausted"
-      summary: "{{ index $values \"C\" }} Task(s) failed with stageReason={{ index $labels \"stageReason\" }} in 1h - the merge or deploy stage re-entered parked(merge-timeout|deploy-timeout) more than 3 times (fix H7) and gave up permanently. The delivery path to a cluster-admin-scoped runner has stopped, not just slowed."
+      summary: "{{ index $values \"C\" }} Task(s) parked with parkReason={{ index $labels \"parkReason\" }} in 1h - the merge or deploy state re-entered park(merge-timeout|deploy-timeout) more than 3 times (fix H7) and gave up. Under the v2.0.0 lifecycle this is a park with no re-entry left, not a `failed` terminal - the Task sits until ParkRetention reaps it. The delivery path to a cluster-admin-scoped runner has stopped, not just slowed."
     labels:
       homelab: "true"
       system: "tatara"

@@ -20,7 +20,7 @@
   "panels": [
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Every live Task, the stage it is in, and how long it has been sitting there (worst first). Replaces the old Open Issues table, which read tatara_issue_state - the per-issue gauge of the issueLifecycle machine, which the task-centric redesign deletes (contract L.1). CONTRACT GAP: K.1 labels operator_task_stage_age_seconds with {task,stage,kind} only - no project/repo/issue - so this board can no longer link a row to its SCM issue, nor filter by project. The Task name is the only handle it has.",
+      "description": "Every live Task, the state it is in, and how long it has been sitting there (worst first). Repointed onto the tatara-operator v2.0.0 8-state lifecycle (issue #97): operator_task_stage_age_seconds -> operator_task_state_age_seconds, label stage -> state. CONTRACT GAP (unchanged by the rename): the gauge is labelled {task,state,kind} only - no project/repo/issue - so this board cannot link a row to its SCM issue nor filter by project; the Task name is the only handle it has. SECOND GAP: it carries no park dimension either, so a parked Task (park is orthogonal to state in v2.0.0) is indistinguishable here from a wedged one.",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "thresholds"},
@@ -39,28 +39,21 @@
         },
         "overrides": [
           {
-            "matcher": {"id": "byName", "options": "stage"},
+            "matcher": {"id": "byName", "options": "state"},
             "properties": [
               {
                 "id": "mappings",
                 "value": [
                   {
                     "options": {
-                      "approved": {"color": "green", "index": 5, "text": "approved"},
-                      "brainstorming": {"color": "yellow", "index": 1, "text": "brainstorming"},
-                      "clarifying": {"color": "yellow", "index": 2, "text": "clarifying"},
-                      "delivered": {"color": "dark-green", "index": 10, "text": "delivered"},
-                      "deploying": {"color": "dark-blue", "index": 9, "text": "deploying"},
-                      "documenting": {"color": "blue", "index": 11, "text": "documenting"},
-                      "failed": {"color": "red", "index": 13, "text": "failed"},
-                      "implementing": {"color": "green", "index": 6, "text": "implementing"},
-                      "investigating": {"color": "orange", "index": 3, "text": "investigating"},
-                      "merging": {"color": "purple", "index": 8, "text": "merging"},
-                      "parked": {"color": "red", "index": 14, "text": "parked"},
-                      "refining": {"color": "yellow", "index": 4, "text": "refining"},
-                      "rejected": {"color": "red", "index": 12, "text": "rejected"},
-                      "reviewing": {"color": "cyan", "index": 7, "text": "reviewing"},
-                      "triaging": {"color": "blue", "index": 0, "text": "triaging"}
+                      "awaiting-review": {"color": "cyan", "index": 3, "text": "awaiting-review"},
+                      "deployed": {"color": "dark-blue", "index": 5, "text": "deployed"},
+                      "done": {"color": "dark-green", "index": 6, "text": "done"},
+                      "merged": {"color": "purple", "index": 4, "text": "merged"},
+                      "new": {"color": "blue", "index": 0, "text": "new"},
+                      "refined": {"color": "yellow", "index": 1, "text": "refined"},
+                      "rejected": {"color": "red", "index": 7, "text": "rejected"},
+                      "under-implementation": {"color": "green", "index": 2, "text": "under-implementation"}
                     },
                     "type": "value"
                   }
@@ -85,29 +78,29 @@
         "cellHeight": "sm",
         "footer": {"countRows": false, "fields": "", "reducer": ["sum"], "show": false},
         "showHeader": true,
-        "sortBy": [{"desc": true, "displayName": "stage age"}]
+        "sortBy": [{"desc": true, "displayName": "state age"}]
       },
       "pluginVersion": "11.0.0",
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "editorMode": "code",
-          "expr": "max by (task, stage, kind) (operator_task_stage_age_seconds{stage=~\"$stage\"})",
+          "expr": "max by (task, state, kind) (operator_task_state_age_seconds{state=~\"$state\"})",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
           "refId": "A"
         }
       ],
-      "title": "Open Tasks by Stage (age in stage, worst first)",
+      "title": "Open Tasks by State (age in state, worst first)",
       "transformations": [
         {
           "id": "organize",
           "options": {
             "excludeByName": {"Time": true, "__name__": true},
             "includeByName": {},
-            "indexByName": {"Value": 3, "kind": 1, "stage": 2, "task": 0},
-            "renameByName": {"Value": "stage age"}
+            "indexByName": {"Value": 3, "kind": 1, "state": 2, "task": 0},
+            "renameByName": {"Value": "state age"}
           }
         }
       ],
@@ -271,7 +264,7 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Active (non-terminal, non-delivered) Tasks by origin kind, against the number of agent pods actually running. Replaces the old in-flight-Task gauge (tatara_tasks_inflight), which the redesign deletes: a Task is now long-lived and a running pod is the scarce resource, so a Task count and a pod count are different questions (contract K.2 says exactly this - re-express against operator_task_stage and the agent-pod count, never the Task count). Tasks well above pods means work is queued or parked, not running.",
+      "description": "Active (non-terminal) Tasks by origin kind, against the number of agent pods actually running. Under the v2.0.0 8-state lifecycle the terminal set is exactly done|rejected, so 'active' is state!~\"done|rejected\" - `delivered`, `failed` and `parked` are gone as states. A Task is long-lived and a running pod is the scarce resource, so a Task count and a pod count are different questions. Tasks well above pods means work is queued or parked, not running.",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "palette-classic"},
@@ -322,7 +315,7 @@
         {
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "editorMode": "code",
-          "expr": "sum by(kind) (operator_task_stage{stage!~\"delivered|rejected|failed|parked\"})",
+          "expr": "sum by(kind) (operator_task_state{state!~\"done|rejected\"})",
           "legendFormat": "{{kind}} (tasks)",
           "refId": "A"
         },
@@ -592,7 +585,7 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Churn cost: cumulative $ spend by terminal outcome (delivered, churned, abandoned), derived from operator_task_terminal_tokens_total{outcome,model,type} priced per-model the same way as the Cost panel. Churned = recreated/gave-up-and-rerolled Tasks; abandoned = declined/parked with no delivery. A high churned:delivered ratio surfaces recreation-loop waste (the motivating pathology, G12) that the per-issue Cost panel cannot see once a Task is recreated under a new name.",
+      "description": "Churn cost: cumulative $ spend by terminal outcome (delivered, churned, abandoned), derived from operator_task_terminal_tokens_total{outcome,model,type} priced per-model the same way as the Cost panel. Churned = recreated/gave-up-and-rerolled Tasks; abandoned = rejected or parked with no delivery. A high churned:delivered ratio surfaces recreation-loop waste (the motivating pathology, G12) that the per-issue Cost panel cannot see once a Task is recreated under a new name.",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "thresholds"},
@@ -683,15 +676,15 @@
         "allValue": ".*",
         "current": {},
         "datasource": {"type": "prometheus", "uid": "prometheus"},
-        "definition": "label_values(operator_task_stage_age_seconds, stage)",
+        "definition": "label_values(operator_task_state_age_seconds, state)",
         "hide": 0,
         "includeAll": true,
-        "label": "Stage",
+        "label": "State",
         "multi": true,
-        "name": "stage",
+        "name": "state",
         "options": [],
         "query": {
-          "query": "label_values(operator_task_stage_age_seconds, stage)",
+          "query": "label_values(operator_task_state_age_seconds, state)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,

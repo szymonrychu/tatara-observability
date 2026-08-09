@@ -444,56 +444,103 @@ rules:
   # ----------------------------------------------------------------------------
   # Task throughput + queue: saturated lanes and terminal failures stall the loop.
   # ----------------------------------------------------------------------------
-  # Concurrency now gates AGENT PODS, not Tasks (contract A.6: maxConcurrentAgents).
-  # Tasks are long-lived scaffolding - one sitting in clarifying for 24h is HEALTHY and
-  # costs nothing. Counting Tasks as "work in flight" would false-fire permanently, which
-  # is why operator_tasks_inflight is gone. Count the pods.
-  # Threshold 5.999 = 2 projects x maxConcurrentAgents: 3 (tatara-helmfile
-  # values/project-{tatara,infrastructure}/common.yaml). BUMPING maxConcurrentAgents THERE
-  # REQUIRES BUMPING THIS THRESHOLD IN THE SAME CHANGE.
-  # Gated on a non-empty queue: a full pod pool with nothing waiting is throughput, not
-  # starvation.
+  # Concurrency gates AGENT PODS, not Tasks (contract A.6). Tasks are long-lived
+  # scaffolding - one parked for 24h is HEALTHY and costs nothing - which is why
+  # operator_tasks_inflight is gone.
+  #
+  # REWRITTEN 2026-08-08 (#95). THE OLD SHAPE WAS WRONG IN BOTH DIRECTIONS AND THE
+  # REPLACEMENT DELIBERATELY CARRIES NO CAPACITY CONSTANT AT ALL.
+  #
+  # It was: sum(<every wrapper pod in the namespace>) > 5.999, where 5.999 was hand-copied
+  # from "2 projects x maxConcurrentAgents: 3" in tatara-helmfile, with a comment demanding
+  # anyone who bumps that value also bump this one. Nothing enforced that, and it was
+  # ALREADY FALSE on the day it was authored (2026-07-13: maxConcurrentAgents had been 5
+  # since 07-04). By 2026-08-01 the real sum-of-caps was 12 across three projects.
+  #
+  # Worse than stale: admission is enforced PER (project, class), so a namespace-wide sum
+  # is not a function of any lane's saturation and can neither confirm nor deny it. On
+  # 2026-08-01 the tatara alert lane sat pinned at its cap for 13.5h with a 4-5 event
+  # backlog and ~63 refused admissions/hour while this rule stayed SILENT (two other
+  # projects happened to be idle), then fired at 09:58 - after the backlog had SHRUNK -
+  # because unrelated projects pushed the namespace total over 6. Its summary named the
+  # webhook/sweep lane, which had queue depth 0 at every sample; 100% of the 286 refusals
+  # were class=alert.
+  #
+  # THE REPLACEMENT MEASURES THE REFUSAL, NOT A PROXY FOR IT.
+  # operator_admission_blocked_total{reason="pool_full"} is emitted by the admission path
+  # itself, at most once per pool per pass and ONLY when work was genuinely left Queued
+  # behind a full pool (#440). It is labelled {project,class,kind,reason}, so it already
+  # knows the cap without anyone writing the cap down - whether that cap is
+  # queue.alertCapacity (class=alert) or maxConcurrentAgents (the project lane) is the
+  # operator's business, not this file's. There is nothing left to drift.
+  #
+  # The `and on (project, class)` term keeps the original rule's intent (a full pool with
+  # nothing waiting is throughput, not starvation) but applies it PER LANE instead of
+  # namespace-wide, which is what the old rule got wrong.
+  #
+  # for: 30m + a 30m increase() window means one refusal spike cannot page: the lane has
+  # to keep refusing admissions, with work still queued, for half an hour.
+  #
+  # Companion, not duplicate: "Operator queue depth backlog" watches the same (project,
+  # class) lanes for DEPTH > 10 regardless of whether anything is being refused. A lane can
+  # be refusing steadily at depth 3 (which is this rule) or backing up without refusals
+  # (which is that one).
   - name: "Operator agent pod pool saturated with queued work"
     queries:
       - expression: |
-          (sum(kube_pod_container_status_running{namespace="tatara",container="wrapper"}) or vector(0)) and (sum(operator_queue_depth{namespace="tatara",job="tatara-operator"}) > 0)
+          (sum by (project, class) (increase(operator_admission_blocked_total{namespace="tatara",job="tatara-operator",reason="pool_full"}[30m])) > 0)
+          and on (project, class)
+          (max by (project, class) (operator_queue_depth{namespace="tatara",job="tatara-operator"}) > 0)
     math_operator: ">"
-    threshold: 5.999
+    threshold: 0
     for: 30m
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-agent-pod-pool-saturated-with-queued-work"
-      summary: "{{ index $values \"C\" }} agent pods running (at the 2 x maxConcurrentAgents=3 ceiling) with QueuedEvents still waiting, for 30m. The pod lane is saturated and new work is starved. Incidents hold a reserved slot (AlertCapacity >= 1), so this is not an incident outage - but every webhook and sweep event is queueing."
+      summary: "The {{ index $labels \"project\" }} / class={{ index $labels \"class\" }} admission lane refused {{ index $values \"C\" }} admission(s) with reason=pool_full in 30m while QueuedEvents were still waiting, and has done so for 30m. THAT LANE is saturated and its work is starved - no other lane is implicated, and the namespace-wide pod count says nothing about it. The binding cap is queue.alertCapacity for class=alert and maxConcurrentAgents for the project lane, both set per project in tatara-helmfile values/project-*/common.yaml. Confirm the lane and its backlog directly: max by (project, class) (operator_queue_depth{namespace=\"tatara\"}) and max by (project, class, state) (operator_queue_age_seconds{namespace=\"tatara\"}). If the lane is class=alert, incident investigations are queueing behind each other, which is a capacity call (they run for tens of minutes each), not a bug."
     labels:
       homelab: "true"
       system: "tatara"
       component: "operator"
       severity: "warning"
-  # CROSS-REPO DEPENDENCY D1 (contract Global Constraint 7): operator_task_terminal_total
-  # must survive with phase swapped for stage+stageReason+kind. As of this rewrite the
-  # operator worktree has NOT landed the swap yet (internal/obs/task_metrics.go:31-33
-  # still declares {kind,phase,reason}) - see scripts/metrics_allowlist.txt's census note.
-  # Both rules below are written on the D1 assumption per plan Task 6. RE-VERIFY against
-  # the merged operator (grep internal/obs/*.go for stageReason) before this ships. If D1
-  # is refused, replace both with the Task 6 fallback: a single gauge-level rule on
-  # sum(operator_task_stage{namespace="tatara",job="tatara-operator",stage="failed"}),
-  # threshold 3, for 30m - accepting that it latches for the 7-day failed retention.
+  # CROSS-REPO DEPENDENCY D1 IS RESOLVED, AND NOT THE WAY THIS COMMENT USED TO ASSUME
+  # (#97, 2026-08-08). operator_task_terminal_total DID survive, now labelled
+  # {kind,state,stateReason} - verified in tatara-operator internal/obs/task_metrics.go:42-45
+  # at origin/main. But #521 NARROWED IT: `failed` and `parked` are no longer states, the
+  # terminal set is EXACTLY {done, rejected}, "a failure now PARKS, and
+  # operator_task_parked_total is where a park is counted" (the counter's own Help text).
   #
-  # phase is GONE (contract A.5). Terminal transitions are now stage=failed|rejected with a
-  # stageReason from the closed set in F.5. Splitting by stageReason is what makes the alert
-  # actionable: turn-budget-exhausted is a cost problem, pod-recreation-exhausted is an
-  # infrastructure problem, agent-contract-mismatch is a skewed release train.
+  # So {stage="failed"} did not just change spelling, it stopped existing. This rule is
+  # re-expressed on the park counter, which is the only counter of a failure the platform
+  # still has. The exclusion set is the four reasons that are NOT a platform failure or
+  # that another rule owns:
+  #   backlog-sweep   - the zero-cost mint path that OWNS a backlog issue, spawns no pod
+  #   awaiting-human  - a human not having replied yet
+  #   merge-timeout   - owned by "Tatara delivery parked on a merge or deploy timeout"
+  #   deploy-timeout    (alerts/tatara-cd.yaml, severity critical, threshold 0)
+  # Splitting by parkReason is what makes it actionable: turn-budget-exhausted is a cost
+  # problem, pod-recreation-exhausted is an infrastructure problem, agent-contract-mismatch
+  # is a skewed release train.
+  #
+  # KNOWN, DELIBERATE OVERLAP with "Operator task park spike" further down this file, which
+  # is the same counter over a 3h window excluding only the two benign reasons. #521
+  # collapsed `failed` and `parked` into one counter, so a burst detector and a
+  # sustained-trickle detector on it cannot be made disjoint without inventing a
+  # distinction the operator no longer draws. The pairing is the same shape as
+  # "Tatara operator error log burst" (5m) / "Tatara operator error recurring" (1h) in
+  # alerts/tatara-logs.yaml: 1h/>3 is the burst, 3h/>3 is the trickle. Do not "dedupe"
+  # them by deleting one - see MEMORY.md 2026-08-08.
   - name: "Operator task failure spike"
     queries:
       - expression: |
-          sum by (stageReason) (increase(operator_task_terminal_total{namespace="tatara",job="tatara-operator",stage="failed"}[1h])) or vector(0)
+          sum by (parkReason) (increase(operator_task_parked_total{namespace="tatara",job="tatara-operator",parkReason!~"backlog-sweep|awaiting-human|merge-timeout|deploy-timeout"}[1h])) or vector(0)
     math_operator: ">"
     threshold: 3
     for: 15m
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-task-failure-spike"
-      summary: "{{ index $values \"C\" }} Task(s) reached stage=failed with stageReason={{ index $labels \"stageReason\" }} in 1h (>3). Agents are failing terminally at an elevated rate. Failed Tasks are kept for 7 days as debugging artifacts (contract B.6), so the CRs are still there: kubectl get tasks -n tatara."
+      summary: "{{ index $values \"C\" }} park event(s) with parkReason={{ index $labels \"parkReason\" }} in 1h (>3). Under the v2.0.0 lifecycle a failure PARKS rather than terminating - `failed` is not a state any more - so this is the failure-rate signal. Parks are transitions, not distinct Tasks: a park/un-park flap on one Task counts several times, so read it as an upper bound. The Task CRs are still there and still un-parkable: kubectl get tasks -n tatara -o custom-columns=NAME:.metadata.name,STATE:.status.state,PARK:.status.parkReason."
     labels:
       homelab: "true"
       system: "tatara"
@@ -619,23 +666,24 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "warning"
-  # Was reason="PodLost" on the phase-keyed metric. The stage machine's equivalent is
-  # stageReason=pod-recreation-exhausted: the pod vanished mid-stage and the recreation
-  # budget (maxPodRecreations, default 3) is spent, so the stage fails. Work in flight is
+  # Was reason="PodLost" on the phase-keyed metric. The v2.0.0 equivalent is
+  # parkReason=pod-recreation-exhausted: the pod vanished mid-state and the recreation
+  # budget (maxPodRecreations, default 3) is spent, so the Task PARKS (#521 - it no longer
+  # terminates, so operator_task_terminal_total cannot see it). Work in flight is
   # destroyed. Distinct from the boot-crash-budget and agent-unreachable rules, which cover
   # pods that never came up rather than pods that vanished mid-task. Also depends on D1 -
   # see the comment above "Operator task failure spike".
   - name: "Operator task pod-recreation budget exhausted"
     queries:
       - expression: |
-          sum(increase(operator_task_terminal_total{namespace="tatara",job="tatara-operator",stage="failed",stageReason="pod-recreation-exhausted"}[1h])) or vector(0)
+          sum(increase(operator_task_parked_total{namespace="tatara",job="tatara-operator",parkReason="pod-recreation-exhausted"}[1h])) or vector(0)
     math_operator: ">"
     threshold: 0
     for: 5m
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-task-pod-recreation-budget-exhausted"
-      summary: "tatara-operator failed {{ index $values \"C\" }} Task(s) in 1h with stageReason=pod-recreation-exhausted - the agent pod was lost mid-stage and the recreation budget ran out. Investigate pod evictions, node pressure and OOM-kills on the wrapper workload."
+      summary: "tatara-operator parked {{ index $values \"C\" }} Task(s) in 1h with parkReason=pod-recreation-exhausted - the agent pod was lost mid-state and the recreation budget ran out. Investigate pod evictions, node pressure and OOM-kills on the wrapper workload."
     labels:
       homelab: "true"
       system: "tatara"
@@ -796,14 +844,34 @@ rules:
       component: "operator"
       severity: "warning"
   # ----------------------------------------------------------------------------
-  # Stage machine (contract F.4). THE INVARIANT: no stage may be entered without a
-  # deadline that leaves it. These rules do NOT enforce a business SLA - the operator's
-  # own deadline machinery does that, moving the Task to parked or failed. They fire when
-  # a Task sits PAST its budget, which means the deadline machinery itself is broken. That
-  # is the silent-permanent-wedge class the 2026-07-11 hardening killed one edge at a time;
-  # this is the general form.
-  # Budgets: triaging 5m, brainstorming/investigating/refining/documenting 2h,
-  # reviewing 4h, implementing 6h, clarifying/approved 24h.
+  # State machine (contract F.4), REPOINTED 2026-08-08 onto tatara-operator v2.0.0 (#97).
+  # THE INVARIANT: no state may be entered without a deadline that leaves it. These rules
+  # do NOT enforce a business SLA - the operator's own deadline machinery does that. They
+  # fire when a Task sits PAST its budget, which means the deadline machinery itself is
+  # broken.
+  #
+  # WHAT v2.0.0 (#521) CHANGED, and it is not a rename you can find-and-replace:
+  #   - status.stage -> status.state, 16 stages -> 8 states: new, refined,
+  #     under-implementation, awaiting-review, merged, deployed, done, rejected.
+  #     operator_task_stage{_age_seconds} -> operator_task_state{_age_seconds}.
+  #   - `parked` and `failed` are NO LONGER STATES. Park is an ORTHOGONAL FLAG
+  #     (status.parkReason), liveness is a PROPERTY (stage.Live(state)). A failure PARKS.
+  #   - Work-clock budgets (internal/stage/stage.go:640): new 5m, the three LIVE states
+  #     (refined, under-implementation, awaiting-review) run the conversation IDLE clock
+  #     (60m default) with absolute residency caps of 24h/6h/4h, merged 4h, deployed 2h,
+  #     done 48h, rejected 24h.
+  #
+  # THE CONSEQUENCE FOR EVERY STATE-AGE RULE BELOW, AND IT IS STRUCTURAL:
+  # operator_task_state_age_seconds is labelled {task,state,kind} ONLY. It carries NO park
+  # dimension, and updateTaskStageGauges emits it for EVERY Task with a state, parked or
+  # not (project_controller.go:820-833). A parked Task's only remaining deadline is
+  # ParkRetention (7d), and parked(backlog-sweep) is F.4's ONE deadline exemption - it
+  # NEVER ages out at all (stage.ArmedClock, stage.go:729-737). So a state-age rule can no
+  # longer distinguish "wedged" from "legitimately parked", and any threshold below 7d
+  # false-fires on ordinary parked Tasks. Where a rule could be re-expressed on a counter
+  # it was; where it could not, the threshold was raised past ParkRetention or the rule was
+  # paused. Restoring the old precision needs a `parked`/`parkReason` label on
+  # operator_task_state_age_seconds, which the operator does NOT emit today.
   # ----------------------------------------------------------------------------
   # The incident-starvation rule keys on the admission queue itself, not on
   # stage="triaging": triaging's own budget is 5m -> failed(triage-stalled) (F.4), so a
@@ -852,95 +920,137 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "critical"
+  # #97: `triaging` became `new`, but a state-age rule on `new` is NOT the successor and
+  # would false-fire permanently. state=new is also where the sweep mints every backlog
+  # owner as parked(backlog-sweep), which by design never ages out - 6 such Tasks were
+  # sitting in state=new at 38065s each when this was verified live on 2026-08-08, so
+  # ANY age threshold here fires forever. The gauge carries no park dimension to exclude
+  # them with (see the block comment above).
+  #
+  # Re-expressed on the COUNTER instead, which has no such ambiguity: triage-stalled is
+  # the F.4 exit from `new` when its 5m budget elapses (stage.go:656, onElapse[StateNew]
+  # = park(triage-stalled)), and operator_task_parked_total is the only counter of it.
+  # Polarity is inverted versus the old rule - it now reports triage ACTUALLY stalling
+  # rather than the deadline machinery failing to stall it - and that is the actionable
+  # half; the "no deadline is running at all" assertion is carried by "Operator pod
+  # stage wedged" below, which is the one rule that can still make it.
   - name: "Operator triage stage wedged"
     queries:
       - expression: |
-          max by (task) (operator_task_stage_age_seconds{namespace="tatara",job="tatara-operator",stage="triaging"})
+          sum (increase(operator_task_parked_total{namespace="tatara",job="tatara-operator",parkReason="triage-stalled"}[1h])) or vector(0)
     math_operator: ">"
-    threshold: 900
-    for: 5m
+    threshold: 0
+    for: 15m
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-triage-stage-wedged"
-      summary: "Task {{ index $labels \"task\" }} has been in stage=triaging for {{ index $values \"C\" }}s. The budget is 5m and the exit is failed(triage-stalled), so past 15m the F.4 deadline machinery is not running. Nothing else in the stage machine can be trusted while this fires."
+      summary: "tatara-operator parked {{ index $values \"C\" }} Task(s) with parkReason=triage-stalled in 1h. state=new is the operator's own triage pass with a 5m budget (F.4); blowing it means the operator could not classify the work item and hand it on - a Task that never reaches an agent. Check the operator ERROR log for the intake/classify path. NOTE: this counts the stall, not a stuck gauge - a state-age rule on `new` is impossible under v2.0.0 because parked(backlog-sweep) backlog owners live in `new` forever by design."
     labels:
       homelab: "true"
       system: "tatara"
       component: "operator"
       severity: "critical"
-  # fix V6-1: admission-starved (clock 1, 24h from stageEnteredAt) is armed on EVERY
-  # POD stage, not just approved - and a Task entering one of these stages straight
-  # from triaging can sit unadmitted for up to 24h before its own deadline machinery
-  # parks it, which is NORMAL steady state at maxOpenTasks: 6 / maxConcurrentAgents: 3.
-  # operator_task_stage_age_seconds counts from stageEnteredAt regardless of which of
-  # the three clocks (admission/readiness/work) is currently armed, so it cannot
-  # distinguish "queued 10h, healthy" from "working 10h, wedged". The threshold is
-  # therefore raised past the worst-case HEALTHY envelope instead of trying to select
-  # on a clock the metric does not expose:
-  #   24h admission (clock 1)
-  # + 3 x 5m readiness (clock 2 = podReadyTimeout = agentBootDeadline = 5m, and a
-  #   breach RESPAWNS rather than failing - up to maxPodRecreations=3 laps, fix V7-7)
-  # + <= 6h work (clock 3, the largest per-stage budget)
-  # about 30.25h. 36h clears it with room and still catches a genuine wedge same-day.
+  # #97: the six POD STAGES became the three LIVE STATES. stage.Live() is the table
+  # (internal/stage/liveness.go:18-21) and it is exactly {refined, under-implementation,
+  # awaiting-review} - a pod is a property of the state now, not a stage of its own.
   #
-  # THIS REGEX IS POD STAGES ONLY, AND THAT IS LOAD-BEARING (fix V7-8). Pod-less
-  # stages (triaging, approved, merging, deploying) do NOT run clock 1 - they run
-  # clock 3 from stageEnteredAt against their own budget - so their wedge alerts key
-  # on the real budget and are NOT raised: triaging 5m (above), merging 4h and
-  # deploying 2h (alerts/tatara-cd.yaml). A merging Task past 4h is a real signal,
-  # never queue noise. Do not "harmonise" those thresholds with this one.
+  # THE THRESHOLD MOVED 36h -> 8d, AND THAT IS THE POINT OF THIS EDIT. It is no longer
+  # a wedge SLA, it is the last assertion this gauge can still honestly make. Park is
+  # orthogonal in v2.0.0 and operator_task_state_age_seconds has no park dimension, so
+  # a Task legitimately parked(awaiting-human) in a live state - budget ParkRetention,
+  # 7d, then Reap - is indistinguishable from one that is wedged. 36h would false-fire on
+  # every one of them. 8d (691200s) sits just past ParkRetention, so:
+  #   - un-parked live Task: 24h admission (clock 1) + 3 x 5m readiness respawn (clock 2)
+  #     + at most the 24h residency cap on `refined` (liveness.go:153-157) = ~48h. Never 8d.
+  #   - parked Task: reaped at ParkRetention 7d. Never 8d.
+  # so anything past 8d means NO deadline is running at all - not the state budget, not
+  # the residency cap, not the park-retention reaper. That is still the failure this rule
+  # was written for; it is just the only version of it the metric can still express.
+  #
+  # Restoring same-day wedge detection needs a `parked` or `parkReason` label on
+  # operator_task_state_age_seconds. The operator does not emit one - do not fake it by
+  # narrowing the threshold back down.
+  #
+  # NOT COVERED HERE, deliberately: the operator-driven states merged (4h) and deployed
+  # (2h) have real work budgets and their own rules in alerts/tatara-cd.yaml. Do not
+  # "harmonise" those thresholds with this one.
   - name: "Operator pod stage wedged"
     queries:
       - expression: |
-          max by (task, stage) (operator_task_stage_age_seconds{namespace="tatara",job="tatara-operator",stage=~"brainstorming|investigating|refining|documenting|implementing|reviewing"})
+          max by (task, state) (operator_task_state_age_seconds{namespace="tatara",job="tatara-operator",state=~"refined|under-implementation|awaiting-review"})
     math_operator: ">"
-    threshold: 129600
+    threshold: 691200
     for: 15m
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-pod-stage-wedged"
-      summary: "Task {{ index $labels \"task\" }} has been in stage={{ index $labels \"stage\" }} for {{ index $values \"C\" }}s (>36h). These are POD stages: worst-case healthy is a 24h admission wait + up to 3 x 5m pod-readiness respawns + a work budget of 6h or less (F.4 clocks 1-3), about 30h. Past 36h none of the three deadlines is being enforced: the Task is holding a pod slot (or a queue slot) with no exit."
+      summary: "Task {{ index $labels \"task\" }} has been in state={{ index $labels \"state\" }} for {{ index $values \"C\" }}s (>8d). These are the three LIVE states (a live agent pod, idle clock + absolute residency cap). Worst-case HEALTHY is ~48h un-parked (24h admission + respawns + a 24h residency cap) and 7d parked (ParkRetention, then the reaper). Past 8d NONE of those is being enforced: no state budget, no residency cap, no park-retention reap. The Task is holding a pod slot or a queue slot with no exit. This threshold is deliberately coarse - operator_task_state_age_seconds carries no park dimension in v2.0.0, so a tighter one would page on every legitimately parked Task."
     labels:
       homelab: "true"
       system: "tatara"
       component: "operator"
       severity: "warning"
-  # SPLIT in the v7 pass (fixes V6-1 + V7-8, which land on opposite sides of this
-  # rule). clarifying and approved BOTH have a 24h budget, but they are not the same
-  # shape of stage and a single threshold cannot serve both:
-  #   clarifying is a POD stage -> it runs clock 1 (24h admission) AND THEN clock 3
-  #     (24h work). Healthy worst case is about 48h, so a shared 36h threshold would
-  #     FALSE-FIRE on a clarify Task that queued 20h and then worked 20h.
-  #   approved is POD-LESS -> clock 3 ONLY, from stageEnteredAt, 24h (fix V7-8). It
-  #     never carries an admission wait on top, so 36h is right for it and raising it
-  #     would just blunt the alert.
+  # PAUSED 2026-08-08 (#97). NOT dark, NOT deleted - deliberately paused, because there
+  # is no honest v2.0.0 expression of it and a wrong one is worse than a stopped one.
+  #
+  # The rule keyed on stage="clarifying". v2.0.0 DELETED both the `clarifying` stage and
+  # the `clarify` agent kind ("`clarify` was the seventh and is DELETED: its three
+  # decisions became action values on the implement outcome" - internal/stage/stage.go:43).
+  # Human-wait is now park(awaiting-human): an orthogonal FLAG on whatever live state the
+  # Task is in, whose only clock is ParkRetention (7d).
+  #
+  # There is no gauge of park age. operator_task_parked_total is a COUNTER of park EVENTS,
+  # and awaiting-human is the one park reason that is explicitly benign (it is excluded
+  # from "Operator task park spike" for exactly that reason), so counting it is noise, not
+  # a signal. The "the deadline is not firing" assertion is already carried by "Operator
+  # pod stage wedged" above, whose 8d threshold sits past ParkRetention and therefore
+  # catches an awaiting-human park that the reaper never collected.
+  #
+  # UNPAUSE CONDITION, and it is a single concrete thing: the operator emitting a park-age
+  # gauge (e.g. operator_task_park_age_seconds{task,parkReason}) or adding parkReason to
+  # operator_task_state_age_seconds. Neither exists at tatara-operator origin/main today.
+  # Do not unpause by re-pointing this at a live-state age - that is what "Operator pod
+  # stage wedged" already does, and duplicating it would double-page.
   - name: "Operator human-wait stage wedged"
+    is_paused: true
     queries:
       - expression: |
-          max by (task) (operator_task_stage_age_seconds{namespace="tatara",job="tatara-operator",stage="clarifying"})
+          max by (task) (operator_task_state_age_seconds{namespace="tatara",job="tatara-operator",state="refined"})
     math_operator: ">"
-    threshold: 216000
+    threshold: 691200
     for: 30m
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-human-wait-stage-wedged"
-      summary: "Task {{ index $labels \"task\" }} has been in stage=clarifying for {{ index $values \"C\" }}s (>60h). clarifying is a POD stage with a 24h work budget exiting to parked(awaiting-human), and it can carry up to a 24h admission wait ahead of that (F.4 clock 1), so healthy worst case is about 48h. Past 60h neither deadline is firing."
+      summary: "PAUSED (#97). This rule watched stage=clarifying, which tatara-operator v2.0.0 deleted along with the clarify agent kind. Human-wait is now park(awaiting-human) - an orthogonal flag with no age gauge - so the rule has no honest successor and is paused rather than left dark or re-pointed at something it does not mean. The surviving coverage is \"Operator pod stage wedged\" (>8d in a live state, which catches an awaiting-human park the ParkRetention reaper never collected). Unpause when the operator emits a park-age gauge."
     labels:
       homelab: "true"
       system: "tatara"
       component: "operator"
       severity: "warning"
+  # #97: the `approved` stage is gone - v2.0.0 folded the pod-less approval hold into the
+  # ordinary admission wait on the live states. What survived intact is the CONDITION it
+  # watched: a Task that waited out clock 1 without ever getting an agent slot, which
+  # parks(admission-starved) (stage.go:92, a member of the 28-value ParkReasons list).
+  # Re-expressed on that counter, which - unlike the state-age gauge - has no park
+  # ambiguity to work around.
+  #
+  # Threshold 0 / any occurrence, same as the pod-recreation-exhausted rule above: a Task
+  # that burned 24h in a queue and got nothing is never routine. The PAUSED-project
+  # exception the old summary called out no longer applies - a paused project (clock 1
+  # disarmed, stage.go:718-721) cannot reach admission-starved at all, which is the whole
+  # reason that exemption exists.
   - name: "Operator approved stage starved"
     queries:
       - expression: |
-          max by (task) (operator_task_stage_age_seconds{namespace="tatara",job="tatara-operator",stage="approved"})
+          sum by (state) (increase(operator_task_parked_total{namespace="tatara",job="tatara-operator",parkReason="admission-starved"}[1h])) or vector(0)
     math_operator: ">"
-    threshold: 129600
+    threshold: 0
     for: 30m
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-approved-stage-starved"
-      summary: "Task {{ index $labels \"task\" }} has been in stage=approved for {{ index $values \"C\" }}s (>36h). approved is POD-LESS: it runs the work clock only, from stageEnteredAt, budget 24h, exiting to parked(admission-starved) (F.4, fix V7-8). Past 36h the deadline is not firing. The one legitimate exception is a PAUSED project (maxConcurrentAgents == 0), which holds Tasks in approved deliberately and SKIPS the starve-park - check that first."
+      summary: "tatara-operator parked {{ index $values \"C\" }} Task(s) with parkReason=admission-starved (from state={{ index $labels \"state\" }}) in 1h. The Task waited out its 24h admission budget (F.4 clock 1) without ever being given an agent slot, so it parked without doing any work. That is a CAPACITY signal, not a code fault: check \"Operator agent pod pool saturated with queued work\" and \"Operator queue depth backlog\" for the lane that starved it, and maxConcurrentAgents / queue.alertCapacity for the project in tatara-helmfile. A PAUSED project cannot produce this - clock 1 is disarmed while maxConcurrentAgents == 0."
     labels:
       homelab: "true"
       system: "tatara"
@@ -956,35 +1066,45 @@ rules:
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-illegal-stage-transition"
-      summary: "tatara-operator attempted {{ index $values \"C\" }} illegal stage transition(s) from={{ index $labels \"from\" }} to={{ index $labels \"to\" }} in 15m. ANY non-zero value is a code bug in the F.3 transition table, not an operational condition."
+      summary: "tatara-operator attempted {{ index $values \"C\" }} illegal state transition(s) from={{ index $labels \"from\" }} to={{ index $labels \"to\" }} in 15m. ANY non-zero value is a code bug in the F.3 transition table, not an operational condition. The metric name and its from/to labels survived v2.0.0 unchanged (internal/obs/stage_metrics.go:431); only the VALUES moved to the 8-state enum."
     labels:
       homelab: "true"
       system: "tatara"
       component: "operator"
       severity: "warning"
   # Successor to the retired lifecycle-giveup alert (tatara_lifecycle_giveup_total went
-  # with the issueLifecycle machine). The park counter is where a give-up now lands.
+  # with the issueLifecycle machine). The park counter is where a give-up now lands, and
+  # since #521 it is the ONLY counter of a failure at all.
+  #
+  # #97 - THE NEGATIVE-MATCHER INVERSION, and it is the reason this rule is fixed here
+  # rather than merely renamed. v2.0.0 renamed the label stageReason -> parkReason. A
+  # POSITIVE matcher on a dead label selects nothing and goes silently OK; a NEGATIVE one
+  # (`stageReason!~"..."`) matches EVERY series, because a series with no stageReason label
+  # trivially satisfies "stageReason is not one of these". So this rule did not go dark
+  # like its siblings - it inverted, and spent 2026-08-08 firing on the ~36 benign
+  # awaiting-human parks its own summary says it deliberately excludes. Audit every
+  # negative matcher separately after any label rename: they fail LOUD, not silent.
   - name: "Operator task park spike"
     queries:
       - expression: |
-          sum by (stageReason) (increase(operator_task_parked_total{namespace="tatara",job="tatara-operator",stageReason!~"backlog-sweep|awaiting-human"}[3h])) or vector(0)
+          sum by (parkReason) (increase(operator_task_parked_total{namespace="tatara",job="tatara-operator",parkReason!~"backlog-sweep|awaiting-human"}[3h])) or vector(0)
     math_operator: ">"
     threshold: 3
     for: 30m
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-task-park-spike"
-      summary: "{{ index $values \"C\" }} park event(s) (transitions, not distinct Tasks - a park/un-park flap inflates this) with stageReason={{ index $labels \"stageReason\" }} in 3h (>3). Successor to the lifecycle give-up alert. backlog-sweep is excluded (it is the zero-cost mint path that OWNS a backlog issue and spawns no pod) and awaiting-human is excluded (a human not having replied yet is not a platform failure). Everything else here is the platform failing to deliver."
+      summary: "{{ index $values \"C\" }} park event(s) (transitions, not distinct Tasks - a park/un-park flap inflates this) with parkReason={{ index $labels \"parkReason\" }} in 3h (>3). Successor to the lifecycle give-up alert. backlog-sweep is excluded (it is the zero-cost mint path that OWNS a backlog issue and spawns no pod) and awaiting-human is excluded (a human not having replied yet is not a platform failure). Everything else here is the platform failing to deliver."
     labels:
       homelab: "true"
       system: "tatara"
       component: "operator"
       severity: "warning"
   # kind=review is the ONE outcome kind whose commit does not itself advance the Task's
-  # stage: the advance is deferred to MergeRequestReconciler -> DrainPendingReview ->
+  # state: the advance is deferred to MergeRequestReconciler -> DrainPendingReview ->
   # advanceAfterReview, a SECOND reconciler racing the pod-liveness caps. A 5m handoff
   # deadline (tatarav1alpha1.HandoffDeadline) bounds that race: if the drain has not
-  # advanced the Task within 5m of the outcome landing, it parks stageReason=handoff-stalled.
+  # advanced the Task within 5m of the outcome landing, it parks parkReason=handoff-stalled.
   # ANY occurrence matters (threshold 0, mirrors pod-recreation-exhausted above) because
   # the review already landed - the PR is approved and posted - and this Task's only
   # recovery path left is a backlog-sweep re-mint. Two causes: a dead drain (the
@@ -995,14 +1115,14 @@ rules:
   - name: "Operator handoff drain stalled"
     queries:
       - expression: |
-          sum(increase(operator_task_terminal_total{namespace="tatara",job="tatara-operator",stage="parked",stageReason="handoff-stalled"}[1h])) or vector(0)
+          sum(increase(operator_task_parked_total{namespace="tatara",job="tatara-operator",parkReason="handoff-stalled"}[1h])) or vector(0)
     math_operator: ">"
     threshold: 0
     for: 5m
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-handoff-drain-stalled"
-      summary: "tatara-operator parked {{ index $values \"C\" }} Task(s) in 1h with stage=parked, stageReason=handoff-stalled. A review outcome was accepted and the PR review already landed, but the cross-reconciler drain (MergeRequestReconciler -> DrainPendingReview -> advanceAfterReview) did not advance the Task within the 5m handoff deadline, so it parked instead of progressing. Check whether the MergeRequest CR was deleted, the workqueue item was dropped, or leader election changed over (dead drain, needs a fix or a manual nudge) versus an SCM/forge degradation lasting over 5m that only slowed the drain down (false positive, work is fine). Recovery today is a backlog-sweep re-mint; a human should confirm which case this is before waiting on that."
+      summary: "tatara-operator parked {{ index $values \"C\" }} Task(s) in 1h with parkReason=handoff-stalled. A review outcome was accepted and the PR review already landed, but the cross-reconciler drain (MergeRequestReconciler -> DrainPendingReview -> advanceAfterReview) did not advance the Task within the 5m handoff deadline, so it parked instead of progressing. Check whether the MergeRequest CR was deleted, the workqueue item was dropped, or leader election changed over (dead drain, needs a fix or a manual nudge) versus an SCM/forge degradation lasting over 5m that only slowed the drain down (false positive, work is fine). Recovery today is a backlog-sweep re-mint; a human should confirm which case this is before waiting on that."
     labels:
       homelab: "true"
       system: "tatara"
@@ -1012,7 +1132,7 @@ rules:
   # Release-train integrity + the etcd object budget. Both are CRITICAL on ANY value.
   # ----------------------------------------------------------------------------
   # The operator injects TATARA_CONTRACT_VERSION=2; the cli refuses to boot on a mismatch
-  # and the operator fails the Task with stageReason=agent-contract-mismatch BEFORE turn-0
+  # and the operator parks the Task with parkReason=agent-contract-mismatch BEFORE turn-0
   # (contract G.10). The wrapper image is pinned in a DIFFERENT helm release
   # (project-tatara) than the operator, and helmfile applies releases CONCURRENTLY, so
   # new-operator + old-agent IS reachable. This is the alert that catches a skewed train.
@@ -1214,7 +1334,7 @@ rules:
     exec_err_state: "Error"
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-sweep-heartbeat-stale"
-      summary: "tatara-operator project {{ index $labels \"project\" }} activity={{ index $labels \"activity\" }} is {{ index $values \"C\" }}s past its own next expected run (>3h grace). The next-expected timestamp is computed by the operator from that activity's cron and its last success, so this is a genuinely missed run, not a cadence mismatch. NoData on this rule is ALSO a failure and is configured to fire: an absent series means the operator published no next expected run for any activity at all."
+      summary: "IF THIS ARRIVED AS alertname=DatasourceError, STOP AND READ annotations.Error FIRST: the rest of this summary is the FIRING-case template rendered against an empty result set and every number in it is a lie (counts read 0, label values read empty). Grafana could not evaluate the rule at all. If Error mentions `pq:` or SQLSTATE 53300 (\"remaining connection slots are reserved\"), the failure is GRAFANA'S OWN backing Postgres (grafana-database-cluster, ns monitoring) - not this rule's datasource, not tatara, and not anything in the query below. See \"Grafana alert rule evaluation failing\" in alerts/tatara-grafana.yaml; that is the detector for it, and it recurs nightly around 03:30 UTC. OTHERWISE: tatara-operator project {{ index $labels \"project\" }} activity={{ index $labels \"activity\" }} is {{ index $values \"C\" }}s past its own next expected run (>3h grace). The next-expected timestamp is computed by the operator from that activity's cron and its last success, so this is a genuinely missed run, not a cadence mismatch. NoData on this rule is ALSO a failure and is configured to fire: an absent series means the operator published no next expected run for any activity at all."
     labels:
       homelab: "true"
       system: "tatara"
@@ -1314,7 +1434,7 @@ rules:
     exec_err_state: "Error"
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-agent-reported-platform-problem"
-      summary: "Tatara agents reported {{ index $values \"C\" }} internal issue(s) of category={{ index $labels \"category\" }} in 5m. Drill down in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\"} | pattern `<_> <_> <_> <body>` | line_format `{{\"{{\"}}.body{{\"}}\"}}` | json | action=\"agent_internal_issue\" for the free-text descriptions."
+      summary: "IF THIS ARRIVED AS alertname=DatasourceError, STOP AND READ annotations.Error FIRST: the rest of this summary is the FIRING-case template rendered against an empty result set and every number in it is a lie (counts read 0, label values read empty). Grafana could not evaluate the rule at all. If Error mentions `pq:` or SQLSTATE 53300 (\"remaining connection slots are reserved\"), the failure is GRAFANA'S OWN backing Postgres (grafana-database-cluster, ns monitoring) - not this rule's datasource, not tatara, and not anything in the query below. See \"Grafana alert rule evaluation failing\" in alerts/tatara-grafana.yaml; that is the detector for it, and it recurs nightly around 03:30 UTC. OTHERWISE: Tatara agents reported {{ index $values \"C\" }} internal issue(s) of category={{ index $labels \"category\" }} in 5m. Drill down in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\"} | pattern `<_> <_> <_> <body>` | line_format `{{\"{{\"}}.body{{\"}}\"}}` | json | action=\"agent_internal_issue\" for the free-text descriptions."
     labels:
       homelab: "true"
       system: "tatara"
@@ -1330,7 +1450,7 @@ rules:
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-task-mint-burst"
-      summary: "tatara-operator minted {{ index $values \"C\" }} Tasks in 1h (>20). The sweep is capped at maxNewTasksPerSweep (5) per pass, so this is either a mint/reap loop (an issue being re-minted because ownership is not sticking) or a genuine backlog drain. Check operator_task_stage{stage=\"parked\"}: a healthy backlog drain mints parked(backlog-sweep) Tasks that spawn ZERO pods."
+      summary: "tatara-operator minted {{ index $values \"C\" }} Tasks in 1h (>20). The sweep is capped at maxNewTasksPerSweep (5) per pass, so this is either a mint/reap loop (an issue being re-minted because ownership is not sticking) or a genuine backlog drain. Check sum by (parkReason) (operator_task_parked_total{parkReason=\"backlog-sweep\"}) against operator_task_state{state=\"new\"}: a healthy backlog drain mints parked(backlog-sweep) Tasks that sit in state=new and spawn ZERO pods."
     labels:
       homelab: "true"
       system: "tatara"

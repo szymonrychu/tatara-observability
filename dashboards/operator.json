@@ -15,7 +15,7 @@
       }
     ]
   },
-  "description": "Canonical operator control-loop board: reconcile/admission throughput, turn-submit dispatch, agent wrapper HTTP, webhooks, SCM writes, REST API, sweep/triage/backlog, merge and deploy, stage machine, and memory/lifecycle faults. Error-ratio and threshold panels mirror the exact PromQL of the matching rule in alerts/tatara-operator.yaml so the number on-call sees here equals the number that fired. Replaces operator-health.json, operator-workflows.json and tatara-operator.json (merged and deduped). The task-centric redesign (2026-07-12/13) repointed every panel querying a metric it deletes (operator_task_terminal_total's old phase/reason labels, tatara_cd_cascade_failed/stalled, tatara_cd_resolved_total, tatara_scan_*, tatara_issue_outcome_total, operator_writeback_outcome_total) onto the new Task stage machine, and deleted the writeback and systemic-grouping panels outright since those mechanisms are gone. scripts/check_metric_provenance.py now walks this file in CI, so a panel on a metric nobody emits fails the build instead of rendering empty forever. CROSS-REPO DEPENDENCY D1 (operator_task_terminal_total surviving with stage+stageReason+kind replacing phase) is UNVERIFIED as of this edit - the operator worktree has not landed the swap (internal/obs/task_metrics.go:31-33 still declares kind,phase,reason). Panels here are written on the D1 assumption; re-verify against the merged operator before this ships.",
+  "description": "Canonical operator control-loop board: reconcile/admission throughput, turn-submit dispatch, agent wrapper HTTP, webhooks, SCM writes, REST API, sweep/triage/backlog, merge and deploy, stage machine, and memory/lifecycle faults. Error-ratio and threshold panels mirror the exact PromQL of the matching rule in alerts/tatara-operator.yaml so the number on-call sees here equals the number that fired. Replaces operator-health.json, operator-workflows.json and tatara-operator.json (merged and deduped). The task-centric redesign (2026-07-12/13) repointed every panel querying a metric it deletes (operator_task_terminal_total's old phase/reason labels, tatara_cd_cascade_failed/stalled, tatara_cd_resolved_total, tatara_scan_*, tatara_issue_outcome_total, operator_writeback_outcome_total) onto the new Task stage machine, and deleted the writeback and systemic-grouping panels outright since those mechanisms are gone. scripts/check_metric_provenance.py now walks this file in CI, so a panel on a metric nobody emits fails the build instead of rendering empty forever. Repointed onto the tatara-operator v2.0.0 8-state Task lifecycle (2026-08-08, issue #97): operator_task_stage -> operator_task_state, operator_task_stage_age_seconds -> operator_task_state_age_seconds, and the stage/stageReason labels -> state / stateReason (terminal) / parkReason (park). Verified against the operator's internal/obs at origin/main and against live Prometheus, not assumed.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -1685,7 +1685,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Tasks reaching a terminal stage by stage and kind. Terminal stages are delivered|rejected|failed|parked (contract F.1). Backs the 'Operator task failure spike' alert (>3 Tasks stage=failed with a given stageReason in 1h). CROSS-REPO DEPENDENCY D1 (UNVERIFIED as of 2026-07-12): assumes operator_task_terminal_total survives with stage+stageReason+kind replacing the old kind,phase,reason label set.",
+      "description": "Tasks reaching a terminal state by state and kind. Under the v2.0.0 8-state lifecycle the terminal set is EXACTLY done|rejected: `failed` and `parked` are gone as states, because a failure now parks instead of terminating. The failure signal moved to operator_task_parked_total{parkReason} - see the 'Parks in the last hour by reason' panel and the 'Operator task failure spike' / 'Operator task park spike' alerts. This panel is the delivery-versus-rejection split only.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1740,7 +1740,7 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "(failed|rejected).*"
+              "options": "rejected.*"
             },
             "properties": [
               {
@@ -1785,12 +1785,12 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (stage, kind) (rate(operator_task_terminal_total{job=\"tatara-operator\"}[5m]))",
-          "legendFormat": "{{stage}} {{kind}}",
+          "expr": "sum by (state, kind) (rate(operator_task_terminal_total{job=\"tatara-operator\"}[5m]))",
+          "legendFormat": "{{state}} {{kind}}",
           "refId": "A"
         }
       ],
-      "title": "Task terminal rate by stage and kind",
+      "title": "Task terminal rate by state and kind",
       "type": "timeseries"
     },
     {
@@ -2488,7 +2488,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Tasks currently sitting in stage=triaging, by origin kind, plus parks with stageReason=triage-stalled over the last hour. Replaces the old triage-outcome mix (tatara_issue_outcome_total{action}), which counted the issueLifecycle triage agent's decisions: that FSM is deleted (contract L.1) and triaging now spawns no pod (F.2) - the operator classifies the origin and mints the Issue CRs itself, so there is no action enum to count. The failure mode that DID survive is triage not draining, which is what these two series show.",
+      "description": "Tasks currently sitting in state=new (the operator's own triage pass, 5m budget), by origin kind, plus parks with parkReason=triage-stalled over the last hour. v2.0.0 renamed the `triaging` stage to the `new` state. NOTE: state=new also holds every sweep-minted backlog owner, which is parked(backlog-sweep) and NEVER ages out by design (contract F.4's one deadline exemption), so a large steady population here is normal and only the triage-stalled park series shows triage failing to drain.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2571,8 +2571,8 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (kind) (operator_task_stage{stage=\"triaging\"})",
-          "legendFormat": "{{kind}} in triaging",
+          "expr": "sum by (kind) (operator_task_state{state=\"new\"})",
+          "legendFormat": "{{kind}} in new",
           "range": true,
           "refId": "A"
         },
@@ -2582,7 +2582,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(increase(operator_task_parked_total{stageReason=\"triage-stalled\"}[1h])) or vector(0)",
+          "expr": "sum(increase(operator_task_parked_total{parkReason=\"triage-stalled\"}[1h])) or vector(0)",
           "legendFormat": "triage-stalled parks (1h)",
           "range": true,
           "refId": "B"
@@ -2705,7 +2705,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Tasks currently in stage=merging or stage=deploying - the population of the push-CD pipeline. Successor to the tatara_cd_cascade_failed/tatara_cd_cascade_stalled boolean gauges, which the task-centric redesign deletes along with Task.status.cascadeStage (see CROSS-REPO-CONTRACT K). A sustained non-zero population past the F.4 budgets (merging 4h, deploying 2h) is the wedge signal; see the 'Tatara merge stage wedged' / 'Tatara deploy stage wedged' / 'Tatara delivery parked on a merge or deploy timeout' alerts in alerts/tatara-cd.yaml for the paging thresholds this panel visualizes.",
+      "description": "Tasks currently in state=merged or state=deployed - the population of the push-CD pipeline. NAMING TRAP: under v2.0.0 these name the PHASE, not the milestone. `merged` means the verdict is approve and the operator owns the merge cursor, NOT that every MR is merged; per-MR truth stays on mr.status.state. They are the direct successors of the `merging` and `deploying` stages and carry the same F.4 budgets (merged 4h, deployed 2h). A sustained population past those budgets is the wedge signal; see the 'Tatara merge stage wedged' / 'Tatara deploy stage wedged' / 'Tatara delivery parked on a merge or deploy timeout' alerts in alerts/tatara-cd.yaml for the paging thresholds this panel visualizes.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2788,12 +2788,12 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (stage) (operator_task_stage{stage=~\"merging|deploying\"})",
-          "legendFormat": "{{stage}}",
+          "expr": "sum by (state) (operator_task_state{state=~\"merged|deployed\"})",
+          "legendFormat": "{{state}}",
           "refId": "A"
         }
       ],
-      "title": "Tasks in merge/deploy stage (push-CD pipeline population)",
+      "title": "Tasks in merge/deploy state (push-CD pipeline population)",
       "type": "timeseries"
     },
     {
@@ -2801,7 +2801,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Tasks currently in stage=delivered. A delivered Task is reaped at 48h (F.1), so this gauge IS the rolling 48h delivery count - the deploy path's throughput signal. Replaces tatara_cd_resolved_total: the cd-cascade mechanism (Task.status.cascadeStage) is deleted (A.5) and merging/deploying/delivered are now ordinary stages of one Task. The blockage side of this path is the merge/deploy park reasons on the parks-by-reason panel and the K.2 merge/deploy-blocked alert.",
+      "description": "Tasks currently in state=done. v2.0.0's `done` absorbed the old `delivered` stage, and a done Task is reaped at 48h (DeliveredRetention), so this gauge IS the rolling 48h delivery count - the deploy path's throughput signal. The blockage side of this path is the merge/deploy park reasons on the parks-by-reason panel and the merge/deploy alerts in alerts/tatara-cd.yaml.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2884,8 +2884,8 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(operator_task_stage{stage=\"delivered\"})",
-          "legendFormat": "delivered",
+          "expr": "sum(operator_task_state{state=\"done\"})",
+          "legendFormat": "done",
           "range": true,
           "refId": "A"
         }
@@ -3242,7 +3242,7 @@
       },
       "id": 110,
       "panels": [],
-      "title": "Stage machine",
+      "title": "State machine",
       "type": "row"
     },
     {
@@ -3250,7 +3250,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Current Task population per stage (operator_task_stage), stacked. This is the F.1 stage enum made visible - the direct replacement for every phase/lifecycleState series the task-centric redesign deletes. CROSS-REPO DEPENDENCY D1 note applies to the terminal stages shown here the same way it applies to operator_task_terminal_total elsewhere on this board.",
+      "description": "Current Task population per state (operator_task_state), stacked. This is the v2.0.0 8-state enum made visible: new, refined, under-implementation, awaiting-review, merged, deployed, done, rejected. Park is NOT a state any more - it is an orthogonal flag, so a parked Task still counts under whatever state it is in; see the 'Parks in the last hour by reason' panel for the park axis.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3333,12 +3333,12 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (stage) (operator_task_stage)",
-          "legendFormat": "{{stage}}",
+          "expr": "sum by (state) (operator_task_state)",
+          "legendFormat": "{{state}}",
           "refId": "A"
         }
       ],
-      "title": "Tasks per stage",
+      "title": "Tasks per state",
       "type": "timeseries"
     },
     {
@@ -3346,7 +3346,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "The F.4 deadline invariant made observable: how long each live Task has sat in its current stage, sorted worst-first. A row far past that stage's budget (see alerts/tatara-operator.yaml and alerts/tatara-cd.yaml for the per-stage thresholds) is a wedge, not queue noise.",
+      "description": "How long each Task has sat in its current state (contract K.1's carry-adjusted operator_task_state_age_seconds), sorted worst-first. IMPORTANT: this gauge carries NO park dimension, so a legitimately parked Task (park is orthogonal to state in v2.0.0, and parked(backlog-sweep) never ages out at all) is indistinguishable here from a genuinely wedged one. Read a large age together with the parks-by-reason panel before calling it a wedge; the alert side is deliberately thresholded above ParkRetention (7d) for the same reason.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3385,7 +3385,7 @@
               },
               {
                 "id": "displayName",
-                "value": "Stage age"
+                "value": "State age"
               }
             ]
           }
@@ -3412,7 +3412,7 @@
         "sortBy": [
           {
             "desc": true,
-            "displayName": "Stage age"
+            "displayName": "State age"
           }
         ]
       },
@@ -3424,14 +3424,14 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (task, stage) (operator_task_stage_age_seconds)",
+          "expr": "max by (task, state) (operator_task_state_age_seconds)",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
           "refId": "A"
         }
       ],
-      "title": "Stage age by task (worst first)",
+      "title": "State age by task (worst first)",
       "type": "table"
     },
     {
@@ -3439,7 +3439,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Parks in the last hour by stageReason (increase of operator_task_parked_total). Successor to the lifecycle give-up breakdown; unfiltered, so it includes the benign backlog-sweep and awaiting-human reasons the 'Operator task park spike' alert deliberately excludes - use that alert's filter as the read on what is actually a platform failure versus expected parking.",
+      "description": "Parks in the last hour by parkReason (increase of operator_task_parked_total). Under v2.0.0 this is the ONLY counter of a failure: `failed` is gone as a state and a failure now parks. Unfiltered, so it includes the benign backlog-sweep and awaiting-human reasons the 'Operator task park spike' alert deliberately excludes - use that alert's filter as the read on what is actually a platform failure versus expected parking.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3490,10 +3490,10 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (stageReason) (increase(operator_task_parked_total[1h]))",
+          "expr": "sum by (parkReason) (increase(operator_task_parked_total[1h]))",
           "format": "table",
           "instant": true,
-          "legendFormat": "{{stageReason}}",
+          "legendFormat": "{{parkReason}}",
           "refId": "A"
         }
       ],

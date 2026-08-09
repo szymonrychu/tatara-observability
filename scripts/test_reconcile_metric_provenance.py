@@ -26,6 +26,7 @@ from reconcile_metric_provenance import (
     derive_metric_names,
     derive_reason_sets,
     load_label_exemptions,
+    value_sweep_coverage,
     parse_allowlist_sections,
     reconcile,
     section_key,
@@ -945,6 +946,38 @@ class ClosedSetUnavailableTest(unittest.TestCase):
         )
 
 
+class ValueSweepCoverageTest(unittest.TestCase):
+    """The value sweep's blast radius has to be visible, not inferred.
+
+    Its scope is (every metric declaring a closed-set label) MINUS (the exemptions),
+    which is a set nobody can read off either file. Left invisible, an unaudited
+    overload sits there until the first selector turns CI red on correct work - the
+    review finding that produced this function.
+    """
+
+    def test_lists_every_metric_label_pair_in_scope(self):
+        pairs = value_sweep_coverage(_LABELS, _CLOSED_SETS, _EXEMPTIONS)
+        self.assertIn(("operator_task_terminal_total", "kind"), pairs)
+        self.assertIn(("operator_task_terminal_total", "state"), pairs)
+        self.assertIn(("operator_task_terminal_total", "stateReason"), pairs)
+
+    def test_excludes_exempted_pairs_but_not_the_metric_s_other_labels(self):
+        pairs = value_sweep_coverage(_LABELS, _CLOSED_SETS, _EXEMPTIONS)
+        # operator_scm_writes_total is exempted for `kind` only...
+        self.assertNotIn(("operator_scm_writes_total", "kind"), pairs)
+        # ...and operator_queue_age_seconds for `state` only, so a future closed set
+        # on one of its other labels would still be in scope.
+        self.assertNotIn(("operator_queue_age_seconds", "state"), pairs)
+
+    def test_excludes_labels_with_no_closed_set_and_unresolved_metrics(self):
+        pairs = value_sweep_coverage(_LABELS, _CLOSED_SETS, _EXEMPTIONS)
+        self.assertNotIn(("tatara_memory_op_total", "op"), pairs)
+        self.assertEqual([p for p in pairs if p[0] == "operator_dynamic_total"], [])
+
+    def test_is_empty_when_no_closed_set_was_derived(self):
+        self.assertEqual(value_sweep_coverage(_LABELS, {}, _EXEMPTIONS), [])
+
+
 class ShippedLabelExemptionsTest(unittest.TestCase):
     """The exemption fixtures above prove the machinery. This proves the DATA.
 
@@ -967,24 +1000,56 @@ class ShippedLabelExemptionsTest(unittest.TestCase):
         for label in ("le", "quantile", "__name__"):
             self.assertIn(label, infra)
 
+    def test_every_audited_overload_stays_exempt(self):
+        """The nine (metric, label) pairs whose vocabulary is provably NOT the CRD's.
+
+        Each was traced to its WithLabelValues call site. Dropping one turns CI red on
+        an ordinary selector, which is the failure mode that gets a guard switched off,
+        so the audit is pinned here rather than living only in the file's comments.
+        """
+        sections = self._shipped()
+        for label, metric in (
+            # kind = the mirrored CR kind, Issue|MergeRequest
+            ("kind", "operator_mirror_sync_total"),
+            ("kind", "operator_mirror_comment_truncated_total"),
+            # kind = the reaped resource kind, pod|service|task
+            ("kind", "operator_reap_delete_error_total"),
+            # kind = the inbound webhook event kind
+            ("kind", "operator_webhook_events_total"),
+            # kind = QueuedEventSpec.Kind, which carries no enum marker at all
+            ("kind", "operator_queue_admitted_total"),
+            # agent_kind = QueuedEventPayload.AgentKind: a DIFFERENT 7-value enum
+            # that still contains `clarify`
+            ("agent_kind", "operator_admission_wake_total"),
+            # agent_kind = prompt.AgentKind(task), which falls back to Spec.Kind and
+            # can therefore be `takeover`
+            ("agent_kind", "operator_bundle_bytes"),
+            ("agent_kind", "operator_bundle_elided_total"),
+            # stage = the ingester's pipeline stage. CROSS-REPO: the first audit
+            # looked only at tatara-operator/internal/obs and missed this.
+            ("stage", "ingest_stage_duration_seconds"),
+        ):
+            self.assertIn(
+                metric,
+                sections.get(f"{label}:exempt-metrics", set()),
+                f"{metric} must stay exempt from the {label} closed set",
+            )
+
     def test_no_section_carries_a_vocabulary(self):
         # #100's root cause was this file holding a COPY of the operator's enums.
         # Every section here must be a set of metric names or of label names -
         # never a set of label values - so there is nothing left to rot.
-        sections = self._shipped()
-        self.assertEqual(
-            sorted(sections),
-            [
-                "infra-labels",
-                "kind:exempt-metrics",
-                "label-name:exempt-metrics",
-                "stage:exempt-metrics",
-                "state:exempt-metrics",
-            ],
-        )
-        for name, entries in sections.items():
+        # Asserted by SHAPE, not as a fixed list of section names: a new
+        # `<label>:exempt-metrics` section is ordinary maintenance, a section holding
+        # label VALUES is the regression.
+        for name, entries in self._shipped().items():
             if name == "infra-labels":
                 continue
+            self.assertRegex(
+                name,
+                r"^(?:label-name|[A-Za-z_][A-Za-z0-9_]*):exempt-metrics$",
+                "every non-infra section must be a per-metric exemption",
+            )
             for entry in entries:
                 self.assertRegex(
                     entry,

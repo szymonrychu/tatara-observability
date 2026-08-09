@@ -189,6 +189,24 @@ Three rules make the label checks quiet enough to stay switched on:
    exempted wholesale: it binds to the `TaskStatus.State` enum, because
    `operator_stage_drift_total{stage}` is passed `task.Status.State` verbatim.
 
+4. **The value sweep prints its own coverage.** The label NAME dimension is fully
+   derived: whether a metric declares a label is a fact in the source. The label
+   VALUE dimension is not, and this is worth being blunt about - a label name's
+   vocabulary is a property of the **(metric, label) pair**, and nothing in the CRD
+   says which metric's `kind` is `TaskSpec.Kind` and which is a CR kind, a webhook
+   event kind or a reaped-resource kind. So `label_exemptions.txt` IS a
+   hand-maintained binding, which is the one thing #100 set out to delete. Two
+   things make that honest rather than a relapse: it fails **loud** (an unaudited
+   overload turns CI red on correct work; it never silently passes a dead value),
+   and every run prints the exact (metric, label) pairs in scope, so under-coverage
+   is visible in the job summary instead of inferred from two files.
+
+   The first cut of that audit read one repo's `internal/obs` and generalised, and
+   review found nine wrong pairs - including `ingest_stage_duration_seconds{stage}`
+   in a different repo entirely, which `dashboards/ingester.json` already aggregates.
+   If you add a `<label>:exempt-metrics` entry, trace the `WithLabelValues` call site
+   first and write what you found next to it.
+
 A **negative** matcher (`!=`, `!~`) on a label the metric does not carry matches
 every series, so it is a no-op filter rather than a dark selector - reported as
 informational, never fatal, because it is also the forward-compatible idiom for a

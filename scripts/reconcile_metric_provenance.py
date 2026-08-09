@@ -761,6 +761,42 @@ def _root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parent.parent
 
 
+def value_sweep_coverage(
+    metric_labels: dict[str, frozenset[str] | None],
+    closed_sets: dict[str, frozenset[str]],
+    exemptions: dict[str, set[str]],
+) -> list[tuple[str, str]]:
+    """Every (metric, label) pair whose VALUES this run will membership-test.
+
+    That scope is (metrics declaring a closed-set label) MINUS (the exemptions), and
+    it is a set nobody can read off either file. It has to be printed, because the
+    value dimension is the one place where "default is to CHECK" cuts against this
+    script's own thesis: a label name's vocabulary is a property of the (metric,
+    label) pair, and nothing in the CRD says which metric's `kind` is TaskSpec.Kind
+    and which is a CR kind or a webhook event kind. So label_exemptions.txt IS a
+    hand-maintained binding - the one thing #100 set out to delete - and the only
+    honest mitigation is that it fails LOUD (an unaudited overload turns CI red on
+    correct work, it does not silently pass a dead value) and that its coverage is
+    visible every night instead of inferred.
+
+    The NAME dimension has no equivalent problem: whether a metric declares a label
+    is metric-specific but fully derived, so default-CHECK there is free.
+    """
+    out: list[tuple[str, str]] = []
+    for metric, labels in sorted(metric_labels.items()):
+        if labels is None:
+            continue
+        if metric in exemptions.get("label-name:exempt-metrics", set()):
+            continue
+        for label in sorted(labels):
+            if label not in closed_sets:
+                continue
+            if metric in exemptions.get(f"{label}:exempt-metrics", set()):
+                continue
+            out.append((metric, label))
+    return out
+
+
 def merge_metric_labels(
     per_repo: dict[str, dict[str, frozenset[str] | None]],
 ) -> dict[str, frozenset[str] | None]:
@@ -792,6 +828,7 @@ def _write_summary(
     label_values: list[LabelFinding],
     unresolved: list[str],
     closed_sets: dict[str, frozenset[str]],
+    coverage: list[tuple[str, str]],
 ) -> None:
     import os
 
@@ -868,6 +905,25 @@ def _write_summary(
                 + " - values on these labels were not checked this run."
             )
             lines.append("")
+        # See value_sweep_coverage's docstring: this dimension's scope is the one
+        # hand-maintained binding left in the repo, so it gets printed rather than
+        # inferred. A pair here whose label means something else on that metric is an
+        # unaudited overload - it will turn CI red on the first correct selector, so
+        # exempt it before that happens.
+        by_label: dict[str, list[str]] = {}
+        for metric, label in coverage:
+            by_label.setdefault(label, []).append(metric)
+        lines.append(
+            f"### Closed-set label VALUES being checked ({len(coverage)} "
+            "metric/label pair(s), informational)"
+        )
+        lines.append("")
+        for label in sorted(by_label):
+            lines.append(
+                f"- `{label}` ({len(closed_sets[label])} values) on: "
+                + ", ".join(f"`{m}`" for m in sorted(by_label[label]))
+            )
+        lines.append("")
     if skipped:
         lines.append(
             "### Skipped (clone failed, neutral - not checked this run): "
@@ -933,9 +989,17 @@ def main(argv: list[str]) -> int:
         expressions, metric_labels, closed_sets, exemptions
     )
     unresolved = sorted(n for n, v in metric_labels.items() if v is None)
+    coverage = value_sweep_coverage(metric_labels, closed_sets, exemptions)
 
     _write_summary(
-        stale, new, skipped, label_names, label_values, unresolved, closed_sets
+        stale,
+        new,
+        skipped,
+        label_names,
+        label_values,
+        unresolved,
+        closed_sets,
+        coverage,
     )
 
     fatal = [f for f in label_names + label_values if f.fatal]

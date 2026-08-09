@@ -1045,3 +1045,40 @@ PR/push triggers.
   that does not exist is still caught only by a human. Three green dimensions are three
   green dimensions, not a correct alert. MR #96 reached the same conclusion from the
   `outcome` label and chose to record it here rather than claim more; so does this.
+- 2026-08-09 (#100, addendum from adversarial review - the part that nearly shipped
+  wrong): the label-VALUE half was keyed on the LABEL NAME alone and applied to every
+  metric in every clone declaring that name, with exemptions audited from
+  `tatara-operator/internal/obs` only. That audit was incomplete by NINE (metric,label)
+  pairs, every one a false failure waiting for its first selector:
+  `operator_mirror_sync_total{kind}` and `operator_mirror_comment_truncated_total{kind}`
+  (Issue|MergeRequest - the other two constructors in the SAME file whose third sibling
+  was already exempted); `operator_reap_delete_error_total{kind}` (pod|service|task);
+  `operator_webhook_events_total{kind}` (push|issue|mr|other);
+  `operator_queue_admitted_total{kind}` (`q.Spec.Kind`, a CRD field with no enum marker
+  at all, `queue_controller.go:571`); `operator_admission_wake_total{agent_kind}`
+  (`QueuedEventPayload.AgentKind` is its OWN 7-value enum and still carries `clarify`);
+  `operator_bundle_bytes` + `operator_bundle_elided_total{agent_kind}`
+  (`prompt.AgentKind()` falls back to `Spec.Kind`, so it can emit `takeover`, which
+  `TaskStatus.AgentKind` does not contain); and the one that matters most,
+  `ingest_stage_duration_seconds{stage}` in **tatara-memory-repo-ingester** -
+  total|push_graph|push_chunks|scip, a different repo the audit never looked at, on a
+  metric `dashboards/ingester.json` already aggregates `sum by (stage, le)`.
+  THE GENERAL LESSON, recorded because it is not obvious and it survives this fix: the
+  NAME dimension is fully derived, but a label VALUE vocabulary is a property of the
+  (metric, label) PAIR and no producer artefact states that mapping. So the exemption
+  file is a hand-maintained binding - the exact category #100 exists to delete - one
+  indirection over. It is defensible only because it fails LOUD (red CI on correct work,
+  never a silent pass) where the old snapshot failed silent, and because the run now
+  PRINTS the 31 (metric,label) pairs it checks. Do not audit a label by reading one
+  directory; enumerate from the derived label sets across all four clones and trace each
+  `WithLabelValues` call site. `scripts/label_exemptions.txt` and
+  `ShippedLabelExemptionsTest` both pin the result.
+  Three parser defects from the same review: an `=` matcher's value is a literal by
+  definition, so screening it for regex metacharacters silently exempted
+  `stateReason="mr-merged.externally"`-class typos; `state=~"^(done|rejected)$"` was
+  wholly value-unchecked because the regex END-ANCHOR `$` was being read as a Grafana
+  template variable; and `_CTOR` could not match `promauto.With(reg).NewX(` although the
+  docstring claimed it could - that one is a false FAILURE, not a skip, since an unseen
+  metric reads as a stale allowlist entry. Three of the review's findings did NOT hold:
+  its three "surviving mutant" claims were measured per-test rather than against the
+  suite, and all three mutants are killed by `python3 -m unittest discover scripts`.

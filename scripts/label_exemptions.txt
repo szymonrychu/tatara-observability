@@ -85,11 +85,44 @@ operator_objbudget_spill_blocked_total
 # live set is Issue|MergeRequest|issue_comment|mr_comment|mr_review. Never a
 # TaskSpec.Kind value.
 operator_mirror_write_dropped_total
+# The other two constructors in that SAME mirror_metrics.go file. kind = the mirrored
+# CR kind, Issue|MergeRequest (internal/controller/mirror.go). Missing these was the
+# audit error that review caught: the first pass read one of three constructors in
+# one file and generalised.
+operator_mirror_sync_total
+operator_mirror_comment_truncated_total
+# operator_metrics.go: kind = the KIND OF RESOURCE the reaper failed to delete,
+# pod|service|task. Nothing to do with the Task that owned it.
+operator_reap_delete_error_total
+# webhook/server.go: kind = the inbound WEBHOOK EVENT kind, push|issue|mr|other.
+operator_webhook_events_total
+# queue_metrics.go: kind = QueuedEventSpec.Kind, the QUEUED EVENT kind
+# (issue_comment|mr_comment|...), passed at internal/controller/queue_controller.go:571.
+# That CRD field carries no enum marker at all, so there is nothing to derive even in
+# principle. Its own Help string says "event kind".
+operator_queue_admitted_total
 # task_metrics.go: kind = the DECLINE CLASS of a refused un-park, guard|rule, on a
 # metric whose other label (parkReason) IS a real closed set. This is the case the
 # #100 pre-mortem called: derive parkReason label-name-wide and you reproduce the
 # `kind` overload one label over unless exemption is metric-aware from day one.
 operator_unpark_declined_total
+
+## agent_kind:exempt-metrics
+# `agent_kind` binds to TaskStatus.AgentKind (6 values). These three are fed from a
+# WIDER vocabulary, so the tight set would reject live values - a false failure on
+# correct work, which is how this whole check gets downgraded to a warning.
+#
+# queue_metrics.go, fed q.Spec.Payload.AgentKind at
+# internal/controller/task_ticket_watch.go:50. QueuedEventPayload.AgentKind is its own
+# enum marker (api/v1alpha1/queuedevent_types.go:66) with SEVEN values - it still
+# carries `clarify`, which TaskStatus.AgentKind dropped in v2.0.0.
+operator_admission_wake_total
+# bundle_metrics.go, fed prompt.AgentKind(task) at internal/prompt/bundle.go:794-801,
+# which falls back to task.Spec.Kind when Status.AgentKind is empty
+# (internal/prompt/bundle.go:819-824). So it can emit `takeover`, which is in
+# TaskSpec.Kind(7) and not in TaskStatus.AgentKind(6).
+operator_bundle_bytes
+operator_bundle_elided_total
 
 ## stage:exempt-metrics
 # `stage` SURVIVED v2.0.0 as a label name with three different meanings, so it is
@@ -105,6 +138,13 @@ operator_rest_takeover_error_total
 # sweep_metrics.go: stage = the MINT bucket, active|parked (sweep.go's
 # mintedBucket), not a Task state.
 operator_tasks_minted_per_sweep
+# CROSS-REPO, and the one this file's first pass missed entirely because it audited
+# tatara-operator/internal/obs only. tatara-memory-repo-ingester internal/obs/obs.go:
+# stage = the INGEST PIPELINE stage, total|push_graph|push_chunks|scip
+# (cmd/tatara-ingest/run.go). dashboards/ingester.json already aggregates
+# `sum by (stage, le)` on it, so the first panel to add a `{stage="push_graph"}`
+# filter would have turned CI red on correct work.
+ingest_stage_duration_seconds
 
 ## state:exempt-metrics
 # queue_metrics.go: state = the QueuedEvent's own state (Queued|Admitted|...), a

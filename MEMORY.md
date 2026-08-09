@@ -1114,3 +1114,24 @@ PR/push triggers.
   5m/threshold 20) to `container="tatara-operator"`: tatara-operator#558's own fix-target table names
   both rules under the same selector defect. Its threshold is nowhere near ingest's ~1.3 lines/hr
   volume so it was not observed firing from this cause, but the selector was wrong regardless.
+- 2026-08-09 (#96): the handoff-label rule was held until tatara-operator#569 merged, and the hold
+  was the whole point. `check_label_provenance.py` (#101) derives the label set from a FRESH clone of
+  the producer, and `operator_agent_pod_ttl_expired_total` now resolves to
+  `[agent_kind, handoff, outcome]`, so the new rule's `handoff="none"` selector is real. Verified in
+  BOTH directions rather than trusting the green: the derivation was printed straight off the clone,
+  AND a deliberate `handoffZZ` typo was confirmed to FAIL the check, so the OK is not a skip. Merging
+  this before #569 would have shipped a positive selector on a label that did not exist - matches
+  nothing, forever, OK under `default_no_data_state`, the silent-green class this repo spent the week
+  closing. `check_runbook_urls.py` is STILL red on
+  `tatara-runbook-operator-agent-pod-ttl-stopped-with-no-handoff-captured` and stays red until
+  tatara-documentation#32 merges; `TATARA_DOCS_REF=<docs branch>` shows it resolving. That same run
+  proved the coupling in the other direction: against #32's PRE-merge branch the three anchors
+  tatara-documentation#34 added go dangling, so #32 has to carry #34 forward rather than replace it.
+- 2026-08-09 (#96, dashboards/agent-lifecycle.json): the conflict was ONE panel description and both
+  sides were half-right. #99 renamed stageReason -> parkReason inside that sentence; this branch
+  rewrote the same sentence to break TTL expiry out by handoff instead of outcome. Either side taken
+  wholesale silently drops the other's correction, so the resolved text carries #99's parkReason
+  wording AND this branch's handoff rationale. Every other #99 repoint in the file auto-merged
+  cleanly because this branch never touched those lines - worth checking rather than assuming, since
+  a JSON dashboard gives no compile error for a half-applied rename. Also fixed the "Parks by Reason"
+  panel description, which #99 left reading stageReason while its own expr already said parkReason.

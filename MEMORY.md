@@ -992,6 +992,28 @@ PR/push triggers.
   documented 0.09-0.28 baseline is unchanged by it (re-measured over 8h). This trap is
   invisible in review: the unhardened expression looks correct and fails only under churn.
 
+- 2026-08-06 (tatara-operator#527, the alert was measuring the wrong bucket) `Operator agent
+  pod force-deleted at TTL` fired for 19 days on `operator_agent_pod_ttl_expired_total
+  {outcome="force_deleted"}` while asserting in its summary that the G.7 stop "got neither an
+  agent handoff nor a synthetic one" - a state the operator could not produce. `outcome`
+  answered "how was the POD stopped?", not "was continuation state captured?", and
+  `ttlstop.go:finish` overwrote the second with the first on any teardown error, so
+  `synthetic_handoff` was structurally unreachable (`list_prometheus_label_values` over 30d
+  returned only `[agent_handoff, force_deleted]`). The operator now emits a SECOND,
+  independent `handoff` label (`agent|synthetic|none`); `handoff="none"` is the bucket that
+  means a TTL stop lost work, and the new rule `Operator agent pod TTL-stopped with no handoff
+  captured` alerts on it. It is not every discontinuity, and the comment block says so: a pod
+  lost BEFORE its TTL goes through the operator's respawn path, which writes no handoff note
+  and increments no TTL counter at all, so that loss is invisible to this metric entirely. The old rule is KEPT, re-pointed at what it actually measures
+  (wrapper teardown health), threshold raised 0 -> 2 and `for` 5m -> 15m because a single
+  force-delete with an intact handoff is not actionable. **This repo's checks could not have
+  caught it:** `check_metric_provenance.py` validates metric names and the closed-set label
+  values (`stage`, `stageReason`, `kind`, `agent_kind`) but `outcome` is not in that set, and
+  nothing at all validates a summary's CLAIM against the emitting code. The class - a rule
+  that queries a live series and describes a mechanism that does not exist - is a new one for
+  the silent-green family, and it is not lintable from inside this repo.
+  **Merge order matters:** the new rule's `runbook_url` anchor makes `check_runbook_urls.py`
+  fail until tatara-documentation@main declares it, so the docs PR merges FIRST.
 - 2026-08-08 (#97): tatara-operator v2.0.0 renamed stage -> state and this repo's CI could
   not see it. `check_metric_provenance.py` validates alerts/dashboards against a snapshot
   COMMITTED HERE, so a producer-side rename can never fail this build; the only check that
@@ -1092,3 +1114,24 @@ PR/push triggers.
   5m/threshold 20) to `container="tatara-operator"`: tatara-operator#558's own fix-target table names
   both rules under the same selector defect. Its threshold is nowhere near ingest's ~1.3 lines/hr
   volume so it was not observed firing from this cause, but the selector was wrong regardless.
+- 2026-08-09 (#96): the handoff-label rule was held until tatara-operator#569 merged, and the hold
+  was the whole point. `check_label_provenance.py` (#101) derives the label set from a FRESH clone of
+  the producer, and `operator_agent_pod_ttl_expired_total` now resolves to
+  `[agent_kind, handoff, outcome]`, so the new rule's `handoff="none"` selector is real. Verified in
+  BOTH directions rather than trusting the green: the derivation was printed straight off the clone,
+  AND a deliberate `handoffZZ` typo was confirmed to FAIL the check, so the OK is not a skip. Merging
+  this before #569 would have shipped a positive selector on a label that did not exist - matches
+  nothing, forever, OK under `default_no_data_state`, the silent-green class this repo spent the week
+  closing. `check_runbook_urls.py` is STILL red on
+  `tatara-runbook-operator-agent-pod-ttl-stopped-with-no-handoff-captured` and stays red until
+  tatara-documentation#32 merges; `TATARA_DOCS_REF=<docs branch>` shows it resolving. That same run
+  proved the coupling in the other direction: against #32's PRE-merge branch the three anchors
+  tatara-documentation#34 added go dangling, so #32 has to carry #34 forward rather than replace it.
+- 2026-08-09 (#96, dashboards/agent-lifecycle.json): the conflict was ONE panel description and both
+  sides were half-right. #99 renamed stageReason -> parkReason inside that sentence; this branch
+  rewrote the same sentence to break TTL expiry out by handoff instead of outcome. Either side taken
+  wholesale silently drops the other's correction, so the resolved text carries #99's parkReason
+  wording AND this branch's handoff rationale. Every other #99 repoint in the file auto-merged
+  cleanly because this branch never touched those lines - worth checking rather than assuming, since
+  a JSON dashboard gives no compile error for a half-applied rename. Also fixed the "Parks by Reason"
+  panel description, which #99 left reading stageReason while its own expr already said parkReason.

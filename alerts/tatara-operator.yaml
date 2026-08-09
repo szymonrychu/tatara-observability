@@ -1495,21 +1495,55 @@ rules:
   # Pod TTL, SCM egress, and the bundle byte budget.
   # ----------------------------------------------------------------------------
   # G.7 stop sequence: drain the in-flight turn, submit the handoff turn, hard cap, then a
-  # SYNTHETIC operator handoff note, then force-delete. outcome=agent_handoff and
-  # outcome=synthetic_handoff both END WITH A NOTE - the Task keeps its continuation state.
-  # outcome=force_deleted is the one where the pod died holding un-noted context. Notes ARE
-  # the continuation state (A.4), so this is silent work loss.
-  - name: "Operator agent pod force-deleted at TTL"
+  # SYNTHETIC operator handoff note, then stop the pod.
+  #
+  # This fired on outcome=force_deleted until tatara-operator#527, and it was measuring the
+  # wrong bucket. outcome answers "how was the POD stopped?" and says NOTHING about whether
+  # continuation state survived: a pod whose agent wrote a perfect handoff and whose wrapper
+  # then failed to tear down cleanly was reported force_deleted, while the actual work-loss
+  # case was invisible for 19 days. The operator now reports a second, independent label.
+  # handoff answers "how was the CONTINUATION STATE captured?":
+  #   agent     - the agent answered the handoff turn and wrote its own note
+  #   synthetic - the operator wrote the note from the last turn's finalText/pushedRepos
+  #   none      - the operator held NOTHING to write; the note that landed is a placeholder
+  # Notes ARE the continuation state (A.4), so handoff=none is silent work loss.
+  #
+  # It is not the ONLY discontinuity, only the only one this metric can see. A pod lost
+  # BEFORE its TTL (crash, eviction) goes through respawnLostPod, which writes no handoff
+  # note and increments no TTL counter at all - that discontinuity is uncounted, and visible
+  # only as the operator's pod_respawn log action and Task.status.stats.podRecreations. Read
+  # this rule as "TTL stops that lost work", not "every Task that lost work".
+  - name: "Operator agent pod TTL-stopped with no handoff captured"
     queries:
       - expression: |
-          sum by (agent_kind) (increase(operator_agent_pod_ttl_expired_total{namespace="tatara",job="tatara-operator",outcome="force_deleted"}[1h])) or vector(0)
+          sum by (agent_kind) (increase(operator_agent_pod_ttl_expired_total{namespace="tatara",job="tatara-operator",handoff="none"}[1h])) or vector(0)
     math_operator: ">"
     threshold: 0
     for: 5m
     decimal_points: 0
     annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-agent-pod-ttl-stopped-with-no-handoff-captured"
+      summary: "{{ index $values \"C\" }} {{ index $labels \"agent_kind\" }} agent pod(s) were TTL-stopped in 1h with NO continuation state captured - no agent handoff, and no status.lastTurn for the operator to build a synthetic one from. The note that landed is a placeholder, so the next pod for that Task resumes from a bundle missing the last turn's work and re-runs turn-0. Silent work loss; the Task will look healthy."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # The STOP dimension, kept as its own separate signal. A force-delete means the graceful
+  # stop failed against a live pod (a wedged turn, an unresponsive PTY). Worth knowing - it is
+  # a wrapper-health signal - but on its own it is not work loss, so it no longer carries that
+  # claim and no longer shares a threshold with the rule above.
+  - name: "Operator agent pod force-deleted at TTL"
+    queries:
+      - expression: |
+          sum by (agent_kind) (increase(operator_agent_pod_ttl_expired_total{namespace="tatara",job="tatara-operator",outcome="force_deleted"}[1h])) or vector(0)
+    math_operator: ">"
+    threshold: 2
+    for: 15m
+    decimal_points: 0
+    annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-agent-pod-force-deleted-at-ttl"
-      summary: "{{ index $values \"C\" }} {{ index $labels \"agent_kind\" }} agent pod(s) were FORCE-DELETED at TTL in 1h - the G.7 stop sequence got neither an agent handoff nor a synthetic one. Notes are the continuation state, so the next pod for that Task resumes from a bundle that is missing the last turn's work. Silent work loss; the Task will look healthy."
+      summary: "{{ index $values \"C\" }} {{ index $labels \"agent_kind\" }} agent pod(s) had to be FORCE-DELETED at TTL in 1h - the graceful G.7 stop failed against a live pod. This is a wrapper-health signal, not work loss on its own: read the handoff label on the same metric to see whether continuation state survived."
     labels:
       homelab: "true"
       system: "tatara"

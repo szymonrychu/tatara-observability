@@ -23,10 +23,16 @@ tatara_exec_err_justification: >-
 # together - `or vector(0)` alone (old default OK) or the state flip alone (no
 # `or vector(0)`) each break one side of this.
 rules:
+  # SCOPED TO container="tatara-operator" (tatara-operator#558, fix target 5, which names
+  # this rule alongside "Tatara operator error recurring" below - same {app="tatara-operator"}
+  # selector, same cross-binary exposure: the ingest Job's pods share app="tatara-operator"
+  # with the operator Deployment and differ only by container/component/pod. Not currently
+  # OBSERVED to fire from ingest volume alone (~1.3 ingest-failed lines/hr, nowhere near this
+  # rule's 20-in-5m bar), but the selector was wrong regardless and #558 calls it out by name.
   - name: "Tatara operator error log burst"
     queries:
       - expression: |
-          sum(count_over_time({namespace="tatara", app="tatara-operator"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | level="ERROR" [5m])) or vector(0)
+          sum(count_over_time({namespace="tatara", app="tatara-operator", container="tatara-operator"} | pattern `<_> <_> <_> <body>` | line_format `{{.body}}` | json | level="ERROR" [5m])) or vector(0)
         datasource_uid: "efihqbqlmroqod"
         query_type: "loki"
     math_operator: ">"
@@ -35,7 +41,7 @@ rules:
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-operator-error-log-burst"
-      summary: "tatara-operator logged {{ index $values \"C\" }} ERROR lines in 5m (>20). Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\"} | pattern `<_> <_> <_> <body>` | line_format `{{\"{{\"}}.body{{\"}}\"}}` | json | level=\"ERROR\"."
+      summary: "tatara-operator logged {{ index $values \"C\" }} ERROR lines in 5m (>20). Scoped to container=\"tatara-operator\" so the ingest Job's own ERROR lines (container=\"ingest\", see alerts/tatara-ingester.yaml) cannot trip this rule. Investigate in Grafana Explore: {namespace=\"tatara\", app=\"tatara-operator\", container=\"tatara-operator\"} | pattern `<_> <_> <_> <body>` | line_format `{{\"{{\"}}.body{{\"}}\"}}` | json | level=\"ERROR\"."
     labels:
       homelab: "true"
       system: "tatara"

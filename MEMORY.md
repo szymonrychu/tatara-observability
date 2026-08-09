@@ -1074,3 +1074,21 @@ PR/push triggers.
   groups `operator_task_parked_total{state,parkReason}` `by (kind)`, a label it has never
   carried, so the grouping is a silent no-op. Reported on #99 rather than fixed here - those
   lines do not exist on main.
+- 2026-08-09 (tatara-operator#558): "Tatara operator error recurring" (alerts/tatara-logs.yaml) scoped
+  its Loki selector to `container="tatara-operator"`. The operator launches each repo's ingest Job
+  under its own `app="tatara-operator"` label (only `container`/`component`/`pod` differ), so the
+  ingest binary's `ingest failed` ERROR lines (container="ingest", a different binary entirely -
+  internal/ingest in tatara-memory-repo-ingester) counted against a rule meant to police the operator's
+  own reconcile loop. Measured over 24h: 32 `ingest failed` lines alone cleared the rule's >=2/hour bar,
+  and after the operator's own ERROR classes were fixed it was the only msg still able to trip it.
+  Verified `container` is a genuine top-level Loki label on this datasource (list_loki_label_names) and
+  that both streams carry it with distinct values (query_loki_logs), so the new selector satisfies the
+  label-NAME provenance guard (tatara-observability#101, not yet merged). Did NOT add a dedicated Loki
+  rule for the ingest Job's ERROR lines: alerts/tatara-ingester.yaml already covers that failure mode
+  with better-labelled Prometheus signal ("Tatara ingest job failing", "Tatara ingest run failure ratio
+  high", "Repository ingest stale", "Repository stuck in failing ingest state") that attributes to a
+  project/repo and to full/incremental mode - a raw ERROR-log count keyed only on `msg` would be a
+  strictly worse duplicate. Also scoped the sibling "Tatara operator error log burst" (same file,
+  5m/threshold 20) to `container="tatara-operator"`: tatara-operator#558's own fix-target table names
+  both rules under the same selector defect. Its threshold is nowhere near ingest's ~1.3 lines/hr
+  volume so it was not observed firing from this cause, but the selector was wrong regardless.

@@ -421,6 +421,34 @@ class DeriveBucketBoundsTest(unittest.TestCase):
             {},
         )
 
+    def test_a_ladder_in_a_block_comment_is_not_the_buckets(self):
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name: "blockcommented_seconds",\n'
+                "    /*\n"
+                "    Buckets: prometheus.ExponentialBuckets(1, 2, 3)\n"
+                "    */\n"
+                "    Buckets: prometheus.DefBuckets,\n"
+                "})\n"
+            ),
+            {"blockcommented_seconds": (0.005, 10.0)},
+        )
+
+    def test_a_ladder_in_a_raw_string_is_not_the_buckets(self):
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name: "rawstring_seconds",\n'
+                "    Help: `multi line help\n"
+                "Buckets: prometheus.ExponentialBuckets(1, 2, 3)\n"
+                "`,\n"
+                "    Buckets: prometheus.DefBuckets,\n"
+                "})\n"
+            ),
+            {"rawstring_seconds": (0.005, 10.0)},
+        )
+
     def test_a_neighbouring_var_ladder_is_not_adopted(self):
         self.assertEqual(
             self._derive(

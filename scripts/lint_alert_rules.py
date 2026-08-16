@@ -326,9 +326,15 @@ def load_histogram_bounds(
         if not m:
             continue
         try:
-            out[m.group("family")] = (float(m.group("low")), float(m.group("high")))
+            low, high = float(m.group("low")), float(m.group("high"))
         except ValueError as exc:
             raise ValueError(f"histogram_bounds.txt: bad entry {stripped!r}") from exc
+        if not (math.isfinite(low) and math.isfinite(high)) or low >= high:
+            raise ValueError(
+                f"histogram_bounds.txt: {stripped!r} - expected finite "
+                "`<family> <lowest finite bound> <top finite bound>` with lowest < top"
+            )
+        out[m.group("family")] = (low, high)
     return out
 
 
@@ -394,22 +400,52 @@ def _strip_idle_guards(expr: str) -> str:
         expr = expr[: m.start()] + expr[open_paren + 1 + len(consumed) + 1 :]
 
 
+_OR_VECTOR = re.compile(
+    r"\s+or\b(?:\s+on\s*\([^)]*\))?\s+vector\s*\(\s*(-?[0-9.]+)\s*\)"
+)
+
+
+def _strip_wrapping_parens(expr: str) -> str:
+    """expr with fully-enclosing paren pairs removed. `(x)` -> `x`, but `(a)+(b)`
+    is left alone: the leading `(` there does not match the final `)`."""
+    expr = expr.strip()
+    while expr.startswith("("):
+        if len(_call_arguments(expr, 0)) != len(expr) - 2:
+            return expr
+        expr = expr[1:-1].strip()
+    return expr
+
+
+def _normalised_value_expression(expr: str) -> tuple[str, list[float]]:
+    """(the expression whose value the threshold compares against, the constants
+    any `or vector(N)` can substitute for it).
+
+    Idle guards contribute no value, wrapping parens contribute no value, and
+    `or vector(N)` adds N to the reachable set without touching the ceiling.
+    """
+    stripped = _strip_wrapping_parens(_strip_idle_guards(expr))
+    constants = [float(m.group(1)) for m in _OR_VECTOR.finditer(stripped)]
+    if constants:
+        stripped = _strip_wrapping_parens(_OR_VECTOR.sub("", stripped))
+    return stripped, constants
+
+
 def _is_bare_quantile(expr: str) -> bool:
-    """True when the guard-stripped expression is nothing but one
-    histogram_quantile( call, so its value is in the histogram's own units.
+    """True when the normalised expression is nothing but one histogram_quantile(
+    call, so its value is in the histogram's own units.
 
     A scaled or aggregated quantile (`1000 * histogram_quantile(...)` for
-    milliseconds, `sum(histogram_quantile(...))` across pods) compares against a
-    derived quantity this check does not model; range-checking those against the
-    raw bucket ceiling would fail a correct rule, which is how a check gets
-    weakened to a warning. They are skipped, and CONVENTIONS.md 6.4 says so.
+    milliseconds, `sum(histogram_quantile(...))` across pods, a quantile compared
+    against another quantile) compares against a derived quantity this check does
+    not model; range-checking those against the raw bucket ceiling would fail a
+    correct rule, which is how a check gets weakened to a warning. They are
+    skipped, and CONVENTIONS.md 6.4 says so.
     """
-    stripped = _strip_idle_guards(expr).strip()
-    m = _HISTOGRAM_QUANTILE.match(stripped)
+    m = _HISTOGRAM_QUANTILE.match(expr)
     if m is None:
         return False
-    args = _call_arguments(stripped, m.end() - 1)
-    return stripped[m.end() + len(args) :].strip() == ")"
+    args = _call_arguments(expr, m.end() - 1)
+    return expr[m.end() + len(args) :].strip() == ")"
 
 
 def _quantile_call_quantiles(expr: str) -> list[float | None]:
@@ -430,12 +466,17 @@ def lint_histogram_range(
     path: str, rule: dict, bounds: dict[str, tuple[float, float]]
 ) -> Violation | None:
     joined = _joined_expressions(rule)
-    families = _quantile_call_families(joined)
-    if not families:
+    if not _quantile_call_families(joined):
         return None
-    if not _is_bare_quantile(joined):
+    # Everything below reads the NORMALISED expression, not the raw one: a
+    # quantile that lives inside an `and on() (...)` idle guard contributes no
+    # value to the threshold comparison, and range-checking its ceiling against
+    # this rule's threshold would fail a correct rule.
+    value_expr, or_vector_constants = _normalised_value_expression(joined)
+    if not _is_bare_quantile(value_expr):
         return None
-    quantiles = _quantile_call_quantiles(joined)
+    families = _quantile_call_families(value_expr)
+    quantiles = _quantile_call_quantiles(value_expr)
     annotations = rule.get("annotations") or {}
     if str(annotations.get(HISTOGRAM_RANGE_ANNOTATION_KEY, "")).strip():
         return None
@@ -465,9 +506,10 @@ def lint_histogram_range(
                 path,
                 name,
                 f"runs histogram_quantile() over `{family}_bucket`, which has no "
-                "bucket-ceiling entry in `scripts/histogram_bounds.txt`, so its "
-                "threshold cannot be range-checked. Add `<family> <top finite "
-                "bucket bound>` there (reconcile_metric_provenance.py validates it "
+                "bucket-range entry in `scripts/histogram_bounds.txt`, so its "
+                "threshold cannot be range-checked. Add a "
+                "`<family> <lowest finite bound> <top finite bound>` line there "
+                "(reconcile_metric_provenance.py validates it "
                 "against the producer's Go source), or set a non-empty "
                 f"`{HISTOGRAM_RANGE_ANNOTATION_KEY}` annotation. See CONVENTIONS.md.",
             )
@@ -476,6 +518,11 @@ def lint_histogram_range(
             continue  # the floor is q-dependent and q is not a literal here
         ceiling = _rounded(high, decimal_points)
         floor = _rounded(_quantile_floor(low, q if q is not None else 0.0), decimal_points)
+        for constant in or_vector_constants:
+            # `or vector(N)` substitutes N when the vector is empty, so N joins the
+            # reachable set. It can widen the range in either direction.
+            rounded = _rounded(constant, decimal_points)
+            floor, ceiling = min(floor, rounded), max(ceiling, rounded)
         if _threshold_reachable(floor, ceiling, threshold, operator):
             continue
         return Violation(

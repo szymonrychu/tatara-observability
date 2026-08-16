@@ -872,6 +872,75 @@ rules:
 """
         self.assertEqual(self._violations(body), [])
 
+    def test_parenthesised_quantile_is_still_range_checked(self):
+        # Wrapping the call in parens changes nothing about its units, so it must
+        # not slip past the bare-quantile gate.
+        body = """
+rules:
+  - name: "parenthesised and inert"
+    queries:
+      - expression: |
+          (histogram_quantile(0.95, sum(rate(operator_turn_submit_duration_seconds_bucket[15m])) by (le))) and on() (sum(rate(operator_turn_submit_duration_seconds_count[15m])) > 0)
+    math_operator: ">"
+    threshold: 99999
+    decimal_points: 1
+"""
+        self.assertEqual(len(self._violations(body)), 1)
+
+    def test_or_vector_zero_does_not_bypass_the_ceiling(self):
+        # `or vector(0)` widens the reachable set downward by adding 0; it cannot
+        # lift the ceiling, so an above-ceiling `>` threshold is still inert.
+        body = """
+rules:
+  - name: "fabricated zero, still inert"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(operator_turn_submit_duration_seconds_bucket[15m])) by (le)) and on() (sum(rate(operator_turn_submit_duration_seconds_count[15m])) > 0) or vector(0)
+    math_operator: ">"
+    threshold: 99999
+    decimal_points: 1
+"""
+        self.assertEqual(len(self._violations(body)), 1)
+
+    def test_or_vector_zero_widens_the_floor(self):
+        # ... and it DOES make `< 0.01` reachable, because 0 is now in the set.
+        body = """
+rules:
+  - name: "fabricated zero reaches below the floor"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(operator_turn_submit_duration_seconds_bucket[15m])) by (le)) and on() (sum(rate(operator_turn_submit_duration_seconds_count[15m])) > 0) or vector(0)
+    math_operator: "<"
+    threshold: 0.01
+    decimal_points: 2
+"""
+        self.assertEqual(self._violations(body), [])
+
+    def test_a_quantile_inside_the_idle_guard_is_not_range_checked(self):
+        # The rule's own value comes from the FIRST quantile (ceiling 25.6); the
+        # second lives inside the `and on() (...)` guard and its 2.56 ceiling has
+        # nothing to do with this threshold. Range-checking it would red-build a
+        # correct rule.
+        body = """
+rules:
+  - name: "quantile in the guard"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(operator_turn_submit_duration_seconds_bucket[15m])) by (le)) and on() (histogram_quantile(0.95, sum(rate(operator_webhook_duration_seconds_bucket[5m])) by (le)) > 0)
+    math_operator: ">"
+    threshold: 10
+    decimal_points: 1
+    annotations:
+      tatara_idle_quantile: "guarded by the companion quantile"
+"""
+        self.assertEqual(self._violations(body), [])
+
+    def test_unknown_family_message_names_the_committed_file_format(self):
+        v = self._violations(self._rule("some_new_duration_seconds", ">", 5, 1))
+        self.assertEqual(len(v), 1)
+        # The remediation the message prescribes must actually parse.
+        self.assertIn("<lowest finite bound> <top finite bound>", v[0].message)
+
     def test_unidentifiable_bucket_family_is_violation(self):
         # No <family>_bucket selector at all: no ceiling can be looked up, so the
         # range cannot be verified. Fails closed (Check 2 also flags this shape).
@@ -904,6 +973,29 @@ class HistogramBoundsFile(unittest.TestCase):
     def test_every_entry_has_a_lower_bound_below_its_upper(self):
         for family, (low, high) in lint.load_histogram_bounds().items():
             self.assertLess(low, high, family)
+
+    def test_a_three_field_entry_the_message_prescribes_parses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = pathlib.Path(tmp) / "b.txt"
+            p.write_text("# --- memory: x ---\nsome_new_duration_seconds 0.005 10\n")
+            self.assertEqual(
+                lint.load_histogram_bounds(p),
+                {"some_new_duration_seconds": (0.005, 10.0)},
+            )
+
+    def test_inverted_bounds_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = pathlib.Path(tmp) / "b.txt"
+            p.write_text("foo 10 1\n")
+            with self.assertRaises(ValueError):
+                lint.load_histogram_bounds(p)
+
+    def test_non_finite_bounds_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = pathlib.Path(tmp) / "b.txt"
+            p.write_text("foo nan inf\n")
+            with self.assertRaises(ValueError):
+                lint.load_histogram_bounds(p)
 
 
 class RoundingModel(unittest.TestCase):

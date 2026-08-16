@@ -368,12 +368,19 @@ assuming a floor of zero. A histogram whose lowest bound is `<= 0` is short-
 circuited by `bucketQuantile` and returned directly, so its floor is that bound
 itself.
 
-Only a **bare** quantile is range-checked - one where the guard-stripped expression
-is nothing but the `histogram_quantile(` call. A scaled or aggregated one
+Only a **bare** quantile is range-checked - one where the expression, after
+stripping `and on() (...)` idle guards and wrapping parens, is nothing but the
+`histogram_quantile(` call. A scaled or aggregated one
 (`1000 * histogram_quantile(...)` for milliseconds, a comparison between two
 quantiles) compares against a derived quantity in different units, and checking
 those against the raw bucket range would fail a correct rule. They are skipped, and
 the threshold is on the author.
+
+Two consequences of reading the *normalised* expression rather than the raw one: a
+`histogram_quantile` living INSIDE an idle guard is not range-checked, because it
+contributes no value to the threshold comparison; and `or vector(N)` adds `N` to the
+reachable set (it cannot lift the ceiling), so it can make a below-floor `<`
+threshold legal while leaving an above-ceiling `>` threshold just as inert.
 
 `decimal_points` is applied first. `modules/grafana_alert/main.tf` inserts a
 `round($C * 10^d) / 10^d` reduce step ahead of the threshold compare, so the

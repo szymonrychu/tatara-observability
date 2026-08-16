@@ -171,7 +171,9 @@ _DEF_BUCKETS = re.compile(r"^(?:\w+\.)?DefBuckets$")
 _LITERAL_BUCKETS = re.compile(r"^\[\]float64\{([^}]*)\}$")
 _BUCKETS_FIELD = re.compile(r"\bBuckets:\s*")
 _LINE_COMMENT = re.compile(r"//[^\n]*")
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
 _GO_STRING = re.compile(r'"(?:[^"\\\n]|\\.)*"')
+_GO_RAW_STRING = re.compile(r"`[^`]*`", re.S)
 # prometheus.DefBuckets = {.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10}.
 _DEF_BUCKETS_RANGE = (0.005, 10.0)
 # How many lines after a histogram constructor to look for its Buckets field. Wider
@@ -187,13 +189,15 @@ def _go_float(text: str) -> float:
 def _buckets_expression(window: str) -> str | None:
     """The Go expression assigned to the `Buckets:` field in window, or None.
 
-    Comments and string literals are blanked first so a ladder quoted in a Help
-    string or left behind in a `// was Buckets: []float64{...}` comment cannot be
-    mistaken for the live value. The expression is then read by balancing
-    brackets from the field, so only the value itself is returned - never a
-    neighbouring declaration's.
+    Comments (line AND block) and string literals (interpreted AND raw) are
+    blanked first, so a ladder quoted in a Help string or left behind in a
+    `// was Buckets: []float64{...}` comment cannot be mistaken for the live
+    value. Strings go first so a `//` inside one is not read as a comment. The
+    expression is then read by balancing brackets from the field, so only the
+    value itself is returned - never a neighbouring declaration's.
     """
-    window = _LINE_COMMENT.sub("", _GO_STRING.sub('""', window))
+    window = _GO_RAW_STRING.sub("``", _GO_STRING.sub('""', window))
+    window = _LINE_COMMENT.sub("", _BLOCK_COMMENT.sub("", window))
     m = _BUCKETS_FIELD.search(window)
     if m is None:
         return None

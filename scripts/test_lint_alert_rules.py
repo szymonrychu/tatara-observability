@@ -2,6 +2,7 @@
 """Tests for lint_alert_rules. Run: python3 -m unittest scripts.test_lint_alert_rules
 or, from the scripts/ dir: python3 -m unittest test_lint_alert_rules."""
 
+import json
 import pathlib
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ import lint_alert_rules as lint
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ALERTS_DIR = REPO_ROOT / "alerts"
+DASHBOARDS_DIR = REPO_ROOT / "dashboards"
 
 
 def _write(tmp: pathlib.Path, body: str) -> str:
@@ -758,11 +760,7 @@ rules:
             1,
         )
 
-    def test_scaled_quantile_is_not_range_checked(self):
-        # `1000 * histogram_quantile(...)` converts seconds to milliseconds; the
-        # threshold no longer lives in the histogram's own units, so range-checking
-        # it against the raw ceiling would red-build a correct rule.
-        body = """
+    SCALED = """
 rules:
   - name: "p95 in milliseconds"
     queries:
@@ -772,6 +770,59 @@ rules:
     threshold: 5000
     decimal_points: 0
 """
+
+    def test_scaled_quantile_is_not_range_checked_but_must_be_declared(self):
+        # `1000 * histogram_quantile(...)` converts seconds to milliseconds; the
+        # threshold no longer lives in the histogram's own units, so range-checking
+        # it against the raw ceiling would red-build a correct rule. The shape is
+        # therefore skipped - but NOT silently. A skip nobody can grep is the same
+        # bypass the unknown-family hard failure exists to close, so the carve-out
+        # has to be declared on the rule.
+        v = self._violations(self.SCALED)
+        self.assertEqual(len(v), 1)
+        self.assertIn(lint.HISTOGRAM_RANGE_ANNOTATION_KEY, v[0].message)
+
+    def test_declared_scaled_quantile_passes(self):
+        body = self.SCALED + (
+            "    annotations:\n"
+            "      tatara_histogram_range: \"milliseconds; 5000ms is inside the 10s ceiling\"\n"
+        )
+        self.assertEqual(self._violations(body), [])
+
+    def test_multi_query_quantile_rule_is_not_silently_skipped(self):
+        # _joined_expressions joins the queries with a newline, so a multi-query
+        # rule can never read as a bare quantile. It must still leave a signal.
+        body = """
+rules:
+  - name: "p95 across two queries"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(lightrag_call_duration_seconds_bucket[10m])) by (le))
+      - expression: |
+          sum(rate(lightrag_call_duration_seconds_count[10m])) > 0
+    math_operator: ">"
+    threshold: 5
+    annotations:
+      tatara_idle_quantile: "guarded by query B"
+"""
+        v = self._violations(body)
+        self.assertEqual(len(v), 1)
+        self.assertIn(lint.HISTOGRAM_RANGE_ANNOTATION_KEY, v[0].message)
+
+    def test_or_vector_in_scientific_notation_is_still_a_bare_quantile(self):
+        # `or vector(1e3)` is the same shape as `or vector(1000)`; a constant the
+        # regex cannot read used to drop the rule out of the check entirely.
+        body = """
+rules:
+  - name: "p95 with a fabricated fallback"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(lightrag_call_duration_seconds_bucket[10m])) by (le)) and on() (sum(rate(lightrag_call_duration_seconds_count[10m])) > 0) or vector(1e3)
+    math_operator: ">"
+    threshold: 30
+    decimal_points: 0
+"""
+        # 1000 joins the reachable set, so `> 30` over a 10s ceiling is reachable.
         self.assertEqual(self._violations(body), [])
 
     def test_unknown_family_is_violation(self):
@@ -846,8 +897,8 @@ rules:
         # Two histogram_quantile calls related by `>`: the value the threshold sees
         # is the result of a comparison between two histograms, not either one's
         # own units. Skipped rather than checked against one of the two ceilings -
-        # the same reason a scaled quantile is skipped. Check 2 still covers both
-        # calls' idle guards.
+        # the same reason a scaled quantile is skipped, and declared the same way.
+        # Check 2 still covers both calls' idle guards.
         body = """
 rules:
   - name: "two quantiles"
@@ -858,7 +909,14 @@ rules:
     threshold: 12
     decimal_points: 1
 """
-        self.assertEqual(self._violations(body), [])
+        v = self._violations(body)
+        self.assertEqual(len(v), 1)
+        self.assertIn(lint.HISTOGRAM_RANGE_ANNOTATION_KEY, v[0].message)
+        declared = body + (
+            "    annotations:\n"
+            "      tatara_histogram_range: \"ratio of two quantiles; unitless\"\n"
+        )
+        self.assertEqual(self._violations(declared), [])
 
     def test_non_quantile_rule_ignored(self):
         body = """
@@ -1016,7 +1074,168 @@ class RoundingModel(unittest.TestCase):
         self.assertEqual(lint._rounded(25.6, 400), 25.6)
 
 
-class RealAlertFilesPass(unittest.TestCase):
+class DashboardThresholdRange(unittest.TestCase):
+    """Check 5: a dashboard panel's red threshold step over a quantile the panel
+    cannot reach. Same silent-green class as Check 4 one surface over - the band
+    never colours, so the panel reads healthy because it cannot read anything else
+    (tatara-observability#111 review round 1)."""
+
+    BOUNDS = {
+        "operator_turn_submit_duration_seconds": (0.05, 25.6),
+        "lightrag_call_duration_seconds": (0.005, 10.0),
+    }
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = pathlib.Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _violations(self, dashboard: dict):
+        p = self.tmp / "d.json"
+        p.write_text(json.dumps(dashboard))
+        return lint.lint_file(str(p), bounds=self.BOUNDS)
+
+    def _panel(self, exprs, steps, title="p95 panel"):
+        return {
+            "title": title,
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "targets": [{"expr": e, "refId": chr(65 + i)} for i, e in enumerate(exprs)],
+            "fieldConfig": {
+                "defaults": {
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [{"color": "green", "value": None}]
+                        + [{"color": "red", "value": s} for s in steps],
+                    }
+                }
+            },
+        }
+
+    QUANTILE = (
+        "histogram_quantile(0.95, sum(rate({f}_bucket[15m])) by (le, kind))"
+    )
+
+    def test_step_above_the_ceiling_is_violation(self):
+        v = self._violations(
+            {
+                "panels": [
+                    self._panel(
+                        [self.QUANTILE.format(f="operator_turn_submit_duration_seconds")],
+                        [30],
+                    )
+                ]
+            }
+        )
+        self.assertEqual(len(v), 1)
+        self.assertIn("25.6", v[0].message)
+        self.assertIn("p95 panel", v[0].rule)
+
+    def test_step_below_the_ceiling_passes(self):
+        self.assertEqual(
+            self._violations(
+                {
+                    "panels": [
+                        self._panel(
+                            [self.QUANTILE.format(f="operator_turn_submit_duration_seconds")],
+                            [6.4],
+                        )
+                    ]
+                }
+            ),
+            [],
+        )
+
+    def test_step_exactly_at_the_ceiling_passes(self):
+        # A Grafana threshold step colours at value >= step, so a step sitting
+        # exactly on the ceiling is attained, not inert.
+        self.assertEqual(
+            self._violations(
+                {
+                    "panels": [
+                        self._panel(
+                            [self.QUANTILE.format(f="operator_turn_submit_duration_seconds")],
+                            [25.6],
+                        )
+                    ]
+                }
+            ),
+            [],
+        )
+
+    def test_panel_with_no_finite_step_is_skipped(self):
+        panel = self._panel(
+            [self.QUANTILE.format(f="lightrag_call_duration_seconds")], []
+        )
+        self.assertEqual(self._violations({"panels": [panel]}), [])
+
+    def test_non_quantile_panel_is_skipped(self):
+        panel = self._panel(["sum(rate(lightrag_calls_total[5m]))"], [30])
+        self.assertEqual(self._violations({"panels": [panel]}), [])
+
+    def test_row_collapsed_panels_are_walked(self):
+        inner = self._panel(
+            [self.QUANTILE.format(f="lightrag_call_duration_seconds")], [30]
+        )
+        row = {"type": "row", "title": "row", "panels": [inner]}
+        v = self._violations({"panels": [row]})
+        self.assertEqual(len(v), 1)
+
+    def test_the_highest_target_ceiling_wins(self):
+        # A panel plotting two families is unreachable only above BOTH ceilings.
+        panel = self._panel(
+            [
+                self.QUANTILE.format(f="lightrag_call_duration_seconds"),
+                self.QUANTILE.format(f="operator_turn_submit_duration_seconds"),
+            ],
+            [20],
+        )
+        self.assertEqual(self._violations({"panels": [panel]}), [])
+        panel = self._panel(
+            [
+                self.QUANTILE.format(f="lightrag_call_duration_seconds"),
+                self.QUANTILE.format(f="operator_turn_submit_duration_seconds"),
+            ],
+            [30],
+        )
+        self.assertEqual(len(self._violations({"panels": [panel]})), 1)
+
+    def test_unknown_family_is_violation(self):
+        panel = self._panel([self.QUANTILE.format(f="some_new_duration_seconds")], [30])
+        v = self._violations({"panels": [panel]})
+        self.assertEqual(len(v), 1)
+        self.assertIn("histogram_bounds.txt", v[0].message)
+
+    def test_scaled_quantile_panel_is_skipped(self):
+        # Milliseconds on the axis: the step is not in the histogram's units. A
+        # panel carries no annotations, so unlike Check 4 there is nothing to
+        # declare - the carve-out is documented in CONVENTIONS.md 6.4 instead.
+        panel = self._panel(
+            ["1000 * " + self.QUANTILE.format(f="lightrag_call_duration_seconds")],
+            [30000],
+        )
+        self.assertEqual(self._violations({"panels": [panel]}), [])
+
+    def test_mixed_quantile_and_non_quantile_targets_are_skipped(self):
+        panel = self._panel(
+            [
+                self.QUANTILE.format(f="lightrag_call_duration_seconds"),
+                "sum(rate(lightrag_calls_total[5m]))",
+            ],
+            [30],
+        )
+        self.assertEqual(self._violations({"panels": [panel]}), [])
+
+    def test_a_loki_target_is_not_read_as_promql(self):
+        panel = self._panel(
+            [self.QUANTILE.format(f="lightrag_call_duration_seconds")], [30]
+        )
+        panel["datasource"] = {"type": "loki", "uid": "loki"}
+        self.assertEqual(self._violations({"panels": [panel]}), [])
+
+
+class RealFilesPass(unittest.TestCase):
     def test_all_committed_alert_files_pass(self):
         paths = sorted(str(p) for p in ALERTS_DIR.glob("*.yaml"))
         self.assertTrue(paths, "expected alerts/*.yaml to exist")
@@ -1025,6 +1244,20 @@ class RealAlertFilesPass(unittest.TestCase):
             violations, [], "committed alert rules must satisfy the convention:\n"
             + "\n".join(str(v) for v in violations),
         )
+
+    def test_all_committed_dashboards_pass(self):
+        paths = sorted(str(p) for p in DASHBOARDS_DIR.glob("*.json"))
+        self.assertTrue(paths, "expected dashboards/*.json to exist")
+        violations = lint.lint_paths(paths)
+        self.assertEqual(
+            violations, [], "committed dashboard panels must satisfy the convention:\n"
+            + "\n".join(str(v) for v in violations),
+        )
+
+    def test_default_paths_cover_both_surfaces(self):
+        paths = lint._default_paths()
+        self.assertTrue(any(p.endswith(".yaml") for p in paths))
+        self.assertTrue(any(p.endswith(".json") for p in paths))
 
 
 if __name__ == "__main__":

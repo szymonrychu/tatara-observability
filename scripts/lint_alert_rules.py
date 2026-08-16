@@ -27,6 +27,7 @@ Exit 0 = clean, exit 1 = violations found, exit 2 = usage/parse error.
 from __future__ import annotations
 
 import glob
+import json
 import math
 import pathlib
 import re
@@ -400,8 +401,13 @@ def _strip_idle_guards(expr: str) -> str:
         expr = expr[: m.start()] + expr[open_paren + 1 + len(consumed) + 1 :]
 
 
+# The constant must accept every Go/PromQL float spelling, scientific notation
+# included: a `vector(1e3)` the regex cannot read is not merely an unknown
+# constant, it also stops the expression reading as a bare quantile and drops the
+# whole rule out of the check.
 _OR_VECTOR = re.compile(
-    r"\s+or\b(?:\s+on\s*\([^)]*\))?\s+vector\s*\(\s*(-?[0-9.]+)\s*\)"
+    r"\s+or\b(?:\s+on\s*\([^)]*\))?\s+vector\s*\(\s*"
+    r"(-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*\)"
 )
 
 
@@ -439,7 +445,7 @@ def _is_bare_quantile(expr: str) -> bool:
     against another quantile) compares against a derived quantity this check does
     not model; range-checking those against the raw bucket ceiling would fail a
     correct rule, which is how a check gets weakened to a warning. They are
-    skipped, and CONVENTIONS.md 6.4 says so.
+    skipped - but the skip is DECLARED, not silent: see lint_histogram_range.
     """
     m = _HISTOGRAM_QUANTILE.match(expr)
     if m is None:
@@ -468,19 +474,35 @@ def lint_histogram_range(
     joined = _joined_expressions(rule)
     if not _quantile_call_families(joined):
         return None
+    annotations = rule.get("annotations") or {}
+    if str(annotations.get(HISTOGRAM_RANGE_ANNOTATION_KEY, "")).strip():
+        return None
+    name = rule.get("name", "<unnamed>")
     # Everything below reads the NORMALISED expression, not the raw one: a
     # quantile that lives inside an `and on() (...)` idle guard contributes no
     # value to the threshold comparison, and range-checking its ceiling against
     # this rule's threshold would fail a correct rule.
     value_expr, or_vector_constants = _normalised_value_expression(joined)
     if not _is_bare_quantile(value_expr):
-        return None
+        # The shape is out of model (see _is_bare_quantile) and is NOT range-checked
+        # - but it is not waved through in silence either. A skip nobody can grep is
+        # the same bypass the unknown-family failure below exists to close, so the
+        # carve-out has to be declared on the rule, exactly as the other three checks
+        # require their own annotation.
+        return Violation(
+            path,
+            name,
+            "compares a threshold against something other than a bare "
+            "histogram_quantile() (a scaled or aggregated quantile, a quantile-vs-"
+            "quantile comparison, or a multi-query rule), so its threshold is in "
+            "derived units this check cannot range-check against the histogram's "
+            "buckets. A quantile threshold outside the reachable range makes a rule "
+            "structurally inert and it reports OK forever. Set a non-empty "
+            f"`{HISTOGRAM_RANGE_ANNOTATION_KEY}` annotation recording why the "
+            "threshold is inside the reachable range. See CONVENTIONS.md.",
+        )
     families = _quantile_call_families(value_expr)
     quantiles = _quantile_call_quantiles(value_expr)
-    annotations = rule.get("annotations") or {}
-    if str(annotations.get(HISTOGRAM_RANGE_ANNOTATION_KEY, "")).strip():
-        return None
-    name = rule.get("name", "<unnamed>")
     operator = str(rule.get("math_operator", ">")).strip()
     try:
         threshold = float(rule.get("threshold"))
@@ -542,6 +564,122 @@ def lint_histogram_range(
     return None
 
 
+# --- Check 5: dashboard threshold step outside the panel's reachable range ---
+#
+# Check 4 walks alerts/*.yaml only, and the SAME defect was live one surface over
+# the whole time it was being written: dashboards/operator.json and
+# dashboards/memory.json both painted a red threshold step at 30 over the same two
+# histograms, topping out at 25.6 and 10 (#111 review round 1). A Grafana threshold
+# step colours a value at `value >= step`, so a step above the top finite bucket
+# bound never colours: the panel reads healthy because it cannot read anything else,
+# and unlike an alert there is not even a no_data_state to mis-configure.
+# check_metric_provenance.py already treats dashboards/*.json as a first-class
+# silent-green surface (CONVENTIONS.md section 5); this is the comparison dimension
+# of the same surface.
+#
+# SCOPE, deliberately narrow to keep the check false-failure free: a panel is
+# range-checked only when it carries at least one finite threshold step AND every
+# one of its Prometheus targets is a bare histogram_quantile() (so the step is in
+# the histogram's own units). A panel mixing a quantile with a rate, or scaling a
+# quantile into milliseconds, is skipped - a panel has no annotations, so there is
+# no per-panel escape hatch to declare, and CONVENTIONS.md 6.4 records the carve-out
+# instead. Only the unreachable direction is failed; a step at or below the floor
+# (a permanently-red band) is a different defect and is not modelled here.
+#
+# decimal_points has no analogue: Grafana's fieldConfig `decimals` is display
+# formatting and does not round the value a threshold step is evaluated against.
+def _panel_datasource_type(target: dict, panel: dict) -> str:
+    ds = target.get("datasource") or panel.get("datasource") or {}
+    return str(ds.get("type", "")) if isinstance(ds, dict) else ""
+
+
+def _panel_threshold_steps(panel: dict) -> list[float]:
+    """Every finite threshold step value on a panel. The base step carries
+    `value: null` (it is the floor colour, not a comparison) and is dropped."""
+    defaults = (panel.get("fieldConfig") or {}).get("defaults") or {}
+    steps = (defaults.get("thresholds") or {}).get("steps") or []
+    out = []
+    for step in steps:
+        value = step.get("value") if isinstance(step, dict) else None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            out.append(float(value))
+    return out
+
+
+def lint_dashboard_panel(
+    path: str, panel: dict, bounds: dict[str, tuple[float, float]]
+) -> Violation | None:
+    exprs = [
+        str(t.get("expr") or "")
+        for t in (panel.get("targets") or [])
+        if _panel_datasource_type(t, panel) == "prometheus" and (t.get("expr") or "")
+    ]
+    if not exprs or not any(_HISTOGRAM_QUANTILE.search(e) for e in exprs):
+        return None
+    steps = _panel_threshold_steps(panel)
+    if not steps:
+        return None  # nothing compares against the quantile
+    title = f'panel "{panel.get("title", "<untitled>")}"'
+    ceiling = None
+    for expr in exprs:
+        value_expr, or_vector_constants = _normalised_value_expression(expr)
+        if not _is_bare_quantile(value_expr):
+            return None  # derived units; out of model, see the block comment
+        for family in _quantile_call_families(value_expr):
+            if family is None:
+                return None  # Check 2's shape finding; nothing to range-check on
+            if family not in bounds:
+                return Violation(
+                    path,
+                    title,
+                    f"plots histogram_quantile() over `{family}_bucket` under a "
+                    "threshold step, but that family has no bucket-range entry in "
+                    "`scripts/histogram_bounds.txt`, so the step cannot be "
+                    "range-checked. Add a "
+                    "`<family> <lowest finite bound> <top finite bound>` line there "
+                    "(reconcile_metric_provenance.py validates it against the "
+                    "producer's Go source). See CONVENTIONS.md.",
+                )
+            high = bounds[family][1]
+            ceiling = high if ceiling is None else max(ceiling, high)
+        for constant in or_vector_constants:
+            ceiling = constant if ceiling is None else max(ceiling, constant)
+    if ceiling is None:
+        return None
+    unreachable = sorted(s for s in steps if s > ceiling)
+    if not unreachable:
+        return None
+    return Violation(
+        path,
+        title,
+        "paints a threshold step at "
+        + ", ".join(f"{s:g}" for s in unreachable)
+        + f", above the {ceiling:g} its histogram_quantile() can ever return "
+        "(classic histogram_quantile returns at most the top finite bucket bound). "
+        "The band never colours, so the panel reads healthy because it cannot read "
+        "anything else - the same silent-green class as an inert alert rule, with "
+        "no no_data_state to even mis-configure. Move the step inside the range or "
+        "widen the producer's buckets. See CONVENTIONS.md.",
+    )
+
+
+def lint_dashboard_file(path: str, bounds: dict[str, tuple[float, float]]) -> list[Violation]:
+    data = json.loads(pathlib.Path(path).read_text())
+    out: list[Violation] = []
+
+    def walk(panels: list[dict]) -> None:
+        for panel in panels:
+            if not isinstance(panel, dict):
+                continue
+            v = lint_dashboard_panel(path, panel, bounds)
+            if v is not None:
+                out.append(v)
+            walk(panel.get("panels") or [])  # row-collapsed panels
+
+    walk(data.get("panels") or [])
+    return out
+
+
 # --- Check 3: self-firing rule ----------------------------------------------
 #
 # exec_err_state: Alerting makes a rule page on its OWN query failure - a timed-out
@@ -595,9 +733,13 @@ def lint_rule_exec_err_state(path: str, rule: dict) -> Violation | None:
     )
 
 
-def lint_file(path: str, bounds: dict[str, float] | None = None) -> list[Violation]:
+def lint_file(
+    path: str, bounds: dict[str, tuple[float, float]] | None = None
+) -> list[Violation]:
     if bounds is None:
         bounds = load_histogram_bounds()
+    if path.endswith(".json"):
+        return lint_dashboard_file(path, bounds)
     data = yaml.safe_load(pathlib.Path(path).read_text())
     if not data or not isinstance(data, dict):
         return []
@@ -629,7 +771,9 @@ def lint_paths(paths: list[str]) -> list[Violation]:
 
 def _default_paths() -> list[str]:
     root = pathlib.Path(__file__).resolve().parent.parent
-    return sorted(glob.glob(str(root / "alerts" / "*.yaml")))
+    return sorted(glob.glob(str(root / "alerts" / "*.yaml"))) + sorted(
+        glob.glob(str(root / "dashboards" / "*.json"))
+    )
 
 
 def main(argv: list[str]) -> int:
@@ -639,16 +783,16 @@ def main(argv: list[str]) -> int:
         return 2
     try:
         violations = lint_paths(paths)
-    except (OSError, yaml.YAMLError) as exc:
+    except (OSError, ValueError, yaml.YAMLError) as exc:
         print(f"lint_alert_rules: {exc}", file=sys.stderr)
         return 2
     if violations:
-        print(f"FAIL: {len(violations)} alert rule(s) violate the tatara alert conventions:\n")
+        print(f"FAIL: {len(violations)} rule(s)/panel(s) violate the tatara alert conventions:\n")
         for v in violations:
             print(f"  - {v}")
         print("\nEach message names its own fix. See CONVENTIONS.md.")
         return 1
-    print(f"OK: {len(paths)} alert file(s) pass the tatara alert conventions lint.")
+    print(f"OK: {len(paths)} alert/dashboard file(s) pass the tatara alert conventions lint.")
     return 0
 
 

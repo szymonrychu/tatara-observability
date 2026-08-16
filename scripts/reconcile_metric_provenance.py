@@ -73,6 +73,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from typing import NamedTuple
 
 # Producer repos the allowlist's non-exempt sections are sourced from. All
 # public - no clone auth needed.
@@ -306,19 +307,39 @@ def parse_histogram_bounds(
     return out
 
 
+class BoundsReconciliation(NamedTuple):
+    """The four diff directions of histogram_bounds.txt vs. the producer source,
+    plus the repos that could not be read.
+
+    mismatched[repo][family] = (file range, derived range) - HARD FAIL.
+    missing[repo][family]    = derived range for a histogram the file omits
+                               (informational, same direction as `new` above).
+    unvalidatable            = families the producer STILL declares but whose
+                               Buckets: expression this parser cannot evaluate
+                               (a named package-level var) - reported, never failed.
+    ghost                    = families the producer no longer declares AT ALL, so
+                               the committed bound describes a series that does not
+                               exist - HARD FAIL. This is the `stale` allowlist case
+                               one level down, and it is the direction
+                               histogram_bounds.txt's own header promises cannot go
+                               stale unnoticed. It must not be folded into
+                               unvalidatable: 7 of the bounds families are not on
+                               metrics_allowlist.txt, so the stale gate does not
+                               backstop them.
+    skipped                  = repos whose clone failed.
+    """
+
+    mismatched: dict[str, dict[str, tuple[tuple[float, float], tuple[float, float]]]]
+    missing: dict[str, dict[str, tuple[float, float]]]
+    unvalidatable: set[str]
+    ghost: set[str]
+    skipped: set[str]
+
+
 def reconcile_bounds(
     entries: dict[str, tuple[str, float, float]], repo_dirs: dict[str, pathlib.Path]
-) -> tuple[dict[str, dict[str, tuple[tuple[float, float], tuple[float, float]]]], dict[str, dict[str, tuple[float, float]]], set[str], set[str]]:
-    """Diff histogram_bounds.txt against each producer's derived bucket ranges.
-
-    Returns (mismatched, missing, unvalidatable, skipped):
-      mismatched[repo][family] = (file range, derived range) - HARD FAIL.
-      missing[repo][family]    = derived range for a histogram the file omits
-                                 (informational, same direction as `new` above).
-      unvalidatable            = families in the file whose range no clone could
-                                 derive (named-var buckets) - reported, never failed.
-      skipped                  = repos whose clone failed.
-    """
+) -> BoundsReconciliation:
+    """Diff histogram_bounds.txt against each producer's derived bucket ranges."""
     by_repo: dict[str, dict[str, tuple[float, float]]] = {}
     for family, (section, low, high) in entries.items():
         repo = SECTION_REPO.get(section)
@@ -329,6 +350,7 @@ def reconcile_bounds(
     mismatched: dict[str, dict[str, tuple[tuple[float, float], tuple[float, float]]]] = {}
     missing: dict[str, dict[str, tuple[float, float]]] = {}
     unvalidatable: set[str] = set()
+    ghost: set[str] = set()
     skipped: set[str] = set()
     for repo, filed in by_repo.items():
         repo_dir = repo_dirs.get(repo)
@@ -336,9 +358,13 @@ def reconcile_bounds(
             skipped.add(repo)
             continue
         derived = derive_bucket_bounds(repo_dir)
+        declared = derive_metric_names(repo_dir)
         for family, rng in filed.items():
             if family not in derived:
-                unvalidatable.add(family)
+                # The bound could not be re-derived. WHY decides the outcome: a
+                # histogram the producer still declares is the benign named-var
+                # case; one it no longer declares at all is a ghost.
+                (unvalidatable if family in declared else ghost).add(family)
             elif not all(
                 math.isclose(a, b, rel_tol=1e-6, abs_tol=1e-12)
                 for a, b in zip(rng, derived[family])
@@ -347,7 +373,7 @@ def reconcile_bounds(
         absent = {f: r for f, r in derived.items() if f not in filed}
         if absent:
             missing[repo] = absent
-    return mismatched, missing, unvalidatable, skipped
+    return BoundsReconciliation(mismatched, missing, unvalidatable, ghost, skipped)
 
 
 def section_key(header_text: str) -> str | None:
@@ -460,6 +486,7 @@ def _write_summary(
     mismatched: dict[str, dict[str, tuple[float, float]]],
     missing: dict[str, dict[str, float]],
     unvalidatable: set[str],
+    ghost: set[str],
 ) -> None:
     import os
 
@@ -481,6 +508,20 @@ def _write_summary(
                     "legal."
                 )
         lines.append("")
+    if ghost:
+        lines.append(
+            "### GHOST - bucket-range entries for a histogram no producer still "
+            "declares (must fix)"
+        )
+        lines.append("")
+        for family in sorted(ghost):
+            lines.append(
+                f"- `{family}` - the producer repo no longer declares this histogram "
+                "at all, so the committed bound describes a series that does not "
+                "exist. Remove it from `scripts/histogram_bounds.txt` (and repoint "
+                "any alert or panel still selecting it)."
+            )
+        lines.append("")
     if missing:
         lines.append(
             "### Histograms with no bucket-range entry (informational only)"
@@ -499,7 +540,8 @@ def _write_summary(
             "### Unvalidatable bucket ceilings (reported, never failed): "
             + ", ".join(f"`{f}`" for f in sorted(unvalidatable))
             + " - the producer's `Buckets:` is a named variable or absent, so the "
-            "committed bound cannot be re-derived. Verify it by hand."
+            "committed bound cannot be re-derived - but the histogram itself is "
+            "still declared, so the entry is live. Verify the number by hand."
         )
         lines.append("")
     if stale:
@@ -528,7 +570,7 @@ def _write_summary(
             + ", ".join(sorted(skipped))
         )
         lines.append("")
-    if not any((stale, new, skipped, mismatched, missing, unvalidatable)):
+    if not any((stale, new, skipped, mismatched, missing, unvalidatable, ghost)):
         lines.append(
             "OK: every reconcilable allowlist section matches its producer repo, "
             "and every histogram bucket ceiling matches its producer's source."
@@ -560,11 +602,20 @@ def main(argv: list[str]) -> int:
                 repo_dirs[name] = dest
 
         stale, new, skipped = reconcile(entries, repo_dirs)
-        mismatched, missing, unvalidatable, _ = reconcile_bounds(
-            bounds_entries, repo_dirs
-        )
+        bounds = reconcile_bounds(bounds_entries, repo_dirs)
 
-    _write_summary(stale, new, skipped, mismatched, missing, unvalidatable)
+    # bounds.skipped is deliberately not merged into `skipped`: both come from the
+    # same repo_dirs, so the allowlist path above already reports every repo whose
+    # clone failed, and reporting it twice would read as two separate failures.
+    _write_summary(
+        stale,
+        new,
+        skipped,
+        bounds.mismatched,
+        bounds.missing,
+        bounds.unvalidatable,
+        bounds.ghost,
+    )
 
     if stale:
         total = sum(len(v) for v in stale.values())
@@ -575,11 +626,20 @@ def main(argv: list[str]) -> int:
         )
         return 1
 
-    if mismatched:
-        total = sum(len(v) for v in mismatched.values())
+    if bounds.mismatched:
+        total = sum(len(v) for v in bounds.mismatched.values())
         print(
             f"FAIL: {total} histogram bucket ceiling(s) in scripts/histogram_bounds.txt "
             "disagree with their producer's source. See the job summary above.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if bounds.ghost:
+        print(
+            f"FAIL: {len(bounds.ghost)} bucket-range entr(y/ies) in "
+            "scripts/histogram_bounds.txt name a histogram no producer repo still "
+            "declares. See the job summary above.",
             file=sys.stderr,
         )
         return 1

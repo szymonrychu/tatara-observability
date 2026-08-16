@@ -557,12 +557,13 @@ class ReconcileBoundsTest(unittest.TestCase):
                 "operator_turn_submit_duration_seconds": ("operator", 0.05, 25.6),
                 "operator_turn_duration_seconds": ("operator", 5.0, 640.0),
             }
-            mismatched, missing, unvalidatable, skipped = reconcile_bounds(
+            mismatched, missing, unvalidatable, ghost, skipped = reconcile_bounds(
                 entries, {"tatara-operator": repo}
             )
             self.assertEqual(mismatched, {})
             self.assertEqual(missing, {})
             self.assertEqual(unvalidatable, set())
+            self.assertEqual(ghost, set())
             self.assertEqual(skipped, set())
 
     def test_drifted_bound_is_a_hard_failure(self):
@@ -571,7 +572,7 @@ class ReconcileBoundsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = self._repo(pathlib.Path(tmp), "tatara-operator", self._OPERATOR_SRC)
             entries = {"operator_turn_submit_duration_seconds": ("operator", 0.05, 12.8)}
-            mismatched, _, _, _ = reconcile_bounds(entries, {"tatara-operator": repo})
+            mismatched = reconcile_bounds(entries, {"tatara-operator": repo}).mismatched
             self.assertEqual(
                 mismatched,
                 {"tatara-operator": {
@@ -585,16 +586,16 @@ class ReconcileBoundsTest(unittest.TestCase):
             entries = {
                 "operator_turn_submit_duration_seconds": ("operator", 0.05, 25.600000001)
             }
-            mismatched, _, _, _ = reconcile_bounds(entries, {"tatara-operator": repo})
+            mismatched = reconcile_bounds(entries, {"tatara-operator": repo}).mismatched
             self.assertEqual(mismatched, {})
 
     def test_derivable_but_absent_is_informational(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = self._repo(pathlib.Path(tmp), "tatara-operator", self._OPERATOR_SRC)
             entries = {"operator_turn_submit_duration_seconds": ("operator", 0.05, 25.6)}
-            mismatched, missing, _, _ = reconcile_bounds(
+            mismatched, missing = reconcile_bounds(
                 entries, {"tatara-operator": repo}
-            )
+            )[:2]
             self.assertEqual(mismatched, {})
             self.assertEqual(
                 missing, {"tatara-operator": {"operator_turn_duration_seconds": (5.0, 640.0)}}
@@ -611,30 +612,57 @@ class ReconcileBoundsTest(unittest.TestCase):
                 "})\n",
             )
             entries = {"code_graph_analytics_duration_seconds": ("memory", 0.5, 600.0)}
-            mismatched, missing, unvalidatable, _ = reconcile_bounds(
+            mismatched, missing, unvalidatable = reconcile_bounds(
                 entries, {"tatara-memory": repo}
-            )
+            )[:3]
             self.assertEqual(mismatched, {})
             self.assertEqual(missing, {})
             self.assertEqual(unvalidatable, {"code_graph_analytics_duration_seconds"})
 
+    def test_a_family_the_producer_no_longer_declares_is_a_ghost(self):
+        # The direction histogram_bounds.txt's header promises cannot go stale
+        # unnoticed: the producer renamed or deleted the histogram, so the
+        # committed bound describes a series that no longer exists. That is the
+        # `stale` allowlist case one level down, and it is a hard failure - NOT
+        # the named-var `unvalidatable` case, which is intentional and benign.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(pathlib.Path(tmp), "tatara-operator", self._OPERATOR_SRC)
+            entries = {"operator_turn_renamed_duration_seconds": ("operator", 0.05, 25.6)}
+            r = reconcile_bounds(entries, {"tatara-operator": repo})
+            self.assertEqual(r.ghost, {"operator_turn_renamed_duration_seconds"})
+            self.assertEqual(r.unvalidatable, set())
+
+    def test_a_named_var_family_the_producer_still_declares_is_not_a_ghost(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(
+                pathlib.Path(tmp),
+                "tatara-memory",
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name:    "code_graph_analytics_duration_seconds",\n'
+                "    Buckets: analyticsDurationBuckets,\n"
+                "})\n",
+            )
+            entries = {"code_graph_analytics_duration_seconds": ("memory", 0.5, 600.0)}
+            r = reconcile_bounds(entries, {"tatara-memory": repo})
+            self.assertEqual(r.ghost, set())
+            self.assertEqual(r.unvalidatable, {"code_graph_analytics_duration_seconds"})
+
     def test_clone_failure_is_a_neutral_skip(self):
         entries = {"ccw_turn_duration_seconds": ("wrapper", 1.0, 2048.0)}
-        mismatched, missing, unvalidatable, skipped = reconcile_bounds(entries, {})
+        mismatched, missing, unvalidatable, ghost, skipped = reconcile_bounds(entries, {})
         self.assertEqual(mismatched, {})
         self.assertEqual(missing, {})
         self.assertEqual(unvalidatable, set())
+        self.assertEqual(ghost, set())
         self.assertEqual(skipped, {"tatara-claude-code-wrapper"})
 
     def test_exempt_section_is_never_diffed(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = self._repo(pathlib.Path(tmp), "tatara-operator", "")
             entries = {"some_external_seconds": ("external", 0.1, 5.0)}
-            mismatched, missing, unvalidatable, skipped = reconcile_bounds(
-                entries, {"tatara-operator": repo}
-            )
             self.assertEqual(
-                (mismatched, missing, unvalidatable, skipped), ({}, {}, set(), set())
+                tuple(reconcile_bounds(entries, {"tatara-operator": repo})),
+                ({}, {}, set(), set(), set()),
             )
 
 

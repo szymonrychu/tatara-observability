@@ -1296,3 +1296,34 @@ PR/push triggers.
   split on membership in `derive_metric_names` (the set the reconciler already builds): still
   declared -> unvalidatable; no longer declared -> ghost, and a hard failure, matching the stale
   direction it is a copy of.
+- 2026-08-16 (#111): **Review round 2 on the review fix - six defects, and the two worst were in the
+  NEW check.** Check 5 reported from inside its per-target scan, so a panel's verdict depended on
+  the ORDER its targets sit in the JSON: `[quantile, scaled-quantile]` was clean and the swap was
+  too, but `[unknown-family, known]` and its swap disagreed, and an early in-range target ended the
+  scan before a later unreachable step. Classify every target, then report. Second: matching an idle
+  guard by SHAPE (`and [on(...)] (`) is defeated by writing the guard differently - `and on()
+  sum(...) > 0` without parens dropped the rule out of Check 4 entirely, and `(guard) and on()
+  quantile` was read as a quantile rule when PromQL `and` is a FILTER whose value is the LEFT
+  operand. Truncating at the first top-level `and`/`unless` is exact and cannot be defeated by
+  formatting; `or vector(N)` has to be extracted before it, since `or` binds looser than `and`.
+  General lesson, third time on this issue: a check whose gate is a regex over shape grows a bypass
+  every time someone writes the same semantics differently.
+- 2026-08-16 (#111): **Demanding a declaration is itself a false-failure surface.** Making Check 4
+  require `tatara_histogram_range` for every non-bare shape red-built a rule whose threshold is on a
+  RATE filtered by a quantile guard - `sum(rate(errors)) and on() (histogram_quantile(...) > 1)`.
+  The quantile is not the value, so there was nothing to range-check and nothing to declare. Gate on
+  the NORMALISED expression, not the raw one.
+- 2026-08-16 (#111): **Grafana panel config has more ways to say "threshold" than
+  `defaults.thresholds.steps`.** `mode: "percentage"` makes a step a percentage of min..max (reading
+  it as absolute false-failed an 80 over a 25.6 ceiling); a numeric STRING step is coerced by
+  Grafana and was being dropped; `fieldConfig.overrides[].properties[].id == "thresholds"` carries
+  per-series steps and is already used in `dashboards/task-delivery.json`; and
+  `custom.thresholdsStyle.mode: "off"` means the band is never drawn, so failing on a leftover step
+  there is a red build on a panel with no user-visible defect. 6 of the 8 quantile panels in
+  `dashboards/` set `off`, so getting that one wrong would have been immediate.
+- 2026-08-16 (#111): **A new hard failure needs evidence at least as good as the check it guards.**
+  `ghost` was decided by `derive_metric_names` (window 8) while derivability was decided by
+  `derive_bucket_bounds` (window 12), so a `Name:` field pushed past line 8 by a long `Help` string
+  was invisible to both - and the summary then told the maintainer to DELETE a live entry. Widened
+  the declared-set window to match. Not live today (max observed offset across all four producers is
+  4), but the trigger would have been a producer reformatting a struct literal.

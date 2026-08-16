@@ -391,19 +391,45 @@ def _threshold_reachable(
     return True  # an operator this check does not model is not judged
 
 
-_IDLE_GUARD_CLAUSE = re.compile(r"\s+and\s+(?:on\s*\([^)]*\)\s*)?\(")
+_AND_KEYWORD = re.compile(r"(?<![A-Za-z0-9_:])(?:and|unless)(?![A-Za-z0-9_:])")
 
 
 def _strip_idle_guards(expr: str) -> str:
-    """expr with every trailing `and on() (...)` idle-guard clause removed, so the
-    shape test below sees the value the threshold is actually compared against."""
-    while True:
-        m = _IDLE_GUARD_CLAUSE.search(expr)
-        if m is None:
-            return expr
-        open_paren = m.end() - 1
-        consumed = _call_arguments(expr, open_paren)
-        expr = expr[: m.start()] + expr[open_paren + 1 + len(consumed) + 1 :]
+    """expr truncated at its first TOP-LEVEL `and`/`unless`.
+
+    PromQL's `and` and `unless` are set FILTERS: `A and B` yields A's samples,
+    keeping only those whose label set also appears in B. The value a threshold is
+    compared against is therefore always the LEFT operand, whatever shape the right
+    one has - `and` binds looser than every arithmetic and comparison operator, so
+    `A and (g) > B and (h)` is `A and ((g) > B) and (h)` and its value is still A.
+
+    This used to match the guard by SHAPE (a trailing `and [on(...)] (`), which is
+    defeated by any guard the author writes differently: `and on() sum(...) > 0`
+    without wrapping parens dropped the rule out of the check entirely, and
+    `(guard) and on() histogram_quantile(...)` was read as a quantile rule when its
+    value is the guard's. Truncating cannot be defeated that way.
+
+    Top-level means paren/bracket/brace depth 0 and outside a quoted label value,
+    so `{kind=~"brainstorm and review"}` is not an operator.
+    """
+    depth = 0
+    quote = ""
+    for i, ch in enumerate(expr):
+        if quote:
+            if ch == quote and expr[i - 1 : i] != "\\":
+                quote = ""
+            continue
+        if ch in "\"'`":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and ch in "au":
+            m = _AND_KEYWORD.match(expr, i)
+            if m:
+                return expr[:i]
+    return expr
 
 
 # The constant must accept every Go/PromQL float spelling, scientific notation
@@ -433,12 +459,16 @@ def _normalised_value_expression(expr: str) -> tuple[str, list[float]]:
 
     Idle guards contribute no value, wrapping parens contribute no value, and
     `or vector(N)` adds N to the reachable set without touching the ceiling.
+
+    `or vector(N)` is extracted BEFORE the `and` truncation, not after: `or` binds
+    looser than `and`, so `A and (g) or vector(0)` is `(A and (g)) or vector(0)` and
+    truncating first would swallow the constant along with the guard.
     """
-    stripped = _strip_wrapping_parens(_strip_idle_guards(expr))
+    stripped = _strip_wrapping_parens(expr)
     constants = [float(m.group(1)) for m in _OR_VECTOR.finditer(stripped)]
     if constants:
         stripped = _strip_wrapping_parens(_OR_VECTOR.sub("", stripped))
-    return stripped, constants
+    return _strip_wrapping_parens(_strip_idle_guards(stripped)), constants
 
 
 def _is_bare_quantile(expr: str) -> bool:
@@ -488,6 +518,12 @@ def lint_histogram_range(
     # value to the threshold comparison, and range-checking its ceiling against
     # this rule's threshold would fail a correct rule.
     value_expr, or_vector_constants = _normalised_value_expression(joined)
+    if not _HISTOGRAM_QUANTILE.search(value_expr):
+        # Every quantile in this rule sits on the right of an `and`/`unless`, so it
+        # filters the value rather than being it. There is no quantile threshold to
+        # range-check, and demanding a declaration would be a red build on a rule
+        # that is not in this check's subject at all.
+        return None
     if not _is_bare_quantile(value_expr):
         # The shape is out of model (see _is_bare_quantile) and is NOT range-checked
         # - but it is not waved through in silence either. A skip nobody can grep is
@@ -583,31 +619,88 @@ def lint_histogram_range(
 # of the same surface.
 #
 # SCOPE, deliberately narrow to keep the check false-failure free: a panel is
-# range-checked only when it carries at least one finite threshold step AND every
-# one of its Prometheus targets is a bare histogram_quantile() (so the step is in
-# the histogram's own units). A panel mixing a quantile with a rate, or scaling a
-# quantile into milliseconds, is skipped - a panel has no annotations, so there is
-# no per-panel escape hatch to declare, and CONVENTIONS.md 6.4 records the carve-out
-# instead. Only the unreachable direction is failed; a step at or below the floor
-# (a permanently-red band) is a different defect and is not modelled here.
+# range-checked only when it carries at least one finite ABSOLUTE threshold step AND
+# every one of its Prometheus targets is a bare histogram_quantile() (so the step is
+# in the histogram's own units). A panel mixing a quantile with a rate, or scaling a
+# quantile into milliseconds, is skipped: a threshold step applies to every series in
+# the panel, so a single out-of-model series leaves the panel's reachable maximum
+# unbounded and NOTHING can be concluded. That is a known false negative - adding a
+# non-quantile overlay to either of the two panels this check was written for turns it
+# off - and a panel has no annotations, so there is no per-panel escape hatch to
+# declare. CONVENTIONS.md 6.5 is the record instead.
+#
+# Only the unreachable direction is failed; a step at or below the floor (a
+# permanently-red band) is a different defect and is not modelled here. The verdict is
+# computed from ALL targets before anything is reported, so it cannot depend on the
+# order the targets happen to sit in the JSON.
 #
 # decimal_points has no analogue: Grafana's fieldConfig `decimals` is display
 # formatting and does not round the value a threshold step is evaluated against.
 def _panel_datasource_type(target: dict, panel: dict) -> str:
+    """The datasource type for one target, following the panel-level default.
+    Grafana's legacy form is a bare name string rather than a {type, uid} object."""
     ds = target.get("datasource") or panel.get("datasource") or {}
+    if isinstance(ds, str):
+        return "prometheus" if ds.strip().lower() == "prometheus" else ds.strip()
     return str(ds.get("type", "")) if isinstance(ds, dict) else ""
 
 
+def _step_value(step: object) -> float | None:
+    """One threshold step's value as a float, or None for the base step.
+
+    The base step carries `value: null` - it is the floor colour, not a comparison.
+    Grafana coerces a numeric string, so `"30"` is a step like `30` is.
+    """
+    if not isinstance(step, dict):
+        return None
+    value = step.get("value")
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _absolute_steps(thresholds: object) -> list[float]:
+    """Finite step values of one thresholds object, ONLY in absolute mode.
+
+    In `percentage` mode a step is a percentage of the field's min..max, not a value
+    in the metric's units, so range-checking it against the bucket ceiling would fail
+    a correct panel. Absolute is Grafana's default when mode is absent.
+    """
+    if not isinstance(thresholds, dict):
+        return []
+    if str(thresholds.get("mode", "absolute")).lower() != "absolute":
+        return []
+    return [
+        v
+        for v in (_step_value(step) for step in thresholds.get("steps") or [])
+        if v is not None
+    ]
+
+
 def _panel_threshold_steps(panel: dict) -> list[float]:
-    """Every finite threshold step value on a panel. The base step carries
-    `value: null` (it is the floor colour, not a comparison) and is dropped."""
-    defaults = (panel.get("fieldConfig") or {}).get("defaults") or {}
-    steps = (defaults.get("thresholds") or {}).get("steps") or []
-    out = []
-    for step in steps:
-        value = step.get("value") if isinstance(step, dict) else None
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            out.append(float(value))
+    """Every finite absolute threshold step on a panel - the field defaults plus any
+    per-series `overrides[].properties[].id == "thresholds"`, an idiom this repo uses
+    in dashboards/task-delivery.json. A red step hidden in an override colours just
+    as unreachably as one in the defaults."""
+    field_config = panel.get("fieldConfig") or {}
+    defaults = field_config.get("defaults") or {}
+    if str(
+        ((defaults.get("custom") or {}).get("thresholdsStyle") or {}).get("mode", "")
+    ).lower() == "off":
+        # The band is never drawn, so a leftover step has no rendered effect. Most
+        # timeseries panels here set this; failing on them would be a red build on a
+        # panel with nothing wrong with it.
+        return []
+    out = _absolute_steps(defaults.get("thresholds"))
+    for override in field_config.get("overrides") or []:
+        if not isinstance(override, dict):
+            continue
+        for prop in override.get("properties") or []:
+            if isinstance(prop, dict) and prop.get("id") == "thresholds":
+                out.extend(_absolute_steps(prop.get("value")))
     return out
 
 
@@ -625,30 +718,39 @@ def lint_dashboard_panel(
     if not steps:
         return None  # nothing compares against the quantile
     title = f'panel "{panel.get("title", "<untitled>")}"'
-    ceiling = None
+
+    # Classify EVERY target first. Reporting from inside the scan would make both
+    # the verdict and the message depend on target order.
+    ceiling: float | None = None
+    unknown: list[str] = []
     for expr in exprs:
         value_expr, or_vector_constants = _normalised_value_expression(expr)
         if not _is_bare_quantile(value_expr):
-            return None  # derived units; out of model, see the block comment
-        for family in _quantile_call_families(value_expr):
-            if family is None:
-                return None  # Check 2's shape finding; nothing to range-check on
+            return None  # derived units, or a non-quantile series: unbounded panel
+        families = _quantile_call_families(value_expr)
+        if not families or any(f is None for f in families):
+            return None  # no identifiable _bucket selector; nothing to range-check
+        for family in families:
             if family not in bounds:
-                return Violation(
-                    path,
-                    title,
-                    f"plots histogram_quantile() over `{family}_bucket` under a "
-                    "threshold step, but that family has no bucket-range entry in "
-                    "`scripts/histogram_bounds.txt`, so the step cannot be "
-                    "range-checked. Add a "
-                    "`<family> <lowest finite bound> <top finite bound>` line there "
-                    "(reconcile_metric_provenance.py validates it against the "
-                    "producer's Go source). See CONVENTIONS.md.",
-                )
+                unknown.append(family)
+                continue
             high = bounds[family][1]
             ceiling = high if ceiling is None else max(ceiling, high)
         for constant in or_vector_constants:
             ceiling = constant if ceiling is None else max(ceiling, constant)
+
+    if unknown:
+        return Violation(
+            path,
+            title,
+            "plots histogram_quantile() over "
+            + ", ".join(f"`{f}_bucket`" for f in sorted(set(unknown)))
+            + " under a threshold step, but that family has no bucket-range entry "
+            "in `scripts/histogram_bounds.txt`, so the step cannot be range-checked. "
+            "Add a `<family> <lowest finite bound> <top finite bound>` line there "
+            "(reconcile_metric_provenance.py validates it against the producer's Go "
+            "source). See CONVENTIONS.md.",
+        )
     if ceiling is None:
         return None
     unreachable = sorted(s for s in steps if s > ceiling)

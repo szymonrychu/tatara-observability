@@ -116,13 +116,19 @@ _SECTION_HEADER = re.compile(r"^#\s*---\s*(.+)$")
 _SECTION_KEY = re.compile(r"^([a-z][a-z-]*)")
 
 
-def derive_metric_names(repo_dir: pathlib.Path) -> set[str]:
+def derive_metric_names(repo_dir: pathlib.Path, window: int = _WINDOW) -> set[str]:
     """Every Prometheus metric name registered anywhere under repo_dir.
 
     Anchored on the constructor call (see module docstring) rather than a
     bare `Name: "..."` grep, so Kubernetes manifest struct literals
     (ContainerPort{Name: "http"} and the like) are never mistaken for a
     metric.
+
+    `window` is how many lines past the constructor to look for the Name field.
+    reconcile_bounds passes the WIDER _BUCKET_WINDOW: it uses this set as evidence
+    that a histogram is still declared, and evidence that is blinder than the bucket
+    parser turns a long Help string into a false ghost - a hard failure telling the
+    maintainer to delete a live entry.
     """
     names: set[str] = set()
     for path in sorted(repo_dir.rglob("*.go")):
@@ -135,8 +141,8 @@ def derive_metric_names(repo_dir: pathlib.Path) -> set[str]:
         for i, line in enumerate(lines):
             if not _CTOR.search(line):
                 continue
-            window = "\n".join(lines[i : i + _WINDOW])
-            m = _POSITIONAL.search(window) or _NAME_FIELD.search(window)
+            window_text = "\n".join(lines[i : i + window])
+            m = _POSITIONAL.search(window_text) or _NAME_FIELD.search(window_text)
             if m:
                 names.add(m.group(1))
     return names
@@ -358,7 +364,7 @@ def reconcile_bounds(
             skipped.add(repo)
             continue
         derived = derive_bucket_bounds(repo_dir)
-        declared = derive_metric_names(repo_dir)
+        declared = derive_metric_names(repo_dir, window=_BUCKET_WINDOW)
         for family, rng in filed.items():
             if family not in derived:
                 # The bound could not be re-derived. WHY decides the outcome: a

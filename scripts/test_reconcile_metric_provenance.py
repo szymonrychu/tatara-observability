@@ -647,6 +647,33 @@ class ReconcileBoundsTest(unittest.TestCase):
             self.assertEqual(r.ghost, set())
             self.assertEqual(r.unvalidatable, {"code_graph_analytics_duration_seconds"})
 
+    def test_a_wide_struct_literal_is_not_a_false_ghost(self):
+        # ghost is a HARD failure, so its evidence must not be blinder than the
+        # bucket parser's. derive_metric_names' window used to be narrower than
+        # derive_bucket_bounds', so a Name: field pushed down by a long Help string
+        # was invisible to the name parser and visible to neither - which read as
+        # "the producer deleted this histogram" and told the maintainer to delete a
+        # live entry.
+        src = (
+            "prometheus.NewHistogramVec(\n"
+            "    prometheus.HistogramOpts{\n"
+            '        Help: "one",\n'
+            '        // two\n'
+            '        // three\n'
+            '        // four\n'
+            '        // five\n'
+            '        // six\n'
+            '        Name:    "code_graph_analytics_duration_seconds",\n'
+            "        Buckets: analyticsDurationBuckets,\n"
+            '    }, []string{"kind"})\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(pathlib.Path(tmp), "tatara-memory", src)
+            entries = {"code_graph_analytics_duration_seconds": ("memory", 0.5, 600.0)}
+            r = reconcile_bounds(entries, {"tatara-memory": repo})
+            self.assertEqual(r.ghost, set())
+            self.assertEqual(r.unvalidatable, {"code_graph_analytics_duration_seconds"})
+
     def test_clone_failure_is_a_neutral_skip(self):
         entries = {"ccw_turn_duration_seconds": ("wrapper", 1.0, 2048.0)}
         mismatched, missing, unvalidatable, ghost, skipped = reconcile_bounds(entries, {})

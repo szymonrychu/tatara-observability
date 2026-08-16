@@ -385,11 +385,20 @@ its threshold is reachable, so every quantile rule this check does not verify is
 one `grep` away. A skip nobody can enumerate is the same bypass as a silently
 skipped unknown family.
 
-Two consequences of reading the *normalised* expression rather than the raw one: a
-`histogram_quantile` living INSIDE an idle guard is not range-checked, because it
-contributes no value to the threshold comparison; and `or vector(N)` adds `N` to the
-reachable set (it cannot lift the ceiling), so it can make a below-floor `<`
-threshold legal while leaving an above-ceiling `>` threshold just as inert.
+Normalisation truncates the expression at its first top-level `and`/`unless`. Those
+are set FILTERS - `A and B` yields A's samples - so the value a threshold sees is
+always the left operand, and `and` binds looser than every arithmetic and comparison
+operator. Two consequences: a `histogram_quantile` on the RIGHT of an `and` (an idle
+guard, or a latency filter on a non-latency rule) is not range-checked and does not
+need declaring, because it is not the value; and a guard written without wrapping
+parens, or written before the quantile, is normalised correctly rather than dropping
+the rule out of the check. Matching the guard by SHAPE did drop it, which is how a
+check written to close a bypass grows one.
+
+`or vector(N)` adds `N` to the reachable set (it cannot lift the ceiling), so it can
+make a below-floor `<` threshold legal while leaving an above-ceiling `>` threshold
+just as inert. It is extracted before the `and` truncation, since `or` binds looser
+still.
 
 `decimal_points` is applied first. `modules/grafana_alert/main.tf` inserts a
 `round($C * 10^d) / 10^d` reduce step ahead of the threshold compare, so the
@@ -415,8 +424,10 @@ cannot evaluate exactly - a named package-level variable, an
 unvalidatable and **never guessed**: a wrong derived bound is worse than an absent
 one, because the mismatch message tells the author to commit the derived number.
 "Unvalidatable" means the producer still declares the histogram and only its
-`Buckets:` expression is opaque. An entry naming a histogram no producer declares
-at all is a **ghost** and is a hard failure - that is section 5's stale-allowlist
+`Buckets:` expression is opaque - and the evidence for "still declared" is read with
+the same window width as the bucket parser, so a `Name:` field pushed down by a long
+`Help` string cannot masquerade as a deletion. An entry naming a histogram no
+producer declares at all is a **ghost** and is a hard failure - that is section 5's stale-allowlist
 direction one level down, and `metrics_allowlist.txt` does not backstop it, because
 7 of the bounds families are not on it.
 
@@ -436,15 +447,31 @@ there is not even a `no_data_state` to mis-configure. Section 5 already treats
 dimension of it.
 
 `lint_dashboard_file` range-checks a panel only when it carries at least one finite
-threshold step AND every one of its Prometheus targets is a bare quantile, so the
-step is in the histogram's own units. The ceiling is the highest across the panel's
-targets. An unknown family is a hard failure, as in 6.4.
+**absolute** threshold step AND every one of its Prometheus targets is a bare
+quantile, so the step is in the histogram's own units. The ceiling is the highest
+across the panel's targets, and the verdict is computed from all of them before
+anything is reported, so it cannot depend on target order. An unknown family is a
+hard failure, as in 6.4.
 
-Two deliberate narrowings:
+Steps are read from `fieldConfig.defaults.thresholds` AND from per-series
+`fieldConfig.overrides[].properties[].id == "thresholds"` - an idiom
+`dashboards/task-delivery.json` already uses, and a red step hidden in an override
+is exactly as unreachable as one in the defaults. A numeric string step (`"30"`) is
+a step; Grafana coerces it.
+
+Four deliberate narrowings, each of which is a false NEGATIVE traded for zero false
+failures:
 
 - A panel mixing a quantile with a non-quantile target, or scaling one into
-  milliseconds, is skipped. Unlike a rule, a panel has no annotations, so there is
-  no per-panel escape hatch to declare - this paragraph is the record instead.
+  milliseconds, is skipped. A step applies to every series in the panel, so one
+  out-of-model series leaves the panel's maximum unbounded and nothing can be
+  concluded. This means adding a throughput overlay to either of the two panels this
+  check exists for turns it off. Unlike a rule, a panel has no annotations, so there
+  is no per-panel escape hatch to declare - this paragraph is the record instead.
+- `thresholds.mode: "percentage"` is skipped: a step is then a percentage of the
+  field's min..max, not a value in the metric's units.
+- `custom.thresholdsStyle.mode: "off"` is skipped: the band is never drawn, so a
+  leftover step has no rendered effect. Most timeseries panels here set it.
 - Only the unreachable direction is failed. A step at or below the floor paints a
   permanently-red band, which is a different defect and is not modelled.
 

@@ -894,14 +894,37 @@ rules:
         self.assertEqual(len(self._violations(body)), 1)
 
     def test_quantile_compared_against_another_quantile_is_not_range_checked(self):
-        # Two histogram_quantile calls related by `>`: the value the threshold sees
-        # is the result of a comparison between two histograms, not either one's
-        # own units. Skipped rather than checked against one of the two ceilings -
-        # the same reason a scaled quantile is skipped, and declared the same way.
-        # Check 2 still covers both calls' idle guards.
+        # Two histogram_quantile calls related by `>` with no `and` between them:
+        # the value the threshold sees is a comparison between two histograms, not
+        # either one's own units. Skipped rather than checked against one of the two
+        # ceilings - the same reason a scaled quantile is skipped, and declared the
+        # same way.
         body = """
 rules:
   - name: "two quantiles"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(operator_turn_submit_duration_seconds_bucket[15m])) by (le)) > histogram_quantile(0.95, sum(rate(lightrag_call_duration_seconds_bucket[15m])) by (le))
+    math_operator: ">"
+    threshold: 12
+    decimal_points: 1
+    annotations:
+      tatara_idle_quantile: "comparison of two live families"
+"""
+        v = self._violations(body)
+        self.assertEqual(len(v), 1)
+        self.assertIn(lint.HISTOGRAM_RANGE_ANNOTATION_KEY, v[0].message)
+        declared = body + '      tatara_histogram_range: "ratio of two quantiles; unitless"\n'
+        self.assertEqual(self._violations(declared), [])
+
+    def test_the_value_of_an_and_chain_is_its_left_operand(self):
+        # PromQL `and` is a FILTER: `A and B` yields A's values. So a rule whose
+        # expression is `<quantile> and on() (<guard>) > <other quantile> and ...`
+        # thresholds the LEFT quantile (`>` binds tighter than `and`), and that one
+        # is range-checkable exactly. 12 is inside [0.0475, 25.6].
+        body = """
+rules:
+  - name: "two quantiles, and-filtered"
     queries:
       - expression: |
           histogram_quantile(0.95, sum(rate(operator_turn_submit_duration_seconds_bucket[15m])) by (le)) and on() (sum(rate(operator_turn_submit_duration_seconds_count[15m])) > 0) > histogram_quantile(0.95, sum(rate(lightrag_call_duration_seconds_bucket[15m])) by (le)) and on() (sum(rate(lightrag_call_duration_seconds_count[15m])) > 0)
@@ -909,14 +932,73 @@ rules:
     threshold: 12
     decimal_points: 1
 """
+        self.assertEqual(self._violations(body), [])
+
+    def test_a_threshold_on_a_non_quantile_filtered_by_a_quantile_guard(self):
+        # The value is the error rate; the quantile only filters it. There is no
+        # quantile threshold to range-check, so demanding a declaration here would
+        # be a red build on a correct rule.
+        body = """
+rules:
+  - name: "errors, only while latency is bad"
+    queries:
+      - expression: |
+          sum(rate(operator_reconcile_total{result="error"}[5m])) and on() (histogram_quantile(0.95, sum(rate(operator_turn_submit_duration_seconds_bucket[5m])) by (le)) > 1)
+    math_operator: ">"
+    threshold: 5
+    annotations:
+      tatara_idle_quantile: "the quantile is a filter, not the value"
+"""
+        self.assertEqual(self._violations(body), [])
+
+    def test_guard_written_first_thresholds_the_guard_not_the_quantile(self):
+        # `(<guard>) and on() <quantile>` yields the GUARD's values, not the
+        # quantile's, so there is no quantile threshold to range-check.
+        body = """
+rules:
+  - name: "guard first"
+    queries:
+      - expression: |
+          (sum(rate(operator_turn_submit_duration_seconds_count[5m])) > 0) and on() histogram_quantile(0.95, sum(rate(operator_turn_submit_duration_seconds_bucket[5m])) by (le))
+    math_operator: ">"
+    threshold: 10
+"""
+        self.assertEqual(self._violations(body), [])
+
+    def test_an_unparenthesised_idle_guard_does_not_defeat_the_check(self):
+        # The guard has no wrapping parens. Matching the guard by SHAPE missed this
+        # and dropped the rule out of the check; truncating at the top-level `and`
+        # cannot be defeated that way. 30 is above the 25.6 ceiling.
+        body = """
+rules:
+  - name: "unparenthesised guard"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(operator_turn_submit_duration_seconds_bucket[15m])) by (le)) and on() sum(rate(operator_turn_submit_duration_seconds_count[15m])) > 0
+    math_operator: ">"
+    threshold: 30
+    decimal_points: 1
+"""
         v = self._violations(body)
         self.assertEqual(len(v), 1)
-        self.assertIn(lint.HISTOGRAM_RANGE_ANNOTATION_KEY, v[0].message)
-        declared = body + (
-            "    annotations:\n"
-            "      tatara_histogram_range: \"ratio of two quantiles; unitless\"\n"
-        )
-        self.assertEqual(self._violations(declared), [])
+        self.assertIn("25.6", v[0].message)
+
+    def test_an_and_inside_a_label_value_is_not_an_operator(self):
+        body = """
+rules:
+  - name: "and in a label value"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(operator_turn_submit_duration_seconds_bucket{kind=~"brainstorm and review"}[15m])) by (le))
+    math_operator: ">"
+    threshold: 30
+    decimal_points: 1
+    annotations:
+      tatara_idle_quantile: "single-shot check"
+"""
+        v = self._violations(body)
+        self.assertEqual(len(v), 1)
+        self.assertIn("25.6", v[0].message)
 
     def test_non_quantile_rule_ignored(self):
         body = """
@@ -1226,6 +1308,97 @@ class DashboardThresholdRange(unittest.TestCase):
             [30],
         )
         self.assertEqual(self._violations({"panels": [panel]}), [])
+
+    def test_an_out_of_model_target_does_not_switch_the_check_off_by_order(self):
+        # The verdict must not depend on target order. A panel mixing a bare
+        # quantile with a scaled one cannot be range-checked (a step may be about
+        # the other series), but it must skip identically either way round.
+        bare = self.QUANTILE.format(f="operator_turn_submit_duration_seconds")
+        scaled = "1000 * " + bare
+        for exprs in ([bare, scaled], [scaled, bare]):
+            self.assertEqual(
+                self._violations({"panels": [self._panel(exprs, [30])]}), [], exprs
+            )
+
+    def test_unknown_family_is_reported_whatever_the_target_order(self):
+        known = self.QUANTILE.format(f="operator_turn_submit_duration_seconds")
+        unknown = self.QUANTILE.format(f="some_new_duration_seconds")
+        for exprs in ([known, unknown], [unknown, known]):
+            v = self._violations({"panels": [self._panel(exprs, [30])]})
+            self.assertEqual(len(v), 1, exprs)
+            self.assertIn("histogram_bounds.txt", v[0].message)
+
+    def test_an_unreachable_step_is_found_behind_an_earlier_clean_target(self):
+        # An early in-range target must not end the scan.
+        panel = self._panel(
+            [
+                self.QUANTILE.format(f="lightrag_call_duration_seconds"),
+                self.QUANTILE.format(f="lightrag_call_duration_seconds"),
+            ],
+            [30],
+        )
+        self.assertEqual(len(self._violations({"panels": [panel]})), 1)
+
+    def test_percentage_mode_steps_are_not_absolute_values(self):
+        # In percentage mode a step of 80 means 80% of min..max, not 80 seconds.
+        panel = self._panel(
+            [self.QUANTILE.format(f="operator_turn_submit_duration_seconds")], [80]
+        )
+        panel["fieldConfig"]["defaults"]["thresholds"]["mode"] = "percentage"
+        self.assertEqual(self._violations({"panels": [panel]}), [])
+
+    def test_a_numeric_string_step_value_is_still_a_step(self):
+        panel = self._panel(
+            [self.QUANTILE.format(f="operator_turn_submit_duration_seconds")], []
+        )
+        panel["fieldConfig"]["defaults"]["thresholds"]["steps"].append(
+            {"color": "red", "value": "30"}
+        )
+        self.assertEqual(len(self._violations({"panels": [panel]})), 1)
+
+    def test_a_per_series_threshold_override_is_range_checked(self):
+        # fieldConfig.overrides[].properties[].id == "thresholds" is a live idiom in
+        # dashboards/task-delivery.json; a red step hidden there must not bypass.
+        panel = self._panel(
+            [self.QUANTILE.format(f="operator_turn_submit_duration_seconds")], []
+        )
+        panel["fieldConfig"]["overrides"] = [
+            {
+                "matcher": {"id": "byName", "options": "p95"},
+                "properties": [
+                    {
+                        "id": "thresholds",
+                        "value": {
+                            "mode": "absolute",
+                            "steps": [
+                                {"color": "green", "value": None},
+                                {"color": "red", "value": 30},
+                            ],
+                        },
+                    }
+                ],
+            }
+        ]
+        v = self._violations({"panels": [panel]})
+        self.assertEqual(len(v), 1)
+        self.assertIn("25.6", v[0].message)
+
+    def test_thresholds_style_off_is_not_rendered_and_not_failed(self):
+        # thresholdsStyle.mode "off" means the band is never drawn. 6 of the 8
+        # quantile panels in dashboards/ carry it; failing on leftover steps there
+        # would be a red build on a panel with no user-visible defect.
+        panel = self._panel(
+            [self.QUANTILE.format(f="operator_turn_submit_duration_seconds")], [30]
+        )
+        panel["fieldConfig"]["defaults"]["custom"] = {"thresholdsStyle": {"mode": "off"}}
+        self.assertEqual(self._violations({"panels": [panel]}), [])
+
+    def test_a_legacy_string_datasource_is_still_prometheus(self):
+        panel = self._panel(
+            [self.QUANTILE.format(f="operator_turn_submit_duration_seconds")], [30]
+        )
+        panel["datasource"] = "prometheus"
+        self.assertEqual(len(self._violations({"panels": [panel]})), 1)
 
     def test_a_loki_target_is_not_read_as_promql(self):
         panel = self._panel(

@@ -209,7 +209,7 @@ records how these rules apply to it.
 ## Rule applicability
 
 No service code and no chart here: rules 1, 5, 11, 12, 13, 14 and 16 are N/A.
-Rules 2-4 and 7-10 apply unchanged - a terraform module is as capable of
+Everything else applies unchanged - a terraform module is as capable of
 tech-debt as a Go package.
 
 ## Local notes

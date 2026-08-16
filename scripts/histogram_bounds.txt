@@ -10,11 +10,19 @@
 # emits (scripts/metrics_allowlist.txt) and an alert filtering on a label value nobody
 # emits (scripts/stage_values_allowlist.txt), one level further down.
 #
-# FORMAT: `<metric family> <top finite bucket bound>`, one per line, grouped under
-# `# --- <section>: ... ---` headers. The section key is the leading word of the header
-# text and routes to a producer repo through reconcile_metric_provenance.py's
-# SECTION_REPO, exactly as in metrics_allowlist.txt. List the BASE family name (no
-# _bucket/_sum/_count suffix), matching the `<family>_bucket` selector an alert writes.
+# FORMAT: `<metric family> <lowest finite bucket bound> <top finite bucket bound>`, one
+# per line, grouped under `# --- <section>: ... ---` headers. The section key is the
+# leading word of the header text and routes to a producer repo through
+# reconcile_metric_provenance.py's SECTION_REPO, exactly as in metrics_allowlist.txt.
+# List the BASE family name (no _bucket/_sum/_count suffix), matching the
+# `<family>_bucket` selector an alert writes.
+#
+# BOTH bounds are load-bearing, because the reachable range is NOT [0, top]. Prometheus
+# interpolates the lowest bucket from 0 but scales by rank/count, which is bounded below
+# by q, so histogram_quantile(q, ...) bottoms out at q * lowest bound - a p95 over
+# ExponentialBuckets(0.05, 2, 10) can never return below 0.0475, and `< 0.01` on it is as
+# inert as `> 30`. A histogram whose lowest bound is <= 0 is returned directly by
+# bucketQuantile, so its floor is that bound rather than q times it.
 #
 # THIS FILE IS VALIDATED, NOT TRUSTED. A hand-transcribed copy of a number that lives in
 # another repo goes stale the day a producer widens its buckets, and a stale ceiling here
@@ -32,53 +40,53 @@
 # until its bound is added here by hand; add it with a comment naming the var, and the
 # reconciler will report it as unvalidatable rather than failing on it.
 #
-# ExponentialBuckets(start, factor, count) tops out at start * factor^(count-1).
-# LinearBuckets(start, width, count) tops out at start + width*(count-1).
-# prometheus.DefBuckets tops out at 10.
+# ExponentialBuckets(start, factor, count) runs start .. start * factor^(count-1).
+# LinearBuckets(start, width, count) runs start .. start + width*(count-1).
+# prometheus.DefBuckets runs 0.005 .. 10.
 
 # --- operator: tatara-operator/internal/obs ---
 # ExponentialBuckets(0.05, 2, 10) -> 25.6 (operator_metrics.go, turnSubmitDuration /
 # agentHTTPDuration / toolSurfaceProbeDuration).
-operator_turn_submit_duration_seconds 25.6
-operator_agent_http_duration_seconds 25.6
-operator_tool_surface_probe_duration_seconds 25.6
+operator_turn_submit_duration_seconds 0.05 25.6
+operator_agent_http_duration_seconds 0.05 25.6
+operator_tool_surface_probe_duration_seconds 0.05 25.6
 # ExponentialBuckets(5, 2, 8) -> 640.
-operator_ingest_job_duration_seconds 640
-operator_turn_duration_seconds 640
-operator_memory_provision_duration_seconds 640
+operator_ingest_job_duration_seconds 5 640
+operator_turn_duration_seconds 5 640
+operator_memory_provision_duration_seconds 5 640
 # ExponentialBuckets(0.005, 2, 10) -> 2.56.
-operator_webhook_duration_seconds 2.56
+operator_webhook_duration_seconds 0.005 2.56
 # ExponentialBuckets(0.001, 2, 10) -> 0.512.
-operator_restapi_request_duration_seconds 0.512
+operator_restapi_request_duration_seconds 0.001 0.512
 # ExponentialBuckets(1024, 2, 12) -> 2097152.
-operator_object_size_bytes 2097152
+operator_object_size_bytes 1024 2097152
 # Literal ladders (sweep_metrics.go, bundle_metrics.go).
-operator_tasks_minted_per_sweep 21
-operator_bundle_bytes 800000
+operator_tasks_minted_per_sweep 0 21
+operator_bundle_bytes 4000 800000
 
 # --- wrapper: tatara-claude-code-wrapper/internal/metrics ---
 # ExponentialBuckets(1, 2, 12) -> 2048.
-ccw_turn_duration_seconds 2048
+ccw_turn_duration_seconds 1 2048
 # ExponentialBuckets(0.5, 2, 12) -> 1024.
-ccw_probe_answer_seconds 1024
+ccw_probe_answer_seconds 0.5 1024
 # ExponentialBuckets(0.5, 2, 8) -> 64.
-ccw_bootstrap_duration_seconds 64
+ccw_bootstrap_duration_seconds 0.5 64
 # DefBuckets.
-ccw_http_request_duration_seconds 10
+ccw_http_request_duration_seconds 0.005 10
 
 # --- memory: tatara-memory ---
 # DefBuckets (lightrag/metrics.go, codegraph/metrics.go, codegraph/analytics_metrics.go,
 # ingest/metrics.go).
-lightrag_call_duration_seconds 10
-code_graph_query_duration_seconds 10
-code_graph_compute_duration_seconds 10
-ingest_item_duration_seconds 10
+lightrag_call_duration_seconds 0.005 10
+code_graph_query_duration_seconds 0.005 10
+code_graph_compute_duration_seconds 0.005 10
+ingest_item_duration_seconds 0.005 10
 # Literal ladder (httpapi/admission.go).
-http_admission_wait_seconds 30
+http_admission_wait_seconds 0.001 30
 
 # --- ingester: tatara-memory-repo-ingester/internal/obs ---
 # DefBuckets.
-ingest_stage_duration_seconds 10
-analyzer_duration_seconds 10
+ingest_stage_duration_seconds 0.005 10
+analyzer_duration_seconds 0.005 10
 # Literal ladder.
-code_graph_batch_rows 10000
+code_graph_batch_rows 10 10000

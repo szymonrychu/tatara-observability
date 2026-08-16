@@ -1194,12 +1194,42 @@ PR/push triggers.
   `{__name__=~"lightrag.*"}` returns nothing cluster-wide, so that rule is inert for a SECOND
   independent reason and only the threshold half is in scope here. Producer histograms were left
   alone (not widened to keep 30s): nothing in the repo justifies 30, and the real p95 is 0.78.
-- 2026-08-16 (#111): **Two corrections worth keeping.** (1) The reachable set is `[0, top finite
-  bound]`, NOT `[lowest bound, top bound]`: Prometheus `bucketQuantile` sets `bucketStart = 0` when
-  `b == 0`, so it interpolates the lowest bucket from zero and `histogram_quantile(0, ...)` returns
-  exactly 0. A `<` rule is therefore inert only at `threshold <= 0` - the issue's pre-mortem assumed
-  "below the smallest bucket" (0.05) and that would have shipped a wrong predicate. (2)
-  `decimal_points` rounds BEFORE the compare (`modules/grafana_alert/main.tf:207` renders
+- 2026-08-16 (#111): **The reachable set is `[q * lowest bound, top bound]`, and getting this wrong
+  TWICE is the lesson.** The issue's pre-mortem 1 said a `<` rule is inert "below the smallest
+  bucket" (0.05). The first implementation here overrode that with "`bucketQuantile` sets
+  `bucketStart = 0` when `b == 0`, so the floor is 0" - which reads the right line of
+  `promql/quantile.go` and stops one line early. That branch returns `ub0 * (rank/count)`, not
+  `ub0 * 0`: `count` is bucket 0's OWN count (the `count -= buckets[b-1].count` line is inside
+  `if b > 0`) and `rank = q*observations`. Selecting `b == 0` needs `count >= rank`, and
+  `count <= observations`, so `rank/count` is bounded in `[q, 1]` and the result in `[q*ub0, ub0]` -
+  and the infimum is ATTAINED, when every observation lands in the lowest bucket. So the p95 floor is
+  0.0475 and `< 0.01` is as inert as `> 30`. **The pre-mortem was off by the factor `q`; the
+  "correction" was off by the whole lower half**, and two unit tests asserted the wrong behaviour
+  until an adversarial review caught it. Check 4 now parses `q` out of each call, and
+  `histogram_bounds.txt` carries both bounds. Zero is reachable only at `q == 0`; a histogram whose
+  lowest bound is `<= 0` is short-circuited by `bucketQuantile` and returned directly, so its floor
+  is that bound rather than `q` times it.
+- 2026-08-16 (#111): **A WRONG derived bound is worse than an absent one.** The first bucket parser
+  searched the whole 12-line constructor window for `ExponentialBuckets(`/`DefBuckets`/`[]float64{`,
+  which silently derives 10 from `Buckets: append(prometheus.DefBuckets, 30, 60, 300)` (truth: 300)
+  and picks up a ladder quoted in a `Help:` string or left in a `// was Buckets: ...` comment. That
+  direction is dangerous precisely because a mismatch is a HARD FAIL whose message says "the
+  producer's buckets top out at X, update the file" - CI instructing the author to commit a false
+  ceiling. Now: strip comments and string literals, find `Buckets:`, balance-scan the value
+  expression, and match the whole expression anchored. Anything else - named var, `append(...)`,
+  `ExponentialBucketsRange` - is unvalidatable and never guessed. The histogram anchor was also
+  broadened to a bare `NewHistogram(Vec)?\(` so `promauto.With(reg).NewHistogramVec(` is seen;
+  `_CTOR`'s `promauto.<ident>.` shape misses it, which is a latent gap in the NAME derivation too if
+  any producer ever adopts promauto.
+- 2026-08-16 (#111): **Only a BARE quantile is range-checked.** `1000 * histogram_quantile(...)`
+  (seconds to milliseconds) and a quantile compared against another quantile carry the threshold in
+  units that are not the histogram's, so range-checking them against the raw ceiling hard-fails a
+  CORRECT rule - the "red build on a correct rule, which is how a check gets weakened to a warning"
+  outcome this very change warns about one layer down. Check 4 strips `and on() (...)` guards and
+  proceeds only when what remains is exactly one `histogram_quantile(` call. Related and dormant:
+  `main.tf` applies reduce+threshold to the LAST query only while `_joined_expressions` concatenates
+  all of them - every rule in `alerts/*.yaml` has exactly one query today.
+- 2026-08-16 (#111): **One smaller correction.** `decimal_points` rounds BEFORE the compare (`modules/grafana_alert/main.tf:207` renders
   `round($C * 10^d) / 10^d`), and rounding only widens the ceiling upward, so `> 25.9` at
   `decimal_points: 0` is LEGAL over a 25.6 ceiling. A check ignoring it would red-build a correct
   rule. Grafana's `round()` is Go `math.Round` (half away from zero), not Python's banker's

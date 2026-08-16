@@ -282,7 +282,7 @@ class DeriveBucketBoundsTest(unittest.TestCase):
                 "    Buckets: prometheus.ExponentialBuckets(0.05, 2, 10),\n"
                 '}, []string{"kind"})\n'
             ),
-            {"operator_turn_submit_duration_seconds": 25.6},
+            {"operator_turn_submit_duration_seconds": (0.05, 25.6)},
         )
 
     def test_linear_buckets(self):
@@ -294,7 +294,7 @@ class DeriveBucketBoundsTest(unittest.TestCase):
                 "    Buckets: prometheus.LinearBuckets(10, 5, 5),\n"
                 "})\n"
             ),
-            {"x_seconds": 30.0},
+            {"x_seconds": (10.0, 30.0)},
         )
 
     def test_def_buckets(self):
@@ -305,7 +305,7 @@ class DeriveBucketBoundsTest(unittest.TestCase):
                 "    Buckets: prometheus.DefBuckets,\n"
                 '}, []string{"op"})\n'
             ),
-            {"lightrag_call_duration_seconds": 10.0},
+            {"lightrag_call_duration_seconds": (0.005, 10.0)},
         )
 
     def test_literal_slice_takes_the_max(self):
@@ -316,7 +316,7 @@ class DeriveBucketBoundsTest(unittest.TestCase):
                 "    Buckets: []float64{0, 1, 2, 3, 5, 8, 13, 21},\n"
                 "})\n"
             ),
-            {"operator_tasks_minted_per_sweep": 21.0},
+            {"operator_tasks_minted_per_sweep": (0.0, 21.0)},
         )
 
     def test_literal_slice_with_go_underscore_separators(self):
@@ -328,7 +328,7 @@ class DeriveBucketBoundsTest(unittest.TestCase):
                 "    Buckets: []float64{4_000, 16_000, 800_000},\n"
                 "})\n"
             ),
-            {"operator_bundle_bytes": 800000.0},
+            {"operator_bundle_bytes": (4000.0, 800000.0)},
         )
 
     def test_named_variable_buckets_are_underivable_not_guessed(self):
@@ -369,7 +369,91 @@ class DeriveBucketBoundsTest(unittest.TestCase):
                 "    Buckets: prometheus.DefBuckets,\n"
                 "})\n"
             ),
-            {"second_seconds": 10.0},
+            {"second_seconds": (0.005, 10.0)},
+        )
+
+    def test_append_to_def_buckets_is_underivable_not_wrong(self):
+        # The most common way a Go service widens DefBuckets. Deriving 10 here
+        # would be a WRONG bound, and a wrong bound is worse than an absent one:
+        # a mismatch is a hard CI failure telling the author to commit 10.
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name:    "widened_seconds",\n'
+                "    Buckets: append(prometheus.DefBuckets, 30, 60, 300),\n"
+                "})\n"
+            ),
+            {},
+        )
+
+    def test_append_around_linear_buckets_is_underivable(self):
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name:    "widened2_seconds",\n'
+                "    Buckets: append(prometheus.LinearBuckets(1, 1, 10), 3600),\n"
+                "})\n"
+            ),
+            {},
+        )
+
+    def test_a_ladder_quoted_in_a_help_string_is_not_the_buckets(self):
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name:    "helped_seconds",\n'
+                '    Help:    "ladder is []float64{0.5, 1, 2} scaled by tier",\n'
+                "    Buckets: tierBuckets,\n"
+                "})\n"
+            ),
+            {},
+        )
+
+    def test_a_ladder_left_in_a_comment_is_not_the_buckets(self):
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name:    "commented_seconds",\n'
+                "    // was Buckets: []float64{0.1, 0.25, 0.5} until we widened it\n"
+                "    Buckets: cBuckets,\n"
+                "})\n"
+            ),
+            {},
+        )
+
+    def test_a_neighbouring_var_ladder_is_not_adopted(self):
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name:    "neighbour_seconds",\n'
+                "    Buckets: dBuckets,\n"
+                "})\n"
+                "\n"
+                "var eBuckets = []float64{60, 300, 900}\n"
+            ),
+            {},
+        )
+
+    def test_promauto_forms_are_derived(self):
+        self.assertEqual(
+            self._derive(
+                "promauto.With(reg).NewHistogramVec(prometheus.HistogramOpts{\n"
+                '    Name:    "promauto_seconds",\n'
+                "    Buckets: prometheus.DefBuckets,\n"
+                '}, []string{"op"})\n'
+            ),
+            {"promauto_seconds": (0.005, 10.0)},
+        )
+
+    def test_exponential_buckets_range_is_underivable(self):
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name:    "ranged_seconds",\n'
+                "    Buckets: prometheus.ExponentialBucketsRange(0.1, 60, 12),\n"
+                "})\n"
+            ),
+            {},
         )
 
     def test_counters_are_not_histograms(self):
@@ -404,18 +488,18 @@ class ParseHistogramBoundsTest(unittest.TestCase):
                 "\n"
                 "# --- operator: tatara-operator/internal/obs ---\n"
                 "# ExponentialBuckets(0.05, 2, 10) -> 25.6\n"
-                "operator_turn_submit_duration_seconds 25.6\n"
-                "operator_bundle_bytes 800000\n"
+                "operator_turn_submit_duration_seconds 0.05 25.6\n"
+                "operator_bundle_bytes 4000 800000\n"
                 "\n"
                 "# --- memory: tatara-memory ---\n"
-                "lightrag_call_duration_seconds 10\n"
+                "lightrag_call_duration_seconds 0.005 10\n"
             )
             self.assertEqual(
                 parse_histogram_bounds(path),
                 {
-                    "operator_turn_submit_duration_seconds": ("operator", 25.6),
-                    "operator_bundle_bytes": ("operator", 800000.0),
-                    "lightrag_call_duration_seconds": ("memory", 10.0),
+                    "operator_turn_submit_duration_seconds": ("operator", 0.05, 25.6),
+                    "operator_bundle_bytes": ("operator", 4000.0, 800000.0),
+                    "lightrag_call_duration_seconds": ("memory", 0.005, 10.0),
                 },
             )
 
@@ -442,8 +526,8 @@ class ReconcileBoundsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = self._repo(pathlib.Path(tmp), "tatara-operator", self._OPERATOR_SRC)
             entries = {
-                "operator_turn_submit_duration_seconds": ("operator", 25.6),
-                "operator_turn_duration_seconds": ("operator", 640.0),
+                "operator_turn_submit_duration_seconds": ("operator", 0.05, 25.6),
+                "operator_turn_duration_seconds": ("operator", 5.0, 640.0),
             }
             mismatched, missing, unvalidatable, skipped = reconcile_bounds(
                 entries, {"tatara-operator": repo}
@@ -458,12 +542,12 @@ class ReconcileBoundsTest(unittest.TestCase):
         # the old ceiling, so the guard would reject a threshold that is now legal.
         with tempfile.TemporaryDirectory() as tmp:
             repo = self._repo(pathlib.Path(tmp), "tatara-operator", self._OPERATOR_SRC)
-            entries = {"operator_turn_submit_duration_seconds": ("operator", 12.8)}
+            entries = {"operator_turn_submit_duration_seconds": ("operator", 0.05, 12.8)}
             mismatched, _, _, _ = reconcile_bounds(entries, {"tatara-operator": repo})
             self.assertEqual(
                 mismatched,
                 {"tatara-operator": {
-                    "operator_turn_submit_duration_seconds": (12.8, 25.6)
+                    "operator_turn_submit_duration_seconds": ((0.05, 12.8), (0.05, 25.6))
                 }},
             )
 
@@ -471,7 +555,7 @@ class ReconcileBoundsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = self._repo(pathlib.Path(tmp), "tatara-operator", self._OPERATOR_SRC)
             entries = {
-                "operator_turn_submit_duration_seconds": ("operator", 25.600000001)
+                "operator_turn_submit_duration_seconds": ("operator", 0.05, 25.600000001)
             }
             mismatched, _, _, _ = reconcile_bounds(entries, {"tatara-operator": repo})
             self.assertEqual(mismatched, {})
@@ -479,13 +563,13 @@ class ReconcileBoundsTest(unittest.TestCase):
     def test_derivable_but_absent_is_informational(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = self._repo(pathlib.Path(tmp), "tatara-operator", self._OPERATOR_SRC)
-            entries = {"operator_turn_submit_duration_seconds": ("operator", 25.6)}
+            entries = {"operator_turn_submit_duration_seconds": ("operator", 0.05, 25.6)}
             mismatched, missing, _, _ = reconcile_bounds(
                 entries, {"tatara-operator": repo}
             )
             self.assertEqual(mismatched, {})
             self.assertEqual(
-                missing, {"tatara-operator": {"operator_turn_duration_seconds": 640.0}}
+                missing, {"tatara-operator": {"operator_turn_duration_seconds": (5.0, 640.0)}}
             )
 
     def test_underivable_entry_is_reported_never_failed(self):
@@ -498,7 +582,7 @@ class ReconcileBoundsTest(unittest.TestCase):
                 "    Buckets: analyticsDurationBuckets,\n"
                 "})\n",
             )
-            entries = {"code_graph_analytics_duration_seconds": ("memory", 600.0)}
+            entries = {"code_graph_analytics_duration_seconds": ("memory", 0.5, 600.0)}
             mismatched, missing, unvalidatable, _ = reconcile_bounds(
                 entries, {"tatara-memory": repo}
             )
@@ -507,7 +591,7 @@ class ReconcileBoundsTest(unittest.TestCase):
             self.assertEqual(unvalidatable, {"code_graph_analytics_duration_seconds"})
 
     def test_clone_failure_is_a_neutral_skip(self):
-        entries = {"ccw_turn_duration_seconds": ("wrapper", 2048.0)}
+        entries = {"ccw_turn_duration_seconds": ("wrapper", 1.0, 2048.0)}
         mismatched, missing, unvalidatable, skipped = reconcile_bounds(entries, {})
         self.assertEqual(mismatched, {})
         self.assertEqual(missing, {})
@@ -517,7 +601,7 @@ class ReconcileBoundsTest(unittest.TestCase):
     def test_exempt_section_is_never_diffed(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = self._repo(pathlib.Path(tmp), "tatara-operator", "")
-            entries = {"some_external_seconds": ("external", 5.0)}
+            entries = {"some_external_seconds": ("external", 0.1, 5.0)}
             mismatched, missing, unvalidatable, skipped = reconcile_bounds(
                 entries, {"tatara-operator": repo}
             )
@@ -532,9 +616,9 @@ class CommittedHistogramBoundsFileTest(unittest.TestCase):
             pathlib.Path(__file__).resolve().parent / "histogram_bounds.txt"
         )
         self.assertTrue(entries)
-        for family, (section, bound) in entries.items():
+        for family, (section, low, high) in entries.items():
             self.assertIn(section, SECTION_REPO, f"{family} has unroutable section")
-            self.assertGreater(bound, 0, family)
+            self.assertLess(low, high, family)
 
 
 if __name__ == "__main__":

@@ -272,12 +272,21 @@ def lint_idle_quantile(path: str, rule: dict) -> Violation | None:
 # metric nobody emits, one level further down (tatara-observability#111: two p95
 # rules at `> 30` over 25.6s and 10s ceilings).
 #
-# THE REACHABLE SET IS [0, top finite bound], NOT [lowest bound, top bound].
-# Prometheus's bucketQuantile interpolates the LOWEST bucket from 0, not from its
-# own lower bound (`bucketStart` stays 0 when b == 0), and histogram_quantile(0, ...)
-# returns exactly 0. So a `<` rule is inert only at threshold <= 0 - it is NOT
-# inert below the smallest bucket bound, which is what tatara-observability#111's
-# pre-mortem 1 assumed.
+# THE REACHABLE SET IS [q * lowest finite bound, top finite bound]. Prometheus's
+# bucketQuantile does interpolate the lowest bucket from 0 rather than from its own
+# lower bound (`bucketStart` stays 0 when b == 0), but that is not the whole story:
+# on that branch it returns `ub0 * (rank/count)` where `count` is bucket 0's own
+# count and `rank` is `q * observations`. Selecting b == 0 requires
+# `count >= rank`, and `count <= observations`, so `rank/count` is bounded in
+# [q, 1] and the result is bounded in [q*ub0, ub0]. The infimum q*ub0 is ATTAINED,
+# when every observation lands in the lowest bucket. So a p95 over
+# ExponentialBuckets(0.05, 2, 10) can never return below 0.0475, and `< 0.01` on it
+# is exactly as inert as `> 30` - which is why this check parses the quantile
+# argument out of each call rather than assuming a floor of 0.
+#
+# (Zero is reachable only at q == 0, and a histogram whose lowest bound is <= 0 is
+# special-cased by bucketQuantile to return that bound directly, so the floor is
+# the bound itself rather than q times it.)
 #
 # decimal_points is applied FIRST: modules/grafana_alert/main.tf:207 inserts a
 # `round($C * 10^d) / 10^d` reduce step ahead of the threshold compare, so the
@@ -289,7 +298,9 @@ def lint_idle_quantile(path: str, rule: dict) -> Violation | None:
 # A family with no entry in histogram_bounds.txt is a hard FAIL, not a skip: this
 # check exists to make the NEXT quantile rule safe, and a silently-skipped unknown
 # family is the same bypass the check is here to close.
-_BOUNDS_ENTRY = re.compile(r"^(?P<family>[a-z][a-z0-9_]*)\s+(?P<bound>[-+0-9.eE]+)$")
+_BOUNDS_ENTRY = re.compile(
+    r"^(?P<family>[a-z][a-z0-9_]*)\s+(?P<low>\S+)\s+(?P<high>\S+)$"
+)
 HISTOGRAM_RANGE_ANNOTATION_KEY = "tatara_histogram_range"
 
 
@@ -297,28 +308,46 @@ def _bounds_path() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parent / "histogram_bounds.txt"
 
 
-def load_histogram_bounds(path: pathlib.Path | None = None) -> dict[str, float]:
-    """{metric family: top finite bucket bound} from histogram_bounds.txt.
+def load_histogram_bounds(
+    path: pathlib.Path | None = None,
+) -> dict[str, tuple[float, float]]:
+    """{metric family: (lowest finite bound, top finite bound)} from
+    histogram_bounds.txt.
 
     Comment and blank lines (including the `# --- <section> ---` headers, which
     only reconcile_metric_provenance.py routes on) are skipped.
     """
-    out: dict[str, float] = {}
+    out: dict[str, tuple[float, float]] = {}
     for line in (path or _bounds_path()).read_text().splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
         m = _BOUNDS_ENTRY.match(stripped)
-        if m:
-            out[m.group("family")] = float(m.group("bound"))
+        if not m:
+            continue
+        try:
+            out[m.group("family")] = (float(m.group("low")), float(m.group("high")))
+        except ValueError as exc:
+            raise ValueError(f"histogram_bounds.txt: bad entry {stripped!r}") from exc
     return out
 
 
 def _rounded(value: float, decimal_points: int) -> float:
     """value through main.tf's `round($C * 10^d) / 10^d` reduce step, with Go's
-    math.Round semantics (half away from zero) rather than Python's banker's."""
-    scale = 10**decimal_points
-    scaled = value * scale
+    math.Round semantics (half away from zero) rather than Python's banker's.
+
+    Applying the rounding to an endpoint is sound because round is monotone
+    non-decreasing and both endpoints of the reachable interval are attained, so
+    round(max) is the max of the rounded image. `10.0 **` rather than `10 **`
+    keeps a large decimal_points from building an unconvertible Python int.
+    """
+    try:
+        scale = 10.0**decimal_points
+        scaled = value * scale
+    except OverflowError:
+        return value
+    if not math.isfinite(scale) or scale == 0 or not math.isfinite(scaled):
+        return value
     return (
         math.floor(scaled + 0.5) / scale
         if scaled >= 0
@@ -326,27 +355,87 @@ def _rounded(value: float, decimal_points: int) -> float:
     )
 
 
-def _threshold_reachable(ceiling: float, threshold: float, operator: str) -> bool:
-    """Can the post-reduce quantile, whose range is [0, ceiling], satisfy
+def _quantile_floor(low: float, q: float) -> float:
+    """The smallest value histogram_quantile(q, ...) can return over a histogram
+    whose lowest finite bucket bound is `low`. See the block comment above: the
+    b == 0 branch bottoms out at q*low, except that bucketQuantile short-circuits
+    a non-positive lowest bound and returns it directly."""
+    return low if low <= 0 else q * low
+
+
+def _threshold_reachable(
+    floor: float, ceiling: float, threshold: float, operator: str
+) -> bool:
+    """Can the post-reduce quantile, whose range is [floor, ceiling], satisfy
     `value <operator> threshold` for any input?"""
     if operator == ">":
         return ceiling > threshold
     if operator == ">=":
         return ceiling >= threshold
     if operator == "<":
-        return threshold > 0
+        return floor < threshold
     if operator == "<=":
-        return threshold >= 0
+        return floor <= threshold
     return True  # an operator this check does not model is not judged
 
 
+_IDLE_GUARD_CLAUSE = re.compile(r"\s+and\s+(?:on\s*\([^)]*\)\s*)?\(")
+
+
+def _strip_idle_guards(expr: str) -> str:
+    """expr with every trailing `and on() (...)` idle-guard clause removed, so the
+    shape test below sees the value the threshold is actually compared against."""
+    while True:
+        m = _IDLE_GUARD_CLAUSE.search(expr)
+        if m is None:
+            return expr
+        open_paren = m.end() - 1
+        consumed = _call_arguments(expr, open_paren)
+        expr = expr[: m.start()] + expr[open_paren + 1 + len(consumed) + 1 :]
+
+
+def _is_bare_quantile(expr: str) -> bool:
+    """True when the guard-stripped expression is nothing but one
+    histogram_quantile( call, so its value is in the histogram's own units.
+
+    A scaled or aggregated quantile (`1000 * histogram_quantile(...)` for
+    milliseconds, `sum(histogram_quantile(...))` across pods) compares against a
+    derived quantity this check does not model; range-checking those against the
+    raw bucket ceiling would fail a correct rule, which is how a check gets
+    weakened to a warning. They are skipped, and CONVENTIONS.md 6.4 says so.
+    """
+    stripped = _strip_idle_guards(expr).strip()
+    m = _HISTOGRAM_QUANTILE.match(stripped)
+    if m is None:
+        return False
+    args = _call_arguments(stripped, m.end() - 1)
+    return stripped[m.end() + len(args) :].strip() == ")"
+
+
+def _quantile_call_quantiles(expr: str) -> list[float | None]:
+    """One entry per histogram_quantile( call in expr, in order: the literal `q`
+    of that call, or None when it is not a plain numeric literal."""
+    out: list[float | None] = []
+    for m in _HISTOGRAM_QUANTILE.finditer(expr):
+        args = _call_arguments(expr, m.end() - 1)
+        head = args.split(",", 1)[0].strip()
+        try:
+            out.append(float(head))
+        except ValueError:
+            out.append(None)
+    return out
+
+
 def lint_histogram_range(
-    path: str, rule: dict, bounds: dict[str, float]
+    path: str, rule: dict, bounds: dict[str, tuple[float, float]]
 ) -> Violation | None:
     joined = _joined_expressions(rule)
     families = _quantile_call_families(joined)
     if not families:
         return None
+    if not _is_bare_quantile(joined):
+        return None
+    quantiles = _quantile_call_quantiles(joined)
     annotations = rule.get("annotations") or {}
     if str(annotations.get(HISTOGRAM_RANGE_ANNOTATION_KEY, "")).strip():
         return None
@@ -357,7 +446,7 @@ def lint_histogram_range(
         decimal_points = int(rule.get("decimal_points", 2))
     except (TypeError, ValueError):
         return None  # check_alert_schema.py owns malformed keys
-    for family in families:
+    for family, q in zip(families, quantiles):
         if family is None:
             return Violation(
                 path,
@@ -367,8 +456,9 @@ def lint_histogram_range(
                 "compared against cannot be verified: a threshold outside the "
                 "reachable range makes the rule structurally inert and it reports "
                 "OK forever. Use a recognisable `<metric>_bucket` selector, or set "
-                f"a non-empty `{HISTOGRAM_RANGE_ANNOTATION_KEY}` annotation. "
-                "See CONVENTIONS.md.",
+                f"a non-empty `{HISTOGRAM_RANGE_ANNOTATION_KEY}` annotation (Check 2 "
+                f"reports this same shape and needs `{QUANTILE_ANNOTATION_KEY}` "
+                "separately). See CONVENTIONS.md.",
             )
         if family not in bounds:
             return Violation(
@@ -381,27 +471,26 @@ def lint_histogram_range(
                 "against the producer's Go source), or set a non-empty "
                 f"`{HISTOGRAM_RANGE_ANNOTATION_KEY}` annotation. See CONVENTIONS.md.",
             )
-        ceiling = _rounded(bounds[family], decimal_points)
-        if _threshold_reachable(ceiling, threshold, operator):
+        low, high = bounds[family]
+        if q is None and operator in ("<", "<="):
+            continue  # the floor is q-dependent and q is not a literal here
+        ceiling = _rounded(high, decimal_points)
+        floor = _rounded(_quantile_floor(low, q if q is not None else 0.0), decimal_points)
+        if _threshold_reachable(floor, ceiling, threshold, operator):
             continue
         return Violation(
             path,
             name,
             f"compares a histogram_quantile() over `{family}_bucket` against "
-            f"`{operator} {threshold:g}`, which that quantile can never satisfy: "
-            f"classic histogram_quantile returns at most the top finite bucket "
-            f"bound, {bounds[family]:g}"
-            + (
-                f" ({ceiling:g} after the decimal_points: {decimal_points} reduce step)"
-                if ceiling != bounds[family]
-                else ""
-            )
-            + ", and interpolates the lowest bucket from 0, so its range is "
-            f"[0, {ceiling:g}]. The rule is structurally inert - it cannot fire on "
-            "any input, and default_no_data_state: \"OK\" means it never goes stale "
-            "either. Move the threshold inside the range, widen the producer's "
-            f"buckets, or set a non-empty `{HISTOGRAM_RANGE_ANNOTATION_KEY}` "
-            "annotation. See CONVENTIONS.md.",
+            f"`{operator} {threshold:g}`, which that quantile can never satisfy. "
+            f"Its buckets run {low:g}..{high:g}, so the quantile's reachable range "
+            f"is [{floor:g}, {ceiling:g}] at decimal_points: {decimal_points} - "
+            "classic histogram_quantile returns at most the top finite bucket bound, "
+            f"and at least q times the lowest one. The rule is structurally inert - "
+            "it cannot fire on any input, and default_no_data_state: \"OK\" means it "
+            "never goes stale either. Move the threshold inside the range, widen the "
+            f"producer's buckets, or set a non-empty "
+            f"`{HISTOGRAM_RANGE_ANNOTATION_KEY}` annotation. See CONVENTIONS.md.",
         )
     return None
 

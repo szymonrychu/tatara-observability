@@ -156,21 +156,24 @@ def derive_metric_names(repo_dir: pathlib.Path) -> set[str]:
 # Underivable is NOT a failure and never a guess: a `Buckets:` field behind a named
 # package-level variable (tatara-memory's analyticsDurationBuckets /
 # requestDurationBuckets) or absent entirely is reported and moved past.
-_HISTOGRAM_CTOR = re.compile(
-    r"prometheus\.NewHistogram(?:Vec)?\(|promauto\.\w+\.NewHistogram(?:Vec)?\("
-)
+# Matches every NewHistogram form, including the promauto ones _CTOR's
+# `promauto.<ident>.` shape misses (promauto.NewHistogramVec,
+# promauto.With(reg).NewHistogramVec).
+_HISTOGRAM_CTOR = re.compile(r"\bNewHistogram(?:Vec)?\(")
 _GO_NUMBER = r"[0-9][0-9_]*(?:\.[0-9_]+)?(?:[eE][-+]?[0-9]+)?"
 _EXPONENTIAL_BUCKETS = re.compile(
-    rf"ExponentialBuckets\(\s*({_GO_NUMBER})\s*,\s*({_GO_NUMBER})\s*,\s*({_GO_NUMBER})\s*\)"
+    rf"^(?:\w+\.)?ExponentialBuckets\(\s*({_GO_NUMBER})\s*,\s*({_GO_NUMBER})\s*,\s*({_GO_NUMBER})\s*\)$"
 )
 _LINEAR_BUCKETS = re.compile(
-    rf"LinearBuckets\(\s*({_GO_NUMBER})\s*,\s*({_GO_NUMBER})\s*,\s*({_GO_NUMBER})\s*\)"
+    rf"^(?:\w+\.)?LinearBuckets\(\s*({_GO_NUMBER})\s*,\s*({_GO_NUMBER})\s*,\s*({_GO_NUMBER})\s*\)$"
 )
-_DEF_BUCKETS = re.compile(r"prometheus\.DefBuckets\b")
-_LITERAL_BUCKETS = re.compile(r"\[\]float64\{([^}]*)\}")
-_BUCKETS_FIELD = re.compile(r"\bBuckets:\s*(\S)")
+_DEF_BUCKETS = re.compile(r"^(?:\w+\.)?DefBuckets$")
+_LITERAL_BUCKETS = re.compile(r"^\[\]float64\{([^}]*)\}$")
+_BUCKETS_FIELD = re.compile(r"\bBuckets:\s*")
+_LINE_COMMENT = re.compile(r"//[^\n]*")
+_GO_STRING = re.compile(r'"(?:[^"\\\n]|\\.)*"')
 # prometheus.DefBuckets = {.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10}.
-_DEF_BUCKETS_TOP = 10.0
+_DEF_BUCKETS_RANGE = (0.005, 10.0)
 # How many lines after a histogram constructor to look for its Buckets field. Wider
 # than _WINDOW because Help strings push Buckets further down, and truncated at the
 # next constructor so one declaration never adopts the next one's ladder.
@@ -181,35 +184,71 @@ def _go_float(text: str) -> float:
     return float(text.replace("_", ""))
 
 
-def _top_finite_bound(window: str) -> float | None:
-    """The largest finite bucket bound the `Buckets:` expression in window
-    declares, or None if the expression is not one this parser derives."""
-    if not _BUCKETS_FIELD.search(window):
+def _buckets_expression(window: str) -> str | None:
+    """The Go expression assigned to the `Buckets:` field in window, or None.
+
+    Comments and string literals are blanked first so a ladder quoted in a Help
+    string or left behind in a `// was Buckets: []float64{...}` comment cannot be
+    mistaken for the live value. The expression is then read by balancing
+    brackets from the field, so only the value itself is returned - never a
+    neighbouring declaration's.
+    """
+    window = _LINE_COMMENT.sub("", _GO_STRING.sub('""', window))
+    m = _BUCKETS_FIELD.search(window)
+    if m is None:
         return None
-    m = _EXPONENTIAL_BUCKETS.search(window)
+    depth = 0
+    for i in range(m.end(), len(window)):
+        ch = window[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return window[m.end() : i].strip()
+            depth -= 1
+        elif depth == 0 and (ch == "," or ch == "\n"):
+            return window[m.end() : i].strip()
+    return window[m.end() :].strip()
+
+
+def _bucket_range(window: str) -> tuple[float, float] | None:
+    """(lowest, top) finite bucket bound for the `Buckets:` expression in window,
+    or None when the expression is not one this parser evaluates exactly.
+
+    Anything not recognised - a named package-level variable, an
+    `append(prometheus.DefBuckets, ...)`, ExponentialBucketsRange, a computed
+    slice - returns None and is reported as unvalidatable. NEVER guessed: a wrong
+    derived bound is worse than an absent one, because a mismatch is a hard CI
+    failure whose message tells the author to commit the derived number.
+    """
+    expr = _buckets_expression(window)
+    if not expr:
+        return None
+    m = _EXPONENTIAL_BUCKETS.match(expr)
     if m:
         start, factor, count = (_go_float(g) for g in m.groups())
-        return start * factor ** (int(count) - 1)
-    m = _LINEAR_BUCKETS.search(window)
+        return start, start * factor ** (int(count) - 1)
+    m = _LINEAR_BUCKETS.match(expr)
     if m:
         start, width, count = (_go_float(g) for g in m.groups())
-        return start + width * (int(count) - 1)
-    m = _LITERAL_BUCKETS.search(window)
+        return start, start + width * (int(count) - 1)
+    m = _LITERAL_BUCKETS.match(expr)
     if m:
         values = [v.strip() for v in m.group(1).split(",") if v.strip()]
         try:
-            return max(_go_float(v) for v in values)
+            floats = [_go_float(v) for v in values]
         except ValueError:
             return None
-    if _DEF_BUCKETS.search(window):
-        return _DEF_BUCKETS_TOP
+        return (min(floats), max(floats)) if floats else None
+    if _DEF_BUCKETS.match(expr):
+        return _DEF_BUCKETS_RANGE
     return None
 
 
-def derive_bucket_bounds(repo_dir: pathlib.Path) -> dict[str, float]:
-    """{metric family: top finite bucket bound} for every histogram under
-    repo_dir whose Buckets expression this parser can evaluate."""
-    bounds: dict[str, float] = {}
+def derive_bucket_bounds(repo_dir: pathlib.Path) -> dict[str, tuple[float, float]]:
+    """{metric family: (lowest, top) finite bucket bound} for every histogram
+    under repo_dir whose Buckets expression this parser can evaluate exactly."""
+    bounds: dict[str, tuple[float, float]] = {}
     for path in sorted(repo_dir.rglob("*.go")):
         if path.name.endswith("_test.go"):
             continue
@@ -220,28 +259,30 @@ def derive_bucket_bounds(repo_dir: pathlib.Path) -> dict[str, float]:
         for i, line in enumerate(lines):
             if not _HISTOGRAM_CTOR.search(line):
                 continue
-            end = i + _BUCKET_WINDOW
-            for j in range(i + 1, min(end, len(lines))):
-                if _CTOR.search(lines[j]):
+            end = min(i + _BUCKET_WINDOW, len(lines))
+            for j in range(i + 1, end):
+                if _CTOR.search(lines[j]) or _HISTOGRAM_CTOR.search(lines[j]):
                     end = j
                     break
             window = "\n".join(lines[i:end])
             name = _NAME_FIELD.search(window)
             if not name:
                 continue
-            top = _top_finite_bound(window)
-            if top is not None:
-                bounds[name.group(1)] = top
+            rng = _bucket_range(window)
+            if rng is not None:
+                bounds[name.group(1)] = rng
     return bounds
 
 
-_BOUNDS_ENTRY = re.compile(r"^([a-z][a-z0-9_]*)\s+([-+0-9.eE]+)$")
+_BOUNDS_ENTRY = re.compile(r"^([a-z][a-z0-9_]*)\s+(\S+)\s+(\S+)$")
 
 
-def parse_histogram_bounds(path: pathlib.Path) -> dict[str, tuple[str, float]]:
-    """{family: (section_key, top finite bound)} from histogram_bounds.txt. Same
-    `# --- <section> ---` routing as parse_allowlist_sections."""
-    out: dict[str, tuple[str, float]] = {}
+def parse_histogram_bounds(
+    path: pathlib.Path,
+) -> dict[str, tuple[str, float, float]]:
+    """{family: (section_key, lowest bound, top bound)} from histogram_bounds.txt.
+    Same `# --- <section> ---` routing as parse_allowlist_sections."""
+    out: dict[str, tuple[str, float, float]] = {}
     current: str | None = None
     for line in path.read_text().splitlines():
         stripped = line.strip()
@@ -252,33 +293,37 @@ def parse_histogram_bounds(path: pathlib.Path) -> dict[str, tuple[str, float]]:
         if not stripped or stripped.startswith("#") or current is None:
             continue
         m = _BOUNDS_ENTRY.match(stripped)
-        if m:
-            out[m.group(1)] = (current, float(m.group(2)))
+        if not m:
+            continue
+        try:
+            out[m.group(1)] = (current, float(m.group(2)), float(m.group(3)))
+        except ValueError as exc:
+            raise ValueError(f"histogram_bounds.txt: bad entry {stripped!r}") from exc
     return out
 
 
 def reconcile_bounds(
-    entries: dict[str, tuple[str, float]], repo_dirs: dict[str, pathlib.Path]
-) -> tuple[dict[str, dict[str, tuple[float, float]]], dict[str, dict[str, float]], set[str], set[str]]:
-    """Diff histogram_bounds.txt against each producer's derived ceilings.
+    entries: dict[str, tuple[str, float, float]], repo_dirs: dict[str, pathlib.Path]
+) -> tuple[dict[str, dict[str, tuple[tuple[float, float], tuple[float, float]]]], dict[str, dict[str, tuple[float, float]]], set[str], set[str]]:
+    """Diff histogram_bounds.txt against each producer's derived bucket ranges.
 
     Returns (mismatched, missing, unvalidatable, skipped):
-      mismatched[repo][family] = (file bound, derived bound) - HARD FAIL.
-      missing[repo][family]    = derived bound for a histogram the file omits
+      mismatched[repo][family] = (file range, derived range) - HARD FAIL.
+      missing[repo][family]    = derived range for a histogram the file omits
                                  (informational, same direction as `new` above).
-      unvalidatable            = families in the file whose ceiling no clone could
+      unvalidatable            = families in the file whose range no clone could
                                  derive (named-var buckets) - reported, never failed.
       skipped                  = repos whose clone failed.
     """
-    by_repo: dict[str, dict[str, float]] = {}
-    for family, (section, bound) in entries.items():
+    by_repo: dict[str, dict[str, tuple[float, float]]] = {}
+    for family, (section, low, high) in entries.items():
         repo = SECTION_REPO.get(section)
         if repo is None:
             continue  # exempt section - never diffed
-        by_repo.setdefault(repo, {})[family] = bound
+        by_repo.setdefault(repo, {})[family] = (low, high)
 
-    mismatched: dict[str, dict[str, tuple[float, float]]] = {}
-    missing: dict[str, dict[str, float]] = {}
+    mismatched: dict[str, dict[str, tuple[tuple[float, float], tuple[float, float]]]] = {}
+    missing: dict[str, dict[str, tuple[float, float]]] = {}
     unvalidatable: set[str] = set()
     skipped: set[str] = set()
     for repo, filed in by_repo.items():
@@ -287,12 +332,15 @@ def reconcile_bounds(
             skipped.add(repo)
             continue
         derived = derive_bucket_bounds(repo_dir)
-        for family, bound in filed.items():
+        for family, rng in filed.items():
             if family not in derived:
                 unvalidatable.add(family)
-            elif not math.isclose(bound, derived[family], rel_tol=1e-6):
-                mismatched.setdefault(repo, {})[family] = (bound, derived[family])
-        absent = {f: b for f, b in derived.items() if f not in filed}
+            elif not all(
+                math.isclose(a, b, rel_tol=1e-6, abs_tol=1e-12)
+                for a, b in zip(rng, derived[family])
+            ):
+                mismatched.setdefault(repo, {})[family] = (rng, derived[family])
+        absent = {f: r for f, r in derived.items() if f not in filed}
         if absent:
             missing[repo] = absent
     return mismatched, missing, unvalidatable, skipped
@@ -422,21 +470,24 @@ def _write_summary(
             lines.append(f"**{repo}**")
             for family, (filed, derived) in sorted(families.items()):
                 lines.append(
-                    f"- `{family}`: `scripts/histogram_bounds.txt` says {filed:g}, "
-                    f"the producer's buckets top out at {derived:g}. Update the file - "
-                    "a stale ceiling makes lint_alert_rules.py Check 4 reject a "
-                    "threshold that is now legal."
+                    f"- `{family}`: `scripts/histogram_bounds.txt` says "
+                    f"{filed[0]:g}..{filed[1]:g}, the producer's buckets run "
+                    f"{derived[0]:g}..{derived[1]:g}. Update the file - a stale range "
+                    "makes lint_alert_rules.py Check 4 reject a threshold that is now "
+                    "legal."
                 )
         lines.append("")
     if missing:
         lines.append(
-            "### Histograms with no bucket-ceiling entry (informational only)"
+            "### Histograms with no bucket-range entry (informational only)"
         )
         lines.append("")
         for repo, families in sorted(missing.items()):
             lines.append(
                 f"**{repo}**: "
-                + ", ".join(f"`{f}` ({b:g})" for f, b in sorted(families.items()))
+                + ", ".join(
+                    f"`{f}` ({r[0]:g}..{r[1]:g})" for f, r in sorted(families.items())
+                )
             )
         lines.append("")
     if unvalidatable:

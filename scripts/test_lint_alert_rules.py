@@ -600,8 +600,8 @@ class HistogramRangeGuard(unittest.TestCase):
     (tatara-observability#111)."""
 
     BOUNDS = {
-        "operator_turn_submit_duration_seconds": 25.6,
-        "lightrag_call_duration_seconds": 10.0,
+        "operator_turn_submit_duration_seconds": (0.05, 25.6),
+        "lightrag_call_duration_seconds": (0.005, 10.0),
     }
 
     def setUp(self):
@@ -674,12 +674,41 @@ rules:
             [],
         )
 
-    def test_lt_at_a_positive_threshold_passes(self):
-        # Classic histogram_quantile interpolates the LOWEST bucket from 0, not
-        # from its lower bound, so any positive threshold is reachable from below.
+    def test_lt_below_the_quantile_floor_is_violation(self):
+        # The floor is q * lowest finite bound, NOT 0. bucketQuantile's b == 0 branch
+        # returns ub0 * (rank/count) with rank/count in [q, 1], so a p95 over
+        # ExponentialBuckets(0.05, 2, 10) can never return below 0.95 * 0.05 = 0.0475.
+        # `< 0.01` is as inert as `> 30` and must be caught.
+        v = self._violations(
+            self._rule("operator_turn_submit_duration_seconds", "<", 0.01, 2)
+        )
+        self.assertEqual(len(v), 1)
+        self.assertEqual(v[0].rule, "p95 rule")
+
+    def test_lt_above_the_quantile_floor_passes(self):
         self.assertEqual(
             self._violations(
-                self._rule("operator_turn_submit_duration_seconds", "<", 0.01, 2)
+                self._rule("operator_turn_submit_duration_seconds", "<", 0.1, 2)
+            ),
+            [],
+        )
+
+    def test_lt_exactly_at_the_quantile_floor_is_violation(self):
+        # 0.95 * 0.05 = 0.0475, which rounds to 0.05 at decimal_points: 2. `< 0.05`
+        # cannot be satisfied by a value whose minimum IS 0.05.
+        self.assertEqual(
+            len(
+                self._violations(
+                    self._rule("operator_turn_submit_duration_seconds", "<", 0.05, 2)
+                )
+            ),
+            1,
+        )
+
+    def test_lte_exactly_at_the_quantile_floor_passes(self):
+        self.assertEqual(
+            self._violations(
+                self._rule("operator_turn_submit_duration_seconds", "<=", 0.05, 2)
             ),
             [],
         )
@@ -694,14 +723,56 @@ rules:
             1,
         )
 
-    def test_lte_zero_passes(self):
-        # histogram_quantile(0, ...) returns exactly 0, so `<= 0` is reachable.
+    def test_lte_zero_is_violation_for_a_positive_domain_histogram(self):
+        # histogram_quantile(0, ...) does return exactly 0, but this rule asks for
+        # the p95, whose floor is 0.0475. `<= 0` is unreachable.
         self.assertEqual(
-            self._violations(
-                self._rule("operator_turn_submit_duration_seconds", "<=", 0, 2)
+            len(
+                self._violations(
+                    self._rule("operator_turn_submit_duration_seconds", "<=", 0, 2)
+                )
             ),
-            [],
+            1,
         )
+
+    def test_a_lower_quantile_lowers_the_floor(self):
+        # Same family, same threshold: the floor scales with q, so p50 reaches
+        # 0.025 where p95 (floor 0.0475) does not.
+        body = """
+rules:
+  - name: "p50 rule"
+    queries:
+      - expression: |
+          histogram_quantile(0.5, sum(rate(operator_turn_submit_duration_seconds_bucket[15m])) by (le)) and on() (sum(rate(operator_turn_submit_duration_seconds_count[15m])) > 0)
+    math_operator: "<"
+    threshold: 0.03
+    decimal_points: 3
+"""
+        self.assertEqual(self._violations(body), [])
+        self.assertEqual(
+            len(
+                self._violations(
+                    body.replace("histogram_quantile(0.5,", "histogram_quantile(0.95,")
+                )
+            ),
+            1,
+        )
+
+    def test_scaled_quantile_is_not_range_checked(self):
+        # `1000 * histogram_quantile(...)` converts seconds to milliseconds; the
+        # threshold no longer lives in the histogram's own units, so range-checking
+        # it against the raw ceiling would red-build a correct rule.
+        body = """
+rules:
+  - name: "p95 in milliseconds"
+    queries:
+      - expression: |
+          1000 * histogram_quantile(0.95, sum(rate(lightrag_call_duration_seconds_bucket[10m])) by (le)) and on() (sum(rate(lightrag_call_duration_seconds_count[10m])) > 0)
+    math_operator: ">"
+    threshold: 5000
+    decimal_points: 0
+"""
+        self.assertEqual(self._violations(body), [])
 
     def test_unknown_family_is_violation(self):
         # A family with no bucket-ceiling entry is a hard FAIL, not a skip: a
@@ -771,11 +842,15 @@ rules:
 """
         self.assertEqual(len(self._violations(body)), 1)
 
-    def test_multiple_quantile_calls_each_checked(self):
-        # The first family's ceiling clears 12; the second's (10) does not.
+    def test_quantile_compared_against_another_quantile_is_not_range_checked(self):
+        # Two histogram_quantile calls related by `>`: the value the threshold sees
+        # is the result of a comparison between two histograms, not either one's
+        # own units. Skipped rather than checked against one of the two ceilings -
+        # the same reason a scaled quantile is skipped. Check 2 still covers both
+        # calls' idle guards.
         body = """
 rules:
-  - name: "two quantiles, one unreachable"
+  - name: "two quantiles"
     queries:
       - expression: |
           histogram_quantile(0.95, sum(rate(operator_turn_submit_duration_seconds_bucket[15m])) by (le)) and on() (sum(rate(operator_turn_submit_duration_seconds_count[15m])) > 0) > histogram_quantile(0.95, sum(rate(lightrag_call_duration_seconds_bucket[15m])) by (le)) and on() (sum(rate(lightrag_call_duration_seconds_count[15m])) > 0)
@@ -783,9 +858,7 @@ rules:
     threshold: 12
     decimal_points: 1
 """
-        v = self._violations(body)
-        self.assertEqual(len(v), 1)
-        self.assertIn("lightrag_call_duration_seconds", v[0].message)
+        self.assertEqual(self._violations(body), [])
 
     def test_non_quantile_rule_ignored(self):
         body = """
@@ -825,8 +898,30 @@ class HistogramBoundsFile(unittest.TestCase):
     def test_committed_bounds_file_parses(self):
         bounds = lint.load_histogram_bounds()
         self.assertIn("operator_turn_submit_duration_seconds", bounds)
-        self.assertEqual(bounds["operator_turn_submit_duration_seconds"], 25.6)
-        self.assertEqual(bounds["lightrag_call_duration_seconds"], 10.0)
+        self.assertEqual(bounds["operator_turn_submit_duration_seconds"], (0.05, 25.6))
+        self.assertEqual(bounds["lightrag_call_duration_seconds"], (0.005, 10.0))
+
+    def test_every_entry_has_a_lower_bound_below_its_upper(self):
+        for family, (low, high) in lint.load_histogram_bounds().items():
+            self.assertLess(low, high, family)
+
+
+class RoundingModel(unittest.TestCase):
+    def test_half_away_from_zero_not_bankers(self):
+        # Python's round(0.5) is 0 and round(2.5) is 2; Grafana's math round() is
+        # Go math.Round, which gives 1 and 3.
+        self.assertEqual(lint._rounded(0.5, 0), 1.0)
+        self.assertEqual(lint._rounded(2.5, 0), 3.0)
+        self.assertEqual(lint._rounded(25.6, 0), 26.0)
+        self.assertEqual(lint._rounded(25.6, 1), 25.6)
+
+    def test_negative_decimal_points(self):
+        self.assertEqual(lint._rounded(25.6, -1), 30.0)
+
+    def test_extreme_decimal_points_does_not_overflow(self):
+        # decimal_points is optional(number, 2) in variables.tf with no upper
+        # bound; 10**309 as a Python int overflows float conversion.
+        self.assertEqual(lint._rounded(25.6, 400), 25.6)
 
 
 class RealAlertFilesPass(unittest.TestCase):

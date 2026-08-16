@@ -358,10 +358,22 @@ was cited in this file, and in the linter, as the reference example of a complia
 quantile rule. **Being correctly idle-guarded (6.2) says nothing about being
 reachable.**
 
-The reachable set is `[0, top finite bound]`, NOT `[lowest bound, top bound]`:
-Prometheus's `bucketQuantile` interpolates the lowest bucket from 0 rather than
-from its own lower bound, and `histogram_quantile(0, ...)` returns exactly 0. So a
-`<` rule is inert only at a threshold `<= 0`, not below the smallest bucket.
+**The reachable set is `[q * lowest finite bound, top finite bound]`.** Prometheus's
+`bucketQuantile` does interpolate the lowest bucket from 0 rather than from its own
+lower bound, but it then scales by `rank/count`, and selecting that bucket bounds
+`rank/count` in `[q, 1]`. So a p95 over `ExponentialBuckets(0.05, 2, 10)` can never
+return below `0.95 * 0.05 = 0.0475`, and `< 0.01` on it is exactly as inert as
+`> 30`. The check parses `q` out of each `histogram_quantile(` call rather than
+assuming a floor of zero. A histogram whose lowest bound is `<= 0` is short-
+circuited by `bucketQuantile` and returned directly, so its floor is that bound
+itself.
+
+Only a **bare** quantile is range-checked - one where the guard-stripped expression
+is nothing but the `histogram_quantile(` call. A scaled or aggregated one
+(`1000 * histogram_quantile(...)` for milliseconds, a comparison between two
+quantiles) compares against a derived quantity in different units, and checking
+those against the raw bucket range would fail a correct rule. They are skipped, and
+the threshold is on the author.
 
 `decimal_points` is applied first. `modules/grafana_alert/main.tf` inserts a
 `round($C * 10^d) / 10^d` reduce step ahead of the threshold compare, so the
@@ -369,11 +381,11 @@ ceiling the compare sees is the rounded one - rounding only ever widens it upwar
 which makes `> 25.9` at `decimal_points: 0` legal over a 25.6 ceiling. The check
 applies the same rounding rather than rejecting it.
 
-Ceilings live in `scripts/histogram_bounds.txt`, one `<family> <top finite bound>`
-per line under a `# --- <section> ---` header, in the shape of
-`metrics_allowlist.txt`. **A family with no entry there is a hard failure, not a
-skip** - the check exists to make the NEXT quantile rule safe, and a silently
-skipped unknown family is the bypass it was written to close.
+Bucket ranges live in `scripts/histogram_bounds.txt`, one
+`<family> <lowest bound> <top bound>` per line under a `# --- <section> ---`
+header, in the shape of `metrics_allowlist.txt`. **A family with no entry there is
+a hard failure, not a skip** - the check exists to make the NEXT quantile rule
+safe, and a silently skipped unknown family is the bypass it was written to close.
 
 That file is a hand-transcribed copy of a number owned by another repo, which is
 exactly how `metrics_allowlist.txt` went stale in #57, and it fails in the worse
@@ -381,9 +393,11 @@ direction: a ceiling that lags a widened producer histogram makes this check rej
 a threshold that has become legal - a red build on a correct rule, which is how a
 check gets weakened to a warning. So it is validated, not trusted:
 `scripts/reconcile_metric_provenance.py` re-derives every bound from the producer's
-own `Buckets:` expression on each run and hard-fails on a mismatch. A `Buckets:`
-behind a named package-level variable is reported as unvalidatable and never
-guessed.
+own `Buckets:` expression on each run and hard-fails on a mismatch. Anything it
+cannot evaluate exactly - a named package-level variable, an
+`append(prometheus.DefBuckets, ...)`, `ExponentialBucketsRange` - is reported as
+unvalidatable and **never guessed**: a wrong derived bound is worse than an absent
+one, because the mismatch message tells the author to commit the derived number.
 
 To keep a threshold outside the derived range, set a non-empty
 `tatara_histogram_range` annotation saying why it is nonetheless reachable (native

@@ -6,6 +6,8 @@ import pathlib
 import tempfile
 import unittest
 
+import yaml
+
 import lint_alert_rules as lint
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -251,7 +253,12 @@ rules:
 
 class IdleQuantileGuard(unittest.TestCase):
     """Check 2: histogram_quantile over an empty bucket set is NaN; an idle
-    service is not a slow service (CONVENTIONS.md section 1)."""
+    service is not a slow service (CONVENTIONS.md section 1).
+
+    These exercise lint_idle_quantile directly rather than through lint_file:
+    the synthetic families below (`x`, `metricA`, ...) carry no entry in
+    histogram_bounds.txt, so Check 4 legitimately fires on every one of them and
+    would drown out what this class is asserting."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -261,7 +268,10 @@ class IdleQuantileGuard(unittest.TestCase):
         self._tmp.cleanup()
 
     def _violations(self, body: str):
-        return lint.lint_file(_write(self.tmp, body))
+        path = _write(self.tmp, body)
+        data = yaml.safe_load(pathlib.Path(path).read_text())
+        found = [lint.lint_idle_quantile(path, r) for r in data.get("rules") or []]
+        return [v for v in found if v is not None]
 
     def test_unguarded_quantile_is_violation(self):
         body = """
@@ -581,6 +591,242 @@ rules:
     threshold: 0
 """
         self.assertEqual(len(self._violations(body)), 1)
+
+
+class HistogramRangeGuard(unittest.TestCase):
+    """Check 4: a threshold outside the histogram's representable range makes a
+    rule structurally inert - it cannot fire on any input, ever, and every alert
+    file's default_no_data_state: "OK" means it never goes stale either
+    (tatara-observability#111)."""
+
+    BOUNDS = {
+        "operator_turn_submit_duration_seconds": 25.6,
+        "lightrag_call_duration_seconds": 10.0,
+    }
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = pathlib.Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _violations(self, body: str):
+        return lint.lint_file(_write(self.tmp, body), bounds=self.BOUNDS)
+
+    def _rule(self, family: str, operator: str, threshold, decimal_points=None,
+              annotations: str = "") -> str:
+        dp = f"    decimal_points: {decimal_points}\n" if decimal_points is not None else ""
+        return f"""
+rules:
+  - name: "p95 rule"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate({family}_bucket{{namespace="tatara"}}[15m])) by (le)) and on() (sum(rate({family}_count{{namespace="tatara"}}[15m])) > 0)
+    math_operator: "{operator}"
+    threshold: {threshold}
+{dp}{annotations}"""
+
+    def test_threshold_above_the_ceiling_is_violation(self):
+        v = self._violations(
+            self._rule("operator_turn_submit_duration_seconds", ">", 30, 1)
+        )
+        self.assertEqual(len(v), 1)
+        self.assertEqual(v[0].rule, "p95 rule")
+        self.assertIn("25.6", v[0].message)
+
+    def test_threshold_below_the_ceiling_passes(self):
+        self.assertEqual(
+            self._violations(
+                self._rule("operator_turn_submit_duration_seconds", ">", 6.4, 1)
+            ),
+            [],
+        )
+
+    def test_gt_exactly_at_the_ceiling_is_violation(self):
+        # The max return value IS the top finite bound, so `> 25.6` is exactly as
+        # inert as `> 30`: the predicate is strict.
+        self.assertEqual(
+            len(
+                self._violations(
+                    self._rule("operator_turn_submit_duration_seconds", ">", 25.6, 1)
+                )
+            ),
+            1,
+        )
+
+    def test_gte_exactly_at_the_ceiling_passes(self):
+        self.assertEqual(
+            self._violations(
+                self._rule("operator_turn_submit_duration_seconds", ">=", 25.6, 1)
+            ),
+            [],
+        )
+
+    def test_rounding_can_rescue_a_threshold_above_the_raw_ceiling(self):
+        # decimal_points: 0 makes the reduce step round 25.6 UP to 26, so `> 25.9`
+        # is reachable. A check that ignored decimal_points would false-positive a
+        # legal rule (pre-mortem 4).
+        self.assertEqual(
+            self._violations(
+                self._rule("operator_turn_submit_duration_seconds", ">", 25.9, 0)
+            ),
+            [],
+        )
+
+    def test_lt_at_a_positive_threshold_passes(self):
+        # Classic histogram_quantile interpolates the LOWEST bucket from 0, not
+        # from its lower bound, so any positive threshold is reachable from below.
+        self.assertEqual(
+            self._violations(
+                self._rule("operator_turn_submit_duration_seconds", "<", 0.01, 2)
+            ),
+            [],
+        )
+
+    def test_lt_zero_is_violation(self):
+        self.assertEqual(
+            len(
+                self._violations(
+                    self._rule("operator_turn_submit_duration_seconds", "<", 0, 2)
+                )
+            ),
+            1,
+        )
+
+    def test_lte_zero_passes(self):
+        # histogram_quantile(0, ...) returns exactly 0, so `<= 0` is reachable.
+        self.assertEqual(
+            self._violations(
+                self._rule("operator_turn_submit_duration_seconds", "<=", 0, 2)
+            ),
+            [],
+        )
+
+    def test_unknown_family_is_violation(self):
+        # A family with no bucket-ceiling entry is a hard FAIL, not a skip: a
+        # silently-skipped unknown family is the same bypass the guard exists to
+        # close (pre-mortem 5).
+        v = self._violations(self._rule("some_new_duration_seconds", ">", 5, 1))
+        self.assertEqual(len(v), 1)
+        self.assertIn("histogram_bounds.txt", v[0].message)
+
+    def test_justify_annotation_passes(self):
+        self.assertEqual(
+            self._violations(
+                self._rule(
+                    "operator_turn_submit_duration_seconds",
+                    ">",
+                    30,
+                    1,
+                    annotations=(
+                        "    annotations:\n"
+                        "      tatara_histogram_range: \"native histograms are enabled for this family upstream\"\n"
+                    ),
+                )
+            ),
+            [],
+        )
+
+    def test_empty_justify_annotation_is_violation(self):
+        self.assertEqual(
+            len(
+                self._violations(
+                    self._rule(
+                        "operator_turn_submit_duration_seconds",
+                        ">",
+                        30,
+                        1,
+                        annotations=(
+                            "    annotations:\n"
+                            "      tatara_histogram_range: \"   \"\n"
+                        ),
+                    )
+                )
+            ),
+            1,
+        )
+
+    def test_default_decimal_points_is_two(self):
+        # variables.tf declares decimal_points = optional(number, 2); an omitted
+        # key must not be read as 0 (which would round the ceiling up to 26).
+        self.assertEqual(
+            len(
+                self._violations(
+                    self._rule("operator_turn_submit_duration_seconds", ">", 25.9)
+                )
+            ),
+            1,
+        )
+
+    def test_default_math_operator_is_gt(self):
+        body = """
+rules:
+  - name: "no math_operator"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(operator_turn_submit_duration_seconds_bucket[15m])) by (le)) and on() (sum(rate(operator_turn_submit_duration_seconds_count[15m])) > 0)
+    threshold: 30
+    decimal_points: 1
+"""
+        self.assertEqual(len(self._violations(body)), 1)
+
+    def test_multiple_quantile_calls_each_checked(self):
+        # The first family's ceiling clears 12; the second's (10) does not.
+        body = """
+rules:
+  - name: "two quantiles, one unreachable"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, sum(rate(operator_turn_submit_duration_seconds_bucket[15m])) by (le)) and on() (sum(rate(operator_turn_submit_duration_seconds_count[15m])) > 0) > histogram_quantile(0.95, sum(rate(lightrag_call_duration_seconds_bucket[15m])) by (le)) and on() (sum(rate(lightrag_call_duration_seconds_count[15m])) > 0)
+    math_operator: ">"
+    threshold: 12
+    decimal_points: 1
+"""
+        v = self._violations(body)
+        self.assertEqual(len(v), 1)
+        self.assertIn("lightrag_call_duration_seconds", v[0].message)
+
+    def test_non_quantile_rule_ignored(self):
+        body = """
+rules:
+  - name: "plain rate rule"
+    queries:
+      - expression: |
+          sum(rate(operator_reconcile_total{result="error"}[10m]))
+    math_operator: ">"
+    threshold: 900000
+"""
+        self.assertEqual(self._violations(body), [])
+
+    def test_unidentifiable_bucket_family_is_violation(self):
+        # No <family>_bucket selector at all: no ceiling can be looked up, so the
+        # range cannot be verified. Fails closed (Check 2 also flags this shape).
+        body = """
+rules:
+  - name: "recording rule input"
+    queries:
+      - expression: |
+          histogram_quantile(0.95, some_recording_rule{namespace="tatara"})
+    math_operator: ">"
+    threshold: 30
+    annotations:
+      tatara_idle_quantile: "pre-aggregated upstream, never idle"
+"""
+        v = self._violations(body)
+        self.assertEqual(len(v), 1)
+        self.assertEqual(v[0].rule, "recording rule input")
+
+
+class HistogramBoundsFile(unittest.TestCase):
+    """The committed scripts/histogram_bounds.txt must parse, and must carry an
+    entry for every family the live alert files run a quantile over."""
+
+    def test_committed_bounds_file_parses(self):
+        bounds = lint.load_histogram_bounds()
+        self.assertIn("operator_turn_submit_duration_seconds", bounds)
+        self.assertEqual(bounds["operator_turn_submit_duration_seconds"], 25.6)
+        self.assertEqual(bounds["lightrag_call_duration_seconds"], 10.0)
 
 
 class RealAlertFilesPass(unittest.TestCase):

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Reconcile scripts/metrics_allowlist.txt against what the producer repos
-actually emit - the reverse-drift gate issue #57 closes.
+"""Reconcile scripts/metrics_allowlist.txt and scripts/histogram_bounds.txt
+against what the producer repos actually emit - the reverse-drift gate issue #57
+closes, extended in #111 to the bucket ceilings.
 
 check_metric_provenance.py only catches ONE direction: an alert or dashboard
 panel that selects a metric not on the allowlist (see that file's docstring).
@@ -49,13 +50,24 @@ repos by design and must never be diffed:
     future OTel collector deploy (see alerts/tatara-usage-gate.yaml, rule
     "... - PENDING OTel deployment"), never from these repos' Go source.
 
+BUCKET CEILINGS (#111). The same clones also validate scripts/histogram_bounds.txt,
+which feeds lint_alert_rules.py Check 4 (a threshold outside the range a
+histogram_quantile can return makes a rule structurally inert). That file is a
+hand-transcribed copy of a number owned by another repo - the same drift class as
+the allowlist - so every bound is re-derived from the producer's own `Buckets:`
+expression and a MISMATCH IS A HARD FAIL. This direction is failed, unlike the
+`new` direction above, because a ceiling that lags a widened producer histogram
+makes the linter reject a threshold that has become legal. See derive_bucket_bounds
+and reconcile_bounds.
+
 Run: python3 scripts/reconcile_metric_provenance.py
-Exit 0 = clean (including "all repos skipped"), 1 = stale allowlist entr(y/ies)
-found, 2 = usage/parse error.
+Exit 0 = clean (including "all repos skipped"), 1 = stale allowlist entr(y/ies) or
+drifted bucket ceiling(s) found, 2 = usage/parse error.
 """
 
 from __future__ import annotations
 
+import math
 import pathlib
 import re
 import subprocess
@@ -127,6 +139,163 @@ def derive_metric_names(repo_dir: pathlib.Path) -> set[str]:
             if m:
                 names.add(m.group(1))
     return names
+
+
+# --- histogram bucket ceilings (tatara-observability#111) -------------------
+#
+# scripts/histogram_bounds.txt feeds lint_alert_rules.py Check 4, which rejects an
+# alert thresholding a histogram_quantile() outside the range that quantile can
+# return. That file is a hand-transcribed copy of a number owned by another repo -
+# exactly the drift class that made metrics_allowlist.txt stale in #57 - and it
+# fails in the WORST direction: a ceiling that lags a widened producer histogram
+# makes the linter reject a threshold that has become legal, which is a red build
+# on a correct rule, which is how a check gets weakened to a warning. So every
+# bound is re-derived here from the producer's own source and a mismatch is a HARD
+# FAIL, unlike the informational forward direction above.
+#
+# Underivable is NOT a failure and never a guess: a `Buckets:` field behind a named
+# package-level variable (tatara-memory's analyticsDurationBuckets /
+# requestDurationBuckets) or absent entirely is reported and moved past.
+_HISTOGRAM_CTOR = re.compile(
+    r"prometheus\.NewHistogram(?:Vec)?\(|promauto\.\w+\.NewHistogram(?:Vec)?\("
+)
+_GO_NUMBER = r"[0-9][0-9_]*(?:\.[0-9_]+)?(?:[eE][-+]?[0-9]+)?"
+_EXPONENTIAL_BUCKETS = re.compile(
+    rf"ExponentialBuckets\(\s*({_GO_NUMBER})\s*,\s*({_GO_NUMBER})\s*,\s*({_GO_NUMBER})\s*\)"
+)
+_LINEAR_BUCKETS = re.compile(
+    rf"LinearBuckets\(\s*({_GO_NUMBER})\s*,\s*({_GO_NUMBER})\s*,\s*({_GO_NUMBER})\s*\)"
+)
+_DEF_BUCKETS = re.compile(r"prometheus\.DefBuckets\b")
+_LITERAL_BUCKETS = re.compile(r"\[\]float64\{([^}]*)\}")
+_BUCKETS_FIELD = re.compile(r"\bBuckets:\s*(\S)")
+# prometheus.DefBuckets = {.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10}.
+_DEF_BUCKETS_TOP = 10.0
+# How many lines after a histogram constructor to look for its Buckets field. Wider
+# than _WINDOW because Help strings push Buckets further down, and truncated at the
+# next constructor so one declaration never adopts the next one's ladder.
+_BUCKET_WINDOW = 12
+
+
+def _go_float(text: str) -> float:
+    return float(text.replace("_", ""))
+
+
+def _top_finite_bound(window: str) -> float | None:
+    """The largest finite bucket bound the `Buckets:` expression in window
+    declares, or None if the expression is not one this parser derives."""
+    if not _BUCKETS_FIELD.search(window):
+        return None
+    m = _EXPONENTIAL_BUCKETS.search(window)
+    if m:
+        start, factor, count = (_go_float(g) for g in m.groups())
+        return start * factor ** (int(count) - 1)
+    m = _LINEAR_BUCKETS.search(window)
+    if m:
+        start, width, count = (_go_float(g) for g in m.groups())
+        return start + width * (int(count) - 1)
+    m = _LITERAL_BUCKETS.search(window)
+    if m:
+        values = [v.strip() for v in m.group(1).split(",") if v.strip()]
+        try:
+            return max(_go_float(v) for v in values)
+        except ValueError:
+            return None
+    if _DEF_BUCKETS.search(window):
+        return _DEF_BUCKETS_TOP
+    return None
+
+
+def derive_bucket_bounds(repo_dir: pathlib.Path) -> dict[str, float]:
+    """{metric family: top finite bucket bound} for every histogram under
+    repo_dir whose Buckets expression this parser can evaluate."""
+    bounds: dict[str, float] = {}
+    for path in sorted(repo_dir.rglob("*.go")):
+        if path.name.endswith("_test.go"):
+            continue
+        try:
+            lines = path.read_text(errors="ignore").splitlines()
+        except OSError:
+            continue
+        for i, line in enumerate(lines):
+            if not _HISTOGRAM_CTOR.search(line):
+                continue
+            end = i + _BUCKET_WINDOW
+            for j in range(i + 1, min(end, len(lines))):
+                if _CTOR.search(lines[j]):
+                    end = j
+                    break
+            window = "\n".join(lines[i:end])
+            name = _NAME_FIELD.search(window)
+            if not name:
+                continue
+            top = _top_finite_bound(window)
+            if top is not None:
+                bounds[name.group(1)] = top
+    return bounds
+
+
+_BOUNDS_ENTRY = re.compile(r"^([a-z][a-z0-9_]*)\s+([-+0-9.eE]+)$")
+
+
+def parse_histogram_bounds(path: pathlib.Path) -> dict[str, tuple[str, float]]:
+    """{family: (section_key, top finite bound)} from histogram_bounds.txt. Same
+    `# --- <section> ---` routing as parse_allowlist_sections."""
+    out: dict[str, tuple[str, float]] = {}
+    current: str | None = None
+    for line in path.read_text().splitlines():
+        stripped = line.strip()
+        header = _SECTION_HEADER.match(stripped)
+        if header:
+            current = section_key(header.group(1))
+            continue
+        if not stripped or stripped.startswith("#") or current is None:
+            continue
+        m = _BOUNDS_ENTRY.match(stripped)
+        if m:
+            out[m.group(1)] = (current, float(m.group(2)))
+    return out
+
+
+def reconcile_bounds(
+    entries: dict[str, tuple[str, float]], repo_dirs: dict[str, pathlib.Path]
+) -> tuple[dict[str, dict[str, tuple[float, float]]], dict[str, dict[str, float]], set[str], set[str]]:
+    """Diff histogram_bounds.txt against each producer's derived ceilings.
+
+    Returns (mismatched, missing, unvalidatable, skipped):
+      mismatched[repo][family] = (file bound, derived bound) - HARD FAIL.
+      missing[repo][family]    = derived bound for a histogram the file omits
+                                 (informational, same direction as `new` above).
+      unvalidatable            = families in the file whose ceiling no clone could
+                                 derive (named-var buckets) - reported, never failed.
+      skipped                  = repos whose clone failed.
+    """
+    by_repo: dict[str, dict[str, float]] = {}
+    for family, (section, bound) in entries.items():
+        repo = SECTION_REPO.get(section)
+        if repo is None:
+            continue  # exempt section - never diffed
+        by_repo.setdefault(repo, {})[family] = bound
+
+    mismatched: dict[str, dict[str, tuple[float, float]]] = {}
+    missing: dict[str, dict[str, float]] = {}
+    unvalidatable: set[str] = set()
+    skipped: set[str] = set()
+    for repo, filed in by_repo.items():
+        repo_dir = repo_dirs.get(repo)
+        if repo_dir is None:
+            skipped.add(repo)
+            continue
+        derived = derive_bucket_bounds(repo_dir)
+        for family, bound in filed.items():
+            if family not in derived:
+                unvalidatable.add(family)
+            elif not math.isclose(bound, derived[family], rel_tol=1e-6):
+                mismatched.setdefault(repo, {})[family] = (bound, derived[family])
+        absent = {f: b for f, b in derived.items() if f not in filed}
+        if absent:
+            missing[repo] = absent
+    return mismatched, missing, unvalidatable, skipped
 
 
 def section_key(header_text: str) -> str | None:
@@ -233,12 +402,51 @@ def _root() -> pathlib.Path:
 
 
 def _write_summary(
-    stale: dict[str, set[str]], new: dict[str, set[str]], skipped: set[str]
+    stale: dict[str, set[str]],
+    new: dict[str, set[str]],
+    skipped: set[str],
+    mismatched: dict[str, dict[str, tuple[float, float]]],
+    missing: dict[str, dict[str, float]],
+    unvalidatable: set[str],
 ) -> None:
     import os
 
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     lines = ["## Metric provenance reconciliation", ""]
+    if mismatched:
+        lines.append(
+            "### DRIFTED - histogram_bounds.txt disagrees with the producer's source (must fix)"
+        )
+        lines.append("")
+        for repo, families in sorted(mismatched.items()):
+            lines.append(f"**{repo}**")
+            for family, (filed, derived) in sorted(families.items()):
+                lines.append(
+                    f"- `{family}`: `scripts/histogram_bounds.txt` says {filed:g}, "
+                    f"the producer's buckets top out at {derived:g}. Update the file - "
+                    "a stale ceiling makes lint_alert_rules.py Check 4 reject a "
+                    "threshold that is now legal."
+                )
+        lines.append("")
+    if missing:
+        lines.append(
+            "### Histograms with no bucket-ceiling entry (informational only)"
+        )
+        lines.append("")
+        for repo, families in sorted(missing.items()):
+            lines.append(
+                f"**{repo}**: "
+                + ", ".join(f"`{f}` ({b:g})" for f, b in sorted(families.items()))
+            )
+        lines.append("")
+    if unvalidatable:
+        lines.append(
+            "### Unvalidatable bucket ceilings (reported, never failed): "
+            + ", ".join(f"`{f}`" for f in sorted(unvalidatable))
+            + " - the producer's `Buckets:` is a named variable or absent, so the "
+            "committed bound cannot be re-derived. Verify it by hand."
+        )
+        lines.append("")
     if stale:
         lines.append(
             "### STALE - allowlist entries no producer repo still emits (must fix)"
@@ -265,9 +473,10 @@ def _write_summary(
             + ", ".join(sorted(skipped))
         )
         lines.append("")
-    if not stale and not new and not skipped:
+    if not any((stale, new, skipped, mismatched, missing, unvalidatable)):
         lines.append(
-            "OK: every reconcilable allowlist section matches its producer repo."
+            "OK: every reconcilable allowlist section matches its producer repo, "
+            "and every histogram bucket ceiling matches its producer's source."
         )
     text = "\n".join(lines) + "\n"
     print(text)
@@ -279,8 +488,10 @@ def _write_summary(
 def main(argv: list[str]) -> int:
     del argv
     allowlist_path = _root() / "scripts" / "metrics_allowlist.txt"
+    bounds_path = _root() / "scripts" / "histogram_bounds.txt"
     try:
         entries = parse_allowlist_sections(allowlist_path)
+        bounds_entries = parse_histogram_bounds(bounds_path)
     except OSError as exc:
         print(f"reconcile_metric_provenance: {exc}", file=sys.stderr)
         return 2
@@ -294,8 +505,11 @@ def main(argv: list[str]) -> int:
                 repo_dirs[name] = dest
 
         stale, new, skipped = reconcile(entries, repo_dirs)
+        mismatched, missing, unvalidatable, _ = reconcile_bounds(
+            bounds_entries, repo_dirs
+        )
 
-    _write_summary(stale, new, skipped)
+    _write_summary(stale, new, skipped, mismatched, missing, unvalidatable)
 
     if stale:
         total = sum(len(v) for v in stale.values())
@@ -306,7 +520,19 @@ def main(argv: list[str]) -> int:
         )
         return 1
 
-    print("OK: no stale allowlist entries against the repos that cloned successfully.")
+    if mismatched:
+        total = sum(len(v) for v in mismatched.values())
+        print(
+            f"FAIL: {total} histogram bucket ceiling(s) in scripts/histogram_bounds.txt "
+            "disagree with their producer's source. See the job summary above.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(
+        "OK: no stale allowlist entries and no drifted bucket ceilings against the "
+        "repos that cloned successfully."
+    )
     return 0
 
 

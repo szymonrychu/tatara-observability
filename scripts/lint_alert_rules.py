@@ -27,6 +27,7 @@ Exit 0 = clean, exit 1 = violations found, exit 2 = usage/parse error.
 from __future__ import annotations
 
 import glob
+import math
 import pathlib
 import re
 import sys
@@ -174,6 +175,12 @@ def lint_fabricated_zero(path: str, rule: dict) -> Violation | None:
 # "Operator turn submit p95 latency high":
 #   histogram_quantile(0.95, ...) and on() (sum(rate(<metric>_count[w])) > 0)
 #
+# BEING IDLE-GUARDED IS NOT ENOUGH ON ITS OWN. Until #111 that same rule was the
+# reference example while thresholding at `> 30` over a histogram topping out at
+# 25.6 - correctly guarded against the idle NaN and still unable to fire on any
+# input, ever. A compliant quantile rule must clear Check 4 below as well; the two
+# checks close different halves of the same silent-green failure.
+#
 # The guard must be tied to the SAME metric family as the histogrammed
 # `<family>_bucket` selector inside the histogram_quantile( call - a `_count`
 # reference on an unrelated family elsewhere in the expression does not prove
@@ -254,6 +261,151 @@ def lint_idle_quantile(path: str, rule: dict) -> Violation | None:
     return None
 
 
+# --- Check 4: threshold outside the histogram's representable range ----------
+#
+# Classic histogram_quantile() returns AT MOST the top finite bucket bound: a
+# quantile landing in the +Inf bucket yields that bound, never anything above it.
+# A rule thresholding `> ceiling` therefore cannot fire on any input, ever - and
+# because every alert file sets default_no_data_state: "OK" and grafana.tf sets
+# default_exec_err_state = "OK", it does not go stale and does not error either.
+# It reports OK forever, which is the same silent-green class as an alert on a
+# metric nobody emits, one level further down (tatara-observability#111: two p95
+# rules at `> 30` over 25.6s and 10s ceilings).
+#
+# THE REACHABLE SET IS [0, top finite bound], NOT [lowest bound, top bound].
+# Prometheus's bucketQuantile interpolates the LOWEST bucket from 0, not from its
+# own lower bound (`bucketStart` stays 0 when b == 0), and histogram_quantile(0, ...)
+# returns exactly 0. So a `<` rule is inert only at threshold <= 0 - it is NOT
+# inert below the smallest bucket bound, which is what tatara-observability#111's
+# pre-mortem 1 assumed.
+#
+# decimal_points is applied FIRST: modules/grafana_alert/main.tf:207 inserts a
+# `round($C * 10^d) / 10^d` reduce step ahead of the threshold compare, so the
+# ceiling the compare actually sees is the rounded one. Rounding only ever widens
+# the ceiling upward (round(25.6) at 0dp is 26), so ignoring it would reject a
+# legal `> 25.9 @ 0dp` rule. Grafana's round() is Go math.Round (half away from
+# zero), which is NOT Python's banker's rounding - hence the explicit floor(x+0.5).
+#
+# A family with no entry in histogram_bounds.txt is a hard FAIL, not a skip: this
+# check exists to make the NEXT quantile rule safe, and a silently-skipped unknown
+# family is the same bypass the check is here to close.
+_BOUNDS_ENTRY = re.compile(r"^(?P<family>[a-z][a-z0-9_]*)\s+(?P<bound>[-+0-9.eE]+)$")
+HISTOGRAM_RANGE_ANNOTATION_KEY = "tatara_histogram_range"
+
+
+def _bounds_path() -> pathlib.Path:
+    return pathlib.Path(__file__).resolve().parent / "histogram_bounds.txt"
+
+
+def load_histogram_bounds(path: pathlib.Path | None = None) -> dict[str, float]:
+    """{metric family: top finite bucket bound} from histogram_bounds.txt.
+
+    Comment and blank lines (including the `# --- <section> ---` headers, which
+    only reconcile_metric_provenance.py routes on) are skipped.
+    """
+    out: dict[str, float] = {}
+    for line in (path or _bounds_path()).read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        m = _BOUNDS_ENTRY.match(stripped)
+        if m:
+            out[m.group("family")] = float(m.group("bound"))
+    return out
+
+
+def _rounded(value: float, decimal_points: int) -> float:
+    """value through main.tf's `round($C * 10^d) / 10^d` reduce step, with Go's
+    math.Round semantics (half away from zero) rather than Python's banker's."""
+    scale = 10**decimal_points
+    scaled = value * scale
+    return (
+        math.floor(scaled + 0.5) / scale
+        if scaled >= 0
+        else -math.floor(-scaled + 0.5) / scale
+    )
+
+
+def _threshold_reachable(ceiling: float, threshold: float, operator: str) -> bool:
+    """Can the post-reduce quantile, whose range is [0, ceiling], satisfy
+    `value <operator> threshold` for any input?"""
+    if operator == ">":
+        return ceiling > threshold
+    if operator == ">=":
+        return ceiling >= threshold
+    if operator == "<":
+        return threshold > 0
+    if operator == "<=":
+        return threshold >= 0
+    return True  # an operator this check does not model is not judged
+
+
+def lint_histogram_range(
+    path: str, rule: dict, bounds: dict[str, float]
+) -> Violation | None:
+    joined = _joined_expressions(rule)
+    families = _quantile_call_families(joined)
+    if not families:
+        return None
+    annotations = rule.get("annotations") or {}
+    if str(annotations.get(HISTOGRAM_RANGE_ANNOTATION_KEY, "")).strip():
+        return None
+    name = rule.get("name", "<unnamed>")
+    operator = str(rule.get("math_operator", ">")).strip()
+    try:
+        threshold = float(rule.get("threshold"))
+        decimal_points = int(rule.get("decimal_points", 2))
+    except (TypeError, ValueError):
+        return None  # check_alert_schema.py owns malformed keys
+    for family in families:
+        if family is None:
+            return Violation(
+                path,
+                name,
+                "uses histogram_quantile() with no identifiable `<metric>_bucket` "
+                "selector in its own arguments, so the range its threshold is "
+                "compared against cannot be verified: a threshold outside the "
+                "reachable range makes the rule structurally inert and it reports "
+                "OK forever. Use a recognisable `<metric>_bucket` selector, or set "
+                f"a non-empty `{HISTOGRAM_RANGE_ANNOTATION_KEY}` annotation. "
+                "See CONVENTIONS.md.",
+            )
+        if family not in bounds:
+            return Violation(
+                path,
+                name,
+                f"runs histogram_quantile() over `{family}_bucket`, which has no "
+                "bucket-ceiling entry in `scripts/histogram_bounds.txt`, so its "
+                "threshold cannot be range-checked. Add `<family> <top finite "
+                "bucket bound>` there (reconcile_metric_provenance.py validates it "
+                "against the producer's Go source), or set a non-empty "
+                f"`{HISTOGRAM_RANGE_ANNOTATION_KEY}` annotation. See CONVENTIONS.md.",
+            )
+        ceiling = _rounded(bounds[family], decimal_points)
+        if _threshold_reachable(ceiling, threshold, operator):
+            continue
+        return Violation(
+            path,
+            name,
+            f"compares a histogram_quantile() over `{family}_bucket` against "
+            f"`{operator} {threshold:g}`, which that quantile can never satisfy: "
+            f"classic histogram_quantile returns at most the top finite bucket "
+            f"bound, {bounds[family]:g}"
+            + (
+                f" ({ceiling:g} after the decimal_points: {decimal_points} reduce step)"
+                if ceiling != bounds[family]
+                else ""
+            )
+            + ", and interpolates the lowest bucket from 0, so its range is "
+            f"[0, {ceiling:g}]. The rule is structurally inert - it cannot fire on "
+            "any input, and default_no_data_state: \"OK\" means it never goes stale "
+            "either. Move the threshold inside the range, widen the producer's "
+            f"buckets, or set a non-empty `{HISTOGRAM_RANGE_ANNOTATION_KEY}` "
+            "annotation. See CONVENTIONS.md.",
+        )
+    return None
+
+
 # --- Check 3: self-firing rule ----------------------------------------------
 #
 # exec_err_state: Alerting makes a rule page on its OWN query failure - a timed-out
@@ -307,7 +459,9 @@ def lint_rule_exec_err_state(path: str, rule: dict) -> Violation | None:
     )
 
 
-def lint_file(path: str) -> list[Violation]:
+def lint_file(path: str, bounds: dict[str, float] | None = None) -> list[Violation]:
+    if bounds is None:
+        bounds = load_histogram_bounds()
     data = yaml.safe_load(pathlib.Path(path).read_text())
     if not data or not isinstance(data, dict):
         return []
@@ -320,6 +474,9 @@ def lint_file(path: str) -> list[Violation]:
             v = check(path, rule)
             if v is not None:
                 out.append(v)
+        v = lint_histogram_range(path, rule, bounds)
+        if v is not None:
+            out.append(v)
         v = lint_rule_exec_err_state(path, rule)
         if v is not None:
             out.append(v)
@@ -327,9 +484,10 @@ def lint_file(path: str) -> list[Violation]:
 
 
 def lint_paths(paths: list[str]) -> list[Violation]:
+    bounds = load_histogram_bounds()
     out = []
     for p in paths:
-        out.extend(lint_file(p))
+        out.extend(lint_file(p, bounds))
     return out
 
 

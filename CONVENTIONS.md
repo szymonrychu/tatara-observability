@@ -114,6 +114,10 @@ When you add or change instrumentation or an alert, before opening the PR:
   separates transient from error (pattern 3) and alert only on the error value.
 - Adding a quantile/latency alert: guard against idle NaN, e.g.
   `... and on() (sum(rate(<metric>_count[w])) > 0)`. This is linted - see 6.2.
+  Then check the threshold is inside the range the quantile can actually return:
+  a threshold above the histogram's top finite bucket bound can never be crossed
+  and the rule reports OK forever. Also linted, against
+  `scripts/histogram_bounds.txt` - see 6.4.
 
 ## 5. The CI provenance check: no alert AND NO PANEL on a metric nobody emits
 
@@ -228,10 +232,11 @@ python3 scripts/check_label_provenance.py   # needs network: clones the 4 produc
 
 ## 6. Structural alert-shape checks
 
-`scripts/lint_alert_rules.py` enforces three more conventions beyond section 3's
-filter-or-justify. All three are deterministic from rule text alone, so they have
-no false failures. Each is justify-able with a named annotation, so a deliberate
-exception is greppable rather than remembered.
+`scripts/lint_alert_rules.py` enforces four more conventions beyond section 3's
+filter-or-justify. All four are deterministic from rule text alone (6.4 also reads
+a committed provenance file, itself validated against producer source), so they
+have no false failures. Each is justify-able with a named annotation, so a
+deliberate exception is greppable rather than remembered.
 
 ### 6.1 No fabricated zero on a foreign exporter's metric
 
@@ -334,6 +339,55 @@ declare, so the key never reaches Grafana and never appears in a plan.
 `alerts/tatara-logs.yaml` carries the live example. That same silent drop is a
 trap everywhere else - see section 7 - so this key is one of the few explicit
 exemptions in `scripts/check_alert_schema.py`'s `LINT_ONLY_KEYS`.
+
+### 6.4 A quantile threshold must be inside the range the quantile can return
+
+Classic `histogram_quantile` returns **at most the top finite bucket bound** - a
+quantile landing in the `+Inf` bucket yields that bound, never anything above it.
+A rule thresholding above that ceiling cannot fire on any input, ever. It does not
+go stale and it does not error either, because every alert file sets
+`default_no_data_state: "OK"` and `grafana.tf` sets `default_exec_err_state = "OK"`.
+It reports OK forever.
+
+This is tatara-observability#111, and it is the same silent-green class as section
+5 (an alert on a metric nobody emits) and 5.1's label dimension, one level further
+down: there, the rule watched a series that did not exist; here, the series exists
+and the comparison is the thing that cannot be satisfied. Two rules shipped this
+way - `> 30` over a 25.6s ceiling and `> 30` over a 10s ceiling - and one of them
+was cited in this file, and in the linter, as the reference example of a compliant
+quantile rule. **Being correctly idle-guarded (6.2) says nothing about being
+reachable.**
+
+The reachable set is `[0, top finite bound]`, NOT `[lowest bound, top bound]`:
+Prometheus's `bucketQuantile` interpolates the lowest bucket from 0 rather than
+from its own lower bound, and `histogram_quantile(0, ...)` returns exactly 0. So a
+`<` rule is inert only at a threshold `<= 0`, not below the smallest bucket.
+
+`decimal_points` is applied first. `modules/grafana_alert/main.tf` inserts a
+`round($C * 10^d) / 10^d` reduce step ahead of the threshold compare, so the
+ceiling the compare sees is the rounded one - rounding only ever widens it upward,
+which makes `> 25.9` at `decimal_points: 0` legal over a 25.6 ceiling. The check
+applies the same rounding rather than rejecting it.
+
+Ceilings live in `scripts/histogram_bounds.txt`, one `<family> <top finite bound>`
+per line under a `# --- <section> ---` header, in the shape of
+`metrics_allowlist.txt`. **A family with no entry there is a hard failure, not a
+skip** - the check exists to make the NEXT quantile rule safe, and a silently
+skipped unknown family is the bypass it was written to close.
+
+That file is a hand-transcribed copy of a number owned by another repo, which is
+exactly how `metrics_allowlist.txt` went stale in #57, and it fails in the worse
+direction: a ceiling that lags a widened producer histogram makes this check reject
+a threshold that has become legal - a red build on a correct rule, which is how a
+check gets weakened to a warning. So it is validated, not trusted:
+`scripts/reconcile_metric_provenance.py` re-derives every bound from the producer's
+own `Buckets:` expression on each run and hard-fails on a mismatch. A `Buckets:`
+behind a named package-level variable is reported as unvalidatable and never
+guessed.
+
+To keep a threshold outside the derived range, set a non-empty
+`tatara_histogram_range` annotation saying why it is nonetheless reachable (native
+histograms enabled upstream for that family, a producer change in flight, etc.).
 
 ## 7. The CI schema check: an undeclared key is silently discarded
 

@@ -1173,3 +1173,46 @@ PR/push triggers.
   cannot distinguish the two. `operator_live_entry_declined_total` is the one with live data
   (~85/week, all `not-a-live-state`; `live-ceiling-full` has been flat 0 over 7d, so rule 3 is
   measuring from a genuine zero baseline).
+- 2026-08-16 (#111): **The silent-green class, level 3: the COMPARISON, not the selector.** Every
+  guard this repo has built - `check_metric_provenance.py` (name), `stage_values_allowlist.txt`
+  (label value), `check_label_provenance.py` (label name) - validates the SELECTOR. Two p95 rules
+  had a perfect selector on a live metric with every label present and were still mathematically
+  unable to fire: `histogram_quantile` returns AT MOST the top finite bucket bound, and both
+  thresholded `> 30` over ceilings of 25.6 (`operator_turn_submit_duration_seconds`,
+  `ExponentialBuckets(0.05, 2, 10)`) and 10 (`lightrag_call_duration_seconds`, `DefBuckets`). With
+  `default_no_data_state: "OK"` and `default_exec_err_state = "OK"` they never went stale and never
+  errored - green because they could not be anything else. The operator one had been `planned` in
+  ROADMAP since the 2026-07-12 redesign, and `lint_alert_rules.py` cited it as its reference example
+  of a compliant quantile rule the whole time: **6.2's idle-NaN guard says nothing about
+  reachability, and being the exemplar for one check made it look correct for all of them.**
+- 2026-08-16 (#111): **New thresholds, and what was actually measured.** Operator: 6.4 (a real
+  bucket bound, 8x the observed p95 and 4x under the ceiling). The live 7d p95 is FLAT at 0.78 on
+  every non-NaN sample - all 321.6 observations in `le="0.8"`, zero below `le="0.4"` - so the
+  distribution is degenerate and there is no noise floor to clear; 12.8 was rejected as too
+  insensitive, since a 0.78 -> 5s regression would stay invisible. Memory: 5 (highest `DefBuckets`
+  bound under the 10 ceiling), **armed blind and annotated as such in the rule** -
+  `{__name__=~"lightrag.*"}` returns nothing cluster-wide, so that rule is inert for a SECOND
+  independent reason and only the threshold half is in scope here. Producer histograms were left
+  alone (not widened to keep 30s): nothing in the repo justifies 30, and the real p95 is 0.78.
+- 2026-08-16 (#111): **Two corrections worth keeping.** (1) The reachable set is `[0, top finite
+  bound]`, NOT `[lowest bound, top bound]`: Prometheus `bucketQuantile` sets `bucketStart = 0` when
+  `b == 0`, so it interpolates the lowest bucket from zero and `histogram_quantile(0, ...)` returns
+  exactly 0. A `<` rule is therefore inert only at `threshold <= 0` - the issue's pre-mortem assumed
+  "below the smallest bucket" (0.05) and that would have shipped a wrong predicate. (2)
+  `decimal_points` rounds BEFORE the compare (`modules/grafana_alert/main.tf:207` renders
+  `round($C * 10^d) / 10^d`), and rounding only widens the ceiling upward, so `> 25.9` at
+  `decimal_points: 0` is LEGAL over a 25.6 ceiling. A check ignoring it would red-build a correct
+  rule. Grafana's `round()` is Go `math.Round` (half away from zero), not Python's banker's
+  rounding - hence the explicit `floor(x + 0.5)`.
+- 2026-08-16 (#111): **The guard, and why the file is validated rather than trusted.**
+  `lint_alert_rules.py` Check 4 + `scripts/histogram_bounds.txt` (23 families, the full derivable
+  set across all four producers - not just the two in use, so the NEXT rule is covered). An unknown
+  family is a HARD FAIL, not a skip: a silently-skipped family is the same bypass the check exists
+  to close. But a hand-transcribed ceiling is exactly the drift that made `metrics_allowlist.txt`
+  stale in #57, and it fails in the WORSE direction - a lagging ceiling rejects a threshold that has
+  become legal, which is how a check gets weakened to a warning. So
+  `reconcile_metric_provenance.py` re-derives every bound from the producer's own `Buckets:`
+  expression on the clones it already makes, and a mismatch is a hard failure (unlike the
+  informational `new` direction). `Buckets:` behind a named var (`analyticsDurationBuckets`,
+  `requestDurationBuckets`) is reported unvalidatable and NEVER guessed; those two families are
+  deliberately absent from the file rather than filled in from a reading of the var.

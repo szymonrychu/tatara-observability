@@ -1,0 +1,84 @@
+# Histogram bucket-ceiling provenance. scripts/lint_alert_rules.py Check 4 fails CI
+# when an alert thresholds a histogram_quantile() outside the range that quantile can
+# actually return. This exists because two p95 rules compared against `> 30` over
+# histograms topping out at 25.6s and 10s (tatara-observability#111): classic
+# histogram_quantile returns AT MOST the top finite bucket bound, so both rules were
+# mathematically unable to fire on any input, ever - and every alert file sets
+# default_no_data_state: "OK" while grafana.tf sets default_exec_err_state = "OK", so
+# neither went stale and neither errored. They read green because they could not read
+# anything else. That is the same silent-green class as an alert on a metric nobody
+# emits (scripts/metrics_allowlist.txt) and an alert filtering on a label value nobody
+# emits (scripts/stage_values_allowlist.txt), one level further down.
+#
+# FORMAT: `<metric family> <top finite bucket bound>`, one per line, grouped under
+# `# --- <section>: ... ---` headers. The section key is the leading word of the header
+# text and routes to a producer repo through reconcile_metric_provenance.py's
+# SECTION_REPO, exactly as in metrics_allowlist.txt. List the BASE family name (no
+# _bucket/_sum/_count suffix), matching the `<family>_bucket` selector an alert writes.
+#
+# THIS FILE IS VALIDATED, NOT TRUSTED. A hand-transcribed copy of a number that lives in
+# another repo goes stale the day a producer widens its buckets, and a stale ceiling here
+# would block a threshold that has become legal - a red build on a correct rule, which is
+# how a check gets weakened to a warning. So reconcile_metric_provenance.py re-derives
+# every bound below from the producer repo's own Go source on each run and HARD-FAILS on
+# any mismatch. This is the same reverse-drift gate metrics_allowlist.txt got in #57,
+# applied to the bound rather than the name.
+#
+# A family whose `Buckets:` is a named package-level variable is NOT derivable by that
+# reconciler and is deliberately absent below rather than guessed:
+#   - code_graph_analytics_duration_seconds (tatara-memory, analyticsDurationBuckets)
+#   - http_request_duration_seconds         (tatara-memory, requestDurationBuckets)
+# No alert runs a quantile over either today. A rule that starts to will hard-fail Check 4
+# until its bound is added here by hand; add it with a comment naming the var, and the
+# reconciler will report it as unvalidatable rather than failing on it.
+#
+# ExponentialBuckets(start, factor, count) tops out at start * factor^(count-1).
+# LinearBuckets(start, width, count) tops out at start + width*(count-1).
+# prometheus.DefBuckets tops out at 10.
+
+# --- operator: tatara-operator/internal/obs ---
+# ExponentialBuckets(0.05, 2, 10) -> 25.6 (operator_metrics.go, turnSubmitDuration /
+# agentHTTPDuration / toolSurfaceProbeDuration).
+operator_turn_submit_duration_seconds 25.6
+operator_agent_http_duration_seconds 25.6
+operator_tool_surface_probe_duration_seconds 25.6
+# ExponentialBuckets(5, 2, 8) -> 640.
+operator_ingest_job_duration_seconds 640
+operator_turn_duration_seconds 640
+operator_memory_provision_duration_seconds 640
+# ExponentialBuckets(0.005, 2, 10) -> 2.56.
+operator_webhook_duration_seconds 2.56
+# ExponentialBuckets(0.001, 2, 10) -> 0.512.
+operator_restapi_request_duration_seconds 0.512
+# ExponentialBuckets(1024, 2, 12) -> 2097152.
+operator_object_size_bytes 2097152
+# Literal ladders (sweep_metrics.go, bundle_metrics.go).
+operator_tasks_minted_per_sweep 21
+operator_bundle_bytes 800000
+
+# --- wrapper: tatara-claude-code-wrapper/internal/metrics ---
+# ExponentialBuckets(1, 2, 12) -> 2048.
+ccw_turn_duration_seconds 2048
+# ExponentialBuckets(0.5, 2, 12) -> 1024.
+ccw_probe_answer_seconds 1024
+# ExponentialBuckets(0.5, 2, 8) -> 64.
+ccw_bootstrap_duration_seconds 64
+# DefBuckets.
+ccw_http_request_duration_seconds 10
+
+# --- memory: tatara-memory ---
+# DefBuckets (lightrag/metrics.go, codegraph/metrics.go, codegraph/analytics_metrics.go,
+# ingest/metrics.go).
+lightrag_call_duration_seconds 10
+code_graph_query_duration_seconds 10
+code_graph_compute_duration_seconds 10
+ingest_item_duration_seconds 10
+# Literal ladder (httpapi/admission.go).
+http_admission_wait_seconds 30
+
+# --- ingester: tatara-memory-repo-ingester/internal/obs ---
+# DefBuckets.
+ingest_stage_duration_seconds 10
+analyzer_duration_seconds 10
+# Literal ladder.
+code_graph_batch_rows 10000

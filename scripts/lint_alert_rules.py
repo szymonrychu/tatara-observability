@@ -394,7 +394,7 @@ def _threshold_reachable(
 _AND_KEYWORD = re.compile(r"(?<![A-Za-z0-9_:])(?:and|unless)(?![A-Za-z0-9_:])")
 
 
-def _strip_idle_guards(expr: str) -> str:
+def _truncate_at_top_level_and(expr: str) -> str:
     """expr truncated at its first TOP-LEVEL `and`/`unless`.
 
     PromQL's `and` and `unless` are set FILTERS: `A and B` yields A's samples,
@@ -468,7 +468,7 @@ def _normalised_value_expression(expr: str) -> tuple[str, list[float]]:
     constants = [float(m.group(1)) for m in _OR_VECTOR.finditer(stripped)]
     if constants:
         stripped = _strip_wrapping_parens(_OR_VECTOR.sub("", stripped))
-    return _strip_wrapping_parens(_strip_idle_guards(stripped)), constants
+    return _strip_wrapping_parens(_truncate_at_top_level_and(stripped)), constants
 
 
 def _is_bare_quantile(expr: str) -> bool:
@@ -514,9 +514,9 @@ def lint_histogram_range(
         return None
     name = rule.get("name", "<unnamed>")
     # Everything below reads the NORMALISED expression, not the raw one: a
-    # quantile that lives inside an `and on() (...)` idle guard contributes no
-    # value to the threshold comparison, and range-checking its ceiling against
-    # this rule's threshold would fail a correct rule.
+    # quantile on the right of an `and` contributes no value to the threshold
+    # comparison, and range-checking its ceiling against this rule's threshold
+    # would fail a correct rule.
     value_expr, or_vector_constants = _normalised_value_expression(joined)
     if not _HISTOGRAM_QUANTILE.search(value_expr):
         # Every quantile in this rule sits on the right of an `and`/`unless`, so it

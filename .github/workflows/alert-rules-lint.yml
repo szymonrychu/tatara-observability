@@ -34,7 +34,10 @@ name: alert-rules-lint
 # any input, ever. lint_alert_rules.py Check 4 range-checks every quantile threshold
 # against scripts/histogram_bounds.txt, and reconcile_metric_provenance.py re-derives
 # every bound in that file from the producer's own Buckets: expression on the same
-# clones, hard-failing on drift so the ceiling file cannot go stale unnoticed.
+# clones, hard-failing on drift so the ceiling file cannot go stale unnoticed. Check 5
+# does the same for dashboards/*.json: the identical unreachable `30` was painted as a
+# red threshold step on the two panels backing those rules, on a surface with no
+# no_data_state to even mis-configure.
 
 on:
   pull_request:
@@ -106,7 +109,7 @@ jobs:
       - name: linter self-tests
         run: python3 -m unittest discover scripts -p 'test_*.py' -v
 
-      - name: lint alert rules
+      - name: lint alert rules and dashboard panels
         run: python3 scripts/lint_alert_rules.py
 
       # The silent-drop guard. Terraform's object-type conversion DISCARDS any alert key

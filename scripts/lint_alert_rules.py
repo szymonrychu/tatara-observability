@@ -21,6 +21,11 @@ Scope: deterministic, zero false-failures. It only inspects rules that select a
 server-error status on an *http_requests_total family; everything else (the
 operator result=error taxonomy, latency rules, kube-state rules) is ignored.
 
+It also lints dashboards/*.json - see Check 5. That is not a scope slip: the
+unreachable quantile threshold Check 4 exists for was live on both surfaces at once,
+and a panel's red threshold band is the same comparison against the same histogram.
+A .json path is routed to the dashboard checks and a .yaml path to the rule checks.
+
 Exit 0 = clean, exit 1 = violations found, exit 2 = usage/parse error.
 """
 

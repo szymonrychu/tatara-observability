@@ -1268,3 +1268,31 @@ PR/push triggers.
   the same wrong-bound-not-absent class the previous round closed for `//` and `"..."`, just the two
   lexical forms that round missed. `load_histogram_bounds` now also rejects non-finite and inverted
   bounds instead of accepting `foo nan inf`.
+- 2026-08-16 (#111): **Review round 1: the census stopped one surface short.** Check 4 walks
+  `alerts/*.yaml`, and the SAME `30` sat in `dashboards/operator.json` and `dashboards/memory.json`
+  as a red `thresholds.steps` value over the same two histograms, with panel descriptions telling a
+  responder the line mirrored the alert. A Grafana step colours at `value >= step`, so both bands
+  were unreachable; and a panel has no `no_data_state` to even mis-configure. Nothing in CI could
+  have caught it - no script read dashboard `thresholds` at all - which is precisely the "fixed the
+  instances, not the class" outcome pre-mortem 5 named. Check 5 (`lint_dashboard_file`) now
+  range-checks a panel's finite steps against the ceiling of its bare-quantile targets. It is
+  deliberately narrow: a panel needs at least one finite step AND every Prometheus target a bare
+  quantile, because a panel carries no annotations, so there is no per-panel escape hatch and the
+  only safe carve-out is not to check. Only the unreachable direction is failed; a step at or below
+  the floor is a permanently-red band, a different defect.
+- 2026-08-16 (#111): **A silent skip is a bypass even when the skip is correct.** Check 4 skipped a
+  non-bare quantile with no CI signal at all, twenty lines from its own "an unknown family is a hard
+  FAIL, because a silently-skipped family is the same bypass". `histogram_quantile(...) * 1000 >
+  999999` got zero signal. The skip itself is right (different units), but it now requires a
+  non-empty `tatara_histogram_range`, so the set of quantile rules the check does not verify is one
+  grep away rather than an emergent property of a regex. Same round: `_OR_VECTOR`'s `[0-9.]+` missed
+  scientific notation, so `or vector(1e3)` dropped a rule out of the check entirely - a constant the
+  parser cannot read must not silently become a shape the parser cannot classify.
+- 2026-08-16 (#111): **"Cannot re-derive" is two outcomes, not one.** `reconcile_bounds` put every
+  bounds family it could not derive into `unvalidatable` (reported, never failed), conflating the
+  intended named-var case with a producer that RENAMED OR DELETED the histogram - where the
+  committed bound is a ghost describing a series that does not exist. `metrics_allowlist.txt`'s
+  stale gate does not backstop it: 7 of the 23 bounds families are not on the allowlist at all. Now
+  split on membership in `derive_metric_names` (the set the reconciler already builds): still
+  declared -> unvalidatable; no longer declared -> ghost, and a hard failure, matching the stale
+  direction it is a copy of.

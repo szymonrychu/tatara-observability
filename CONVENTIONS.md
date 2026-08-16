@@ -118,6 +118,9 @@ When you add or change instrumentation or an alert, before opening the PR:
   a threshold above the histogram's top finite bucket bound can never be crossed
   and the rule reports OK forever. Also linted, against
   `scripts/histogram_bounds.txt` - see 6.4.
+- Adding or repointing the dashboard panel that backs such an alert: the panel's
+  red threshold step is under the same ceiling, and its `description` quotes the
+  alert's real threshold. Linted - see 6.5.
 
 ## 5. The CI provenance check: no alert AND NO PANEL on a metric nobody emits
 
@@ -232,11 +235,13 @@ python3 scripts/check_label_provenance.py   # needs network: clones the 4 produc
 
 ## 6. Structural alert-shape checks
 
-`scripts/lint_alert_rules.py` enforces four more conventions beyond section 3's
-filter-or-justify. All four are deterministic from rule text alone (6.4 also reads
-a committed provenance file, itself validated against producer source), so they
-have no false failures. Each is justify-able with a named annotation, so a
-deliberate exception is greppable rather than remembered.
+`scripts/lint_alert_rules.py` enforces five more conventions beyond section 3's
+filter-or-justify. All are deterministic from rule (or panel) text alone (6.4 and
+6.5 also read a committed provenance file, itself validated against producer
+source), so they have no false failures. Each rule-level one is justify-able with a
+named annotation, so a deliberate exception is greppable rather than remembered;
+6.5 runs over `dashboards/*.json`, which carry no annotations, and is narrowed
+instead.
 
 ### 6.1 No fabricated zero on a foreign exporter's metric
 
@@ -372,9 +377,13 @@ Only a **bare** quantile is range-checked - one where the expression, after
 stripping `and on() (...)` idle guards and wrapping parens, is nothing but the
 `histogram_quantile(` call. A scaled or aggregated one
 (`1000 * histogram_quantile(...)` for milliseconds, a comparison between two
-quantiles) compares against a derived quantity in different units, and checking
-those against the raw bucket range would fail a correct rule. They are skipped, and
-the threshold is on the author.
+quantiles, a rule splitting its quantile across several `queries`) compares against
+a derived quantity in different units, and checking those against the raw bucket
+range would fail a correct rule. Those are not range-checked - but the carve-out is
+**declared, not silent**: such a rule must set `tatara_histogram_range` saying why
+its threshold is reachable, so every quantile rule this check does not verify is
+one `grep` away. A skip nobody can enumerate is the same bypass as a silently
+skipped unknown family.
 
 Two consequences of reading the *normalised* expression rather than the raw one: a
 `histogram_quantile` living INSIDE an idle guard is not range-checked, because it
@@ -405,10 +414,42 @@ cannot evaluate exactly - a named package-level variable, an
 `append(prometheus.DefBuckets, ...)`, `ExponentialBucketsRange` - is reported as
 unvalidatable and **never guessed**: a wrong derived bound is worse than an absent
 one, because the mismatch message tells the author to commit the derived number.
+"Unvalidatable" means the producer still declares the histogram and only its
+`Buckets:` expression is opaque. An entry naming a histogram no producer declares
+at all is a **ghost** and is a hard failure - that is section 5's stale-allowlist
+direction one level down, and `metrics_allowlist.txt` does not backstop it, because
+7 of the bounds families are not on it.
 
 To keep a threshold outside the derived range, set a non-empty
 `tatara_histogram_range` annotation saying why it is nonetheless reachable (native
 histograms enabled upstream for that family, a producer change in flight, etc.).
+
+### 6.5 A dashboard threshold step must be inside that range too
+
+Check 4 walks `alerts/*.yaml`. The identical defect was live in `dashboards/` the
+entire time it was being written: `operator.json` and `memory.json` both painted a
+red threshold step at 30 over the same two histograms, and their panel descriptions
+told a responder to expect it. A Grafana step colours a value at `value >= step`,
+so a step above the top finite bucket bound never colours - and unlike an alert
+there is not even a `no_data_state` to mis-configure. Section 5 already treats
+`dashboards/*.json` as a first-class silent-green surface; this is the comparison
+dimension of it.
+
+`lint_dashboard_file` range-checks a panel only when it carries at least one finite
+threshold step AND every one of its Prometheus targets is a bare quantile, so the
+step is in the histogram's own units. The ceiling is the highest across the panel's
+targets. An unknown family is a hard failure, as in 6.4.
+
+Two deliberate narrowings:
+
+- A panel mixing a quantile with a non-quantile target, or scaling one into
+  milliseconds, is skipped. Unlike a rule, a panel has no annotations, so there is
+  no per-panel escape hatch to declare - this paragraph is the record instead.
+- Only the unreachable direction is failed. A step at or below the floor paints a
+  permanently-red band, which is a different defect and is not modelled.
+
+`decimal_points` has no analogue here: `fieldConfig.decimals` is display formatting
+and does not round the value a step is evaluated against.
 
 ## 7. The CI schema check: an undeclared key is silently discarded
 

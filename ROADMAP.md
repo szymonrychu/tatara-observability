@@ -37,7 +37,9 @@ Planned work not yet started. Move items out when shipped (note in MEMORY.md if 
   no `lightrag_*` series has ever been scraped, so that one is armed blind and says so in the rule.
   The guard is `lint_alert_rules.py` Check 4 + `scripts/histogram_bounds.txt`, with
   `reconcile_metric_provenance.py` re-deriving every ceiling from producer source so the file cannot
-  drift. See CONVENTIONS.md 6.4 and MEMORY.md 2026-08-16.
+  drift. Review found the same unreachable `30` painted as a red threshold step in
+  `dashboards/{operator,memory}.json`, which no script read; Check 5 range-checks dashboard panels
+  too. See CONVENTIONS.md 6.4/6.5 and MEMORY.md 2026-08-16.
 - `shipped` (Task 6, G5): tier-quality rubber-stamp alert rule in `alerts/tatara-quality.yaml`
   ("Tier-quality rubber-stamp (model=claude-sonnet-5)"), labels `homelab`/`system=tatara`/
   `tatara_tier_quality=true`/`kind=review`/`model=claude-sonnet-5`/`project=tatara`. See MEMORY.md

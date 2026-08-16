@@ -26,6 +26,18 @@ name: alert-rules-lint
 # metric leaves every selector on the old name matching nothing, forever, with all
 # three green. It derives the declared label set from the same clones and fails
 # CLOSED - a repo it cannot clone is an error here, not a neutral skip.
+#
+# Every check above validates the SELECTOR. Issue #111 is the dimension after that:
+# the COMPARISON. Two p95 rules thresholded a histogram_quantile above the largest
+# value that quantile can return, so the selector was perfect, the metric was live,
+# every label existed - and the rules were still mathematically unable to fire, on
+# any input, ever. lint_alert_rules.py Check 4 range-checks every quantile threshold
+# against scripts/histogram_bounds.txt, and reconcile_metric_provenance.py re-derives
+# every bound in that file from the producer's own Buckets: expression on the same
+# clones, hard-failing on drift so the ceiling file cannot go stale unnoticed. Check 5
+# does the same for dashboards/*.json: the identical unreachable `30` was painted as a
+# red threshold step on the two panels backing those rules, on a surface with no
+# no_data_state to even mis-configure.
 
 on:
   pull_request:
@@ -45,6 +57,7 @@ on:
       - "scripts/test_check_label_provenance.py"
       - "scripts/metrics_allowlist.txt"
       - "scripts/stage_values_allowlist.txt"
+      - "scripts/histogram_bounds.txt"
       - "scripts/check_runbook_urls.py"
       - "scripts/test_check_runbook_urls.py"
       - ".github/workflows/alert-rules-lint.yml"
@@ -66,6 +79,7 @@ on:
       - "scripts/test_check_label_provenance.py"
       - "scripts/metrics_allowlist.txt"
       - "scripts/stage_values_allowlist.txt"
+      - "scripts/histogram_bounds.txt"
       - "scripts/check_runbook_urls.py"
       - "scripts/test_check_runbook_urls.py"
       - ".github/workflows/alert-rules-lint.yml"
@@ -95,7 +109,7 @@ jobs:
       - name: linter self-tests
         run: python3 -m unittest discover scripts -p 'test_*.py' -v
 
-      - name: lint alert rules
+      - name: lint alert rules and dashboard panels
         run: python3 scripts/lint_alert_rules.py
 
       # The silent-drop guard. Terraform's object-type conversion DISCARDS any alert key
@@ -119,6 +133,12 @@ jobs:
       # live source, and fails on any entry none of them emit any more. Clone failures
       # (network blip, GitHub outage) are a neutral skip inside the script itself, never
       # a hard failure here.
+      #
+      # It also validates scripts/histogram_bounds.txt (#111) off the same clones: every
+      # bucket ceiling Check 4 range-checks thresholds against is re-derived from the
+      # producer's own Buckets: expression, and a mismatch is a hard failure. A stale
+      # ceiling would make Check 4 reject a threshold that has become legal, which is a
+      # red build on a correct rule - the way a check gets weakened to a warning.
       - name: reconcile metric provenance against producer repos
         run: python3 scripts/reconcile_metric_provenance.py
 

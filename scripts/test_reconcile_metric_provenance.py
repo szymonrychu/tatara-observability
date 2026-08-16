@@ -11,9 +11,13 @@ import tempfile
 import unittest
 
 from reconcile_metric_provenance import (
+    SECTION_REPO,
+    derive_bucket_bounds,
     derive_metric_names,
     parse_allowlist_sections,
+    parse_histogram_bounds,
     reconcile,
+    reconcile_bounds,
     section_key,
 )
 
@@ -252,6 +256,452 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(stale, {})
         self.assertEqual(new, {})
         self.assertEqual(skipped, {"tatara-claude-code-wrapper"})
+
+
+class DeriveBucketBoundsTest(unittest.TestCase):
+    """B2 of tatara-observability#111: scripts/histogram_bounds.txt is a
+    hand-transcribed copy of a number that lives in another repo, so it is
+    re-derived from that repo's own source on every run rather than trusted."""
+
+    def _repo(self, tmp: pathlib.Path, content: str) -> pathlib.Path:
+        repo_dir = tmp / "repo" / "internal" / "obs"
+        repo_dir.mkdir(parents=True)
+        (repo_dir / "metrics.go").write_text(content)
+        return tmp / "repo"
+
+    def _derive(self, content: str) -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            return derive_bucket_bounds(self._repo(pathlib.Path(tmp), content))
+
+    def test_exponential_buckets(self):
+        # start * factor^(count-1) = 0.05 * 2^9 = 25.6
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogramVec(prometheus.HistogramOpts{\n"
+                '    Name:    "operator_turn_submit_duration_seconds",\n'
+                "    Buckets: prometheus.ExponentialBuckets(0.05, 2, 10),\n"
+                '}, []string{"kind"})\n'
+            ),
+            {"operator_turn_submit_duration_seconds": (0.05, 25.6)},
+        )
+
+    def test_linear_buckets(self):
+        # start + width*(count-1) = 10 + 5*4 = 30
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name:    "x_seconds",\n'
+                "    Buckets: prometheus.LinearBuckets(10, 5, 5),\n"
+                "})\n"
+            ),
+            {"x_seconds": (10.0, 30.0)},
+        )
+
+    def test_def_buckets(self):
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogramVec(prometheus.HistogramOpts{\n"
+                '    Name:    "lightrag_call_duration_seconds",\n'
+                "    Buckets: prometheus.DefBuckets,\n"
+                '}, []string{"op"})\n'
+            ),
+            {"lightrag_call_duration_seconds": (0.005, 10.0)},
+        )
+
+    def test_literal_slice_takes_the_max(self):
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogramVec(prometheus.HistogramOpts{\n"
+                '    Name:    "operator_tasks_minted_per_sweep",\n'
+                "    Buckets: []float64{0, 1, 2, 3, 5, 8, 13, 21},\n"
+                "})\n"
+            ),
+            {"operator_tasks_minted_per_sweep": (0.0, 21.0)},
+        )
+
+    def test_literal_slice_with_go_underscore_separators(self):
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogramVec(prometheus.HistogramOpts{\n"
+                '    Name: "operator_bundle_bytes",\n'
+                "    Help: \"x\",\n"
+                "    Buckets: []float64{4_000, 16_000, 800_000},\n"
+                "})\n"
+            ),
+            {"operator_bundle_bytes": (4000.0, 800000.0)},
+        )
+
+    def test_named_variable_buckets_are_underivable_not_guessed(self):
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name:    "code_graph_analytics_duration_seconds",\n'
+                "    Buckets: analyticsDurationBuckets,\n"
+                "})\n"
+            ),
+            {},
+        )
+
+    def test_absent_buckets_field_is_underivable(self):
+        # Prometheus defaults an omitted Buckets to DefBuckets, but proving the
+        # field is absent (rather than just outside the scan window) is not
+        # something a text scan can do safely. Do not guess.
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name: "no_buckets_seconds",\n'
+                '    Help: "x",\n'
+                "})\n"
+            ),
+            {},
+        )
+
+    def test_a_later_histograms_buckets_do_not_bleed_into_an_earlier_one(self):
+        # Two adjacent declarations: the first omits Buckets. Its scan window must
+        # stop at the next constructor rather than adopting the second's ladder.
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name: "first_seconds",\n'
+                "})\n"
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name:    "second_seconds",\n'
+                "    Buckets: prometheus.DefBuckets,\n"
+                "})\n"
+            ),
+            {"second_seconds": (0.005, 10.0)},
+        )
+
+    def test_append_to_def_buckets_is_underivable_not_wrong(self):
+        # The most common way a Go service widens DefBuckets. Deriving 10 here
+        # would be a WRONG bound, and a wrong bound is worse than an absent one:
+        # a mismatch is a hard CI failure telling the author to commit 10.
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name:    "widened_seconds",\n'
+                "    Buckets: append(prometheus.DefBuckets, 30, 60, 300),\n"
+                "})\n"
+            ),
+            {},
+        )
+
+    def test_append_around_linear_buckets_is_underivable(self):
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name:    "widened2_seconds",\n'
+                "    Buckets: append(prometheus.LinearBuckets(1, 1, 10), 3600),\n"
+                "})\n"
+            ),
+            {},
+        )
+
+    def test_a_ladder_quoted_in_a_help_string_is_not_the_buckets(self):
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name:    "helped_seconds",\n'
+                '    Help:    "ladder is []float64{0.5, 1, 2} scaled by tier",\n'
+                "    Buckets: tierBuckets,\n"
+                "})\n"
+            ),
+            {},
+        )
+
+    def test_a_ladder_left_in_a_comment_is_not_the_buckets(self):
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name:    "commented_seconds",\n'
+                "    // was Buckets: []float64{0.1, 0.25, 0.5} until we widened it\n"
+                "    Buckets: cBuckets,\n"
+                "})\n"
+            ),
+            {},
+        )
+
+    def test_a_ladder_in_a_block_comment_is_not_the_buckets(self):
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name: "blockcommented_seconds",\n'
+                "    /*\n"
+                "    Buckets: prometheus.ExponentialBuckets(1, 2, 3)\n"
+                "    */\n"
+                "    Buckets: prometheus.DefBuckets,\n"
+                "})\n"
+            ),
+            {"blockcommented_seconds": (0.005, 10.0)},
+        )
+
+    def test_a_ladder_in_a_raw_string_is_not_the_buckets(self):
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name: "rawstring_seconds",\n'
+                "    Help: `multi line help\n"
+                "Buckets: prometheus.ExponentialBuckets(1, 2, 3)\n"
+                "`,\n"
+                "    Buckets: prometheus.DefBuckets,\n"
+                "})\n"
+            ),
+            {"rawstring_seconds": (0.005, 10.0)},
+        )
+
+    def test_a_neighbouring_var_ladder_is_not_adopted(self):
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name:    "neighbour_seconds",\n'
+                "    Buckets: dBuckets,\n"
+                "})\n"
+                "\n"
+                "var eBuckets = []float64{60, 300, 900}\n"
+            ),
+            {},
+        )
+
+    def test_promauto_forms_are_derived(self):
+        self.assertEqual(
+            self._derive(
+                "promauto.With(reg).NewHistogramVec(prometheus.HistogramOpts{\n"
+                '    Name:    "promauto_seconds",\n'
+                "    Buckets: prometheus.DefBuckets,\n"
+                '}, []string{"op"})\n'
+            ),
+            {"promauto_seconds": (0.005, 10.0)},
+        )
+
+    def test_exponential_buckets_range_is_underivable(self):
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name:    "ranged_seconds",\n'
+                "    Buckets: prometheus.ExponentialBucketsRange(0.1, 60, 12),\n"
+                "})\n"
+            ),
+            {},
+        )
+
+    def test_counters_are_not_histograms(self):
+        self.assertEqual(
+            self._derive(
+                "prometheus.NewCounterVec(prometheus.CounterOpts{\n"
+                '    Name: "operator_turn_submit_total",\n'
+                "})\n"
+            ),
+            {},
+        )
+
+    def test_ignores_test_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "internal").mkdir()
+            (root / "internal" / "metrics_test.go").write_text(
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name:    "test_only_seconds",\n'
+                "    Buckets: prometheus.DefBuckets,\n"
+                "})\n"
+            )
+            self.assertEqual(derive_bucket_bounds(root), {})
+
+
+class ParseHistogramBoundsTest(unittest.TestCase):
+    def test_assigns_bounds_to_their_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "histogram_bounds.txt"
+            path.write_text(
+                "# a preamble comment\n"
+                "\n"
+                "# --- operator: tatara-operator/internal/obs ---\n"
+                "# ExponentialBuckets(0.05, 2, 10) -> 25.6\n"
+                "operator_turn_submit_duration_seconds 0.05 25.6\n"
+                "operator_bundle_bytes 4000 800000\n"
+                "\n"
+                "# --- memory: tatara-memory ---\n"
+                "lightrag_call_duration_seconds 0.005 10\n"
+            )
+            self.assertEqual(
+                parse_histogram_bounds(path),
+                {
+                    "operator_turn_submit_duration_seconds": ("operator", 0.05, 25.6),
+                    "operator_bundle_bytes": ("operator", 4000.0, 800000.0),
+                    "lightrag_call_duration_seconds": ("memory", 0.005, 10.0),
+                },
+            )
+
+
+class ReconcileBoundsTest(unittest.TestCase):
+    def _repo(self, tmp: pathlib.Path, name: str, content: str) -> pathlib.Path:
+        repo_dir = tmp / name / "internal" / "obs"
+        repo_dir.mkdir(parents=True)
+        (repo_dir / "metrics.go").write_text(content)
+        return tmp / name
+
+    _OPERATOR_SRC = (
+        "prometheus.NewHistogramVec(prometheus.HistogramOpts{\n"
+        '    Name:    "operator_turn_submit_duration_seconds",\n'
+        "    Buckets: prometheus.ExponentialBuckets(0.05, 2, 10),\n"
+        "})\n"
+        "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+        '    Name:    "operator_turn_duration_seconds",\n'
+        "    Buckets: prometheus.ExponentialBuckets(5, 2, 8),\n"
+        "})\n"
+    )
+
+    def test_matching_bound_is_clean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(pathlib.Path(tmp), "tatara-operator", self._OPERATOR_SRC)
+            entries = {
+                "operator_turn_submit_duration_seconds": ("operator", 0.05, 25.6),
+                "operator_turn_duration_seconds": ("operator", 5.0, 640.0),
+            }
+            mismatched, missing, unvalidatable, ghost, skipped = reconcile_bounds(
+                entries, {"tatara-operator": repo}
+            )
+            self.assertEqual(mismatched, {})
+            self.assertEqual(missing, {})
+            self.assertEqual(unvalidatable, set())
+            self.assertEqual(ghost, set())
+            self.assertEqual(skipped, set())
+
+    def test_drifted_bound_is_a_hard_failure(self):
+        # The pre-mortem-2 case: a producer widened its buckets and the file kept
+        # the old ceiling, so the guard would reject a threshold that is now legal.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(pathlib.Path(tmp), "tatara-operator", self._OPERATOR_SRC)
+            entries = {"operator_turn_submit_duration_seconds": ("operator", 0.05, 12.8)}
+            mismatched = reconcile_bounds(entries, {"tatara-operator": repo}).mismatched
+            self.assertEqual(
+                mismatched,
+                {"tatara-operator": {
+                    "operator_turn_submit_duration_seconds": ((0.05, 12.8), (0.05, 25.6))
+                }},
+            )
+
+    def test_float_representation_noise_is_not_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(pathlib.Path(tmp), "tatara-operator", self._OPERATOR_SRC)
+            entries = {
+                "operator_turn_submit_duration_seconds": ("operator", 0.05, 25.600000001)
+            }
+            mismatched = reconcile_bounds(entries, {"tatara-operator": repo}).mismatched
+            self.assertEqual(mismatched, {})
+
+    def test_derivable_but_absent_is_informational(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(pathlib.Path(tmp), "tatara-operator", self._OPERATOR_SRC)
+            entries = {"operator_turn_submit_duration_seconds": ("operator", 0.05, 25.6)}
+            mismatched, missing = reconcile_bounds(
+                entries, {"tatara-operator": repo}
+            )[:2]
+            self.assertEqual(mismatched, {})
+            self.assertEqual(
+                missing, {"tatara-operator": {"operator_turn_duration_seconds": (5.0, 640.0)}}
+            )
+
+    def test_underivable_entry_is_reported_never_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(
+                pathlib.Path(tmp),
+                "tatara-memory",
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name:    "code_graph_analytics_duration_seconds",\n'
+                "    Buckets: analyticsDurationBuckets,\n"
+                "})\n",
+            )
+            entries = {"code_graph_analytics_duration_seconds": ("memory", 0.5, 600.0)}
+            mismatched, missing, unvalidatable = reconcile_bounds(
+                entries, {"tatara-memory": repo}
+            )[:3]
+            self.assertEqual(mismatched, {})
+            self.assertEqual(missing, {})
+            self.assertEqual(unvalidatable, {"code_graph_analytics_duration_seconds"})
+
+    def test_a_family_the_producer_no_longer_declares_is_a_ghost(self):
+        # The direction histogram_bounds.txt's header promises cannot go stale
+        # unnoticed: the producer renamed or deleted the histogram, so the
+        # committed bound describes a series that no longer exists. That is the
+        # `stale` allowlist case one level down, and it is a hard failure - NOT
+        # the named-var `unvalidatable` case, which is intentional and benign.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(pathlib.Path(tmp), "tatara-operator", self._OPERATOR_SRC)
+            entries = {"operator_turn_renamed_duration_seconds": ("operator", 0.05, 25.6)}
+            r = reconcile_bounds(entries, {"tatara-operator": repo})
+            self.assertEqual(r.ghost, {"operator_turn_renamed_duration_seconds"})
+            self.assertEqual(r.unvalidatable, set())
+
+    def test_a_named_var_family_the_producer_still_declares_is_not_a_ghost(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(
+                pathlib.Path(tmp),
+                "tatara-memory",
+                "prometheus.NewHistogram(prometheus.HistogramOpts{\n"
+                '    Name:    "code_graph_analytics_duration_seconds",\n'
+                "    Buckets: analyticsDurationBuckets,\n"
+                "})\n",
+            )
+            entries = {"code_graph_analytics_duration_seconds": ("memory", 0.5, 600.0)}
+            r = reconcile_bounds(entries, {"tatara-memory": repo})
+            self.assertEqual(r.ghost, set())
+            self.assertEqual(r.unvalidatable, {"code_graph_analytics_duration_seconds"})
+
+    def test_a_wide_struct_literal_is_not_a_false_ghost(self):
+        # ghost is a HARD failure, so its evidence must not be blinder than the
+        # bucket parser's. derive_metric_names' window used to be narrower than
+        # derive_bucket_bounds', so a Name: field pushed down by a long Help string
+        # was invisible to the name parser and visible to neither - which read as
+        # "the producer deleted this histogram" and told the maintainer to delete a
+        # live entry.
+        src = (
+            "prometheus.NewHistogramVec(\n"
+            "    prometheus.HistogramOpts{\n"
+            '        Help: "one",\n'
+            '        // two\n'
+            '        // three\n'
+            '        // four\n'
+            '        // five\n'
+            '        // six\n'
+            '        Name:    "code_graph_analytics_duration_seconds",\n'
+            "        Buckets: analyticsDurationBuckets,\n"
+            '    }, []string{"kind"})\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(pathlib.Path(tmp), "tatara-memory", src)
+            entries = {"code_graph_analytics_duration_seconds": ("memory", 0.5, 600.0)}
+            r = reconcile_bounds(entries, {"tatara-memory": repo})
+            self.assertEqual(r.ghost, set())
+            self.assertEqual(r.unvalidatable, {"code_graph_analytics_duration_seconds"})
+
+    def test_clone_failure_is_a_neutral_skip(self):
+        entries = {"ccw_turn_duration_seconds": ("wrapper", 1.0, 2048.0)}
+        mismatched, missing, unvalidatable, ghost, skipped = reconcile_bounds(entries, {})
+        self.assertEqual(mismatched, {})
+        self.assertEqual(missing, {})
+        self.assertEqual(unvalidatable, set())
+        self.assertEqual(ghost, set())
+        self.assertEqual(skipped, {"tatara-claude-code-wrapper"})
+
+    def test_exempt_section_is_never_diffed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(pathlib.Path(tmp), "tatara-operator", "")
+            entries = {"some_external_seconds": ("external", 0.1, 5.0)}
+            self.assertEqual(
+                tuple(reconcile_bounds(entries, {"tatara-operator": repo})),
+                ({}, {}, set(), set(), set()),
+            )
+
+
+class CommittedHistogramBoundsFileTest(unittest.TestCase):
+    def test_every_entry_routes_to_a_known_section(self):
+        entries = parse_histogram_bounds(
+            pathlib.Path(__file__).resolve().parent / "histogram_bounds.txt"
+        )
+        self.assertTrue(entries)
+        for family, (section, low, high) in entries.items():
+            self.assertIn(section, SECTION_REPO, f"{family} has unroutable section")
+            self.assertLess(low, high, family)
 
 
 if __name__ == "__main__":

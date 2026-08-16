@@ -172,12 +172,18 @@ rules:
       - expression: |
           histogram_quantile(0.95, sum(rate(lightrag_call_duration_seconds_bucket{namespace="tatara"}[10m])) by (le)) and on() (sum(rate(lightrag_call_duration_seconds_count{namespace="tatara"}[10m])) > 0)
     math_operator: ">"
-    threshold: 30
+    # 5, not 30: lightrag_call_duration_seconds is prometheus.DefBuckets, so
+    # histogram_quantile can never return above 10 and `> 30` was structurally inert
+    # (#111). 5 is the highest DefBuckets bound under that ceiling. ARMED BLIND: no
+    # lightrag_* series has ever been scraped cluster-wide, so this rule is also inert
+    # for a second, independent reason and the number has no observed distribution
+    # behind it. Retune it against real data once the series exists.
+    threshold: 5
     for: 15m
     decimal_points: 2
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-lightrag-call-p95-latency-high"
-      summary: "tatara-memory LightRAG call p95 latency {{ index $values \"C\" }}s (>30s) over 10m. Backend slow."
+      summary: "tatara-memory LightRAG call p95 latency {{ index $values \"C\" }}s (>5s) over 10m. Backend slow."
     labels:
       homelab: "true"
       system: "tatara"

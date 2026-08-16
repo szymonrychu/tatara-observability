@@ -1173,3 +1173,157 @@ PR/push triggers.
   cannot distinguish the two. `operator_live_entry_declined_total` is the one with live data
   (~85/week, all `not-a-live-state`; `live-ceiling-full` has been flat 0 over 7d, so rule 3 is
   measuring from a genuine zero baseline).
+- 2026-08-16 (#111): **The silent-green class, level 3: the COMPARISON, not the selector.** Every
+  guard this repo has built - `check_metric_provenance.py` (name), `stage_values_allowlist.txt`
+  (label value), `check_label_provenance.py` (label name) - validates the SELECTOR. Two p95 rules
+  had a perfect selector on a live metric with every label present and were still mathematically
+  unable to fire: `histogram_quantile` returns AT MOST the top finite bucket bound, and both
+  thresholded `> 30` over ceilings of 25.6 (`operator_turn_submit_duration_seconds`,
+  `ExponentialBuckets(0.05, 2, 10)`) and 10 (`lightrag_call_duration_seconds`, `DefBuckets`). With
+  `default_no_data_state: "OK"` and `default_exec_err_state = "OK"` they never went stale and never
+  errored - green because they could not be anything else. The operator one had been `planned` in
+  ROADMAP since the 2026-07-12 redesign, and `lint_alert_rules.py` cited it as its reference example
+  of a compliant quantile rule the whole time: **6.2's idle-NaN guard says nothing about
+  reachability, and being the exemplar for one check made it look correct for all of them.**
+- 2026-08-16 (#111): **New thresholds, and what was actually measured.** Operator: 6.4 (a real
+  bucket bound, 8x the observed p95 and 4x under the ceiling). The live 7d p95 is FLAT at 0.78 on
+  every non-NaN sample - all 321.6 observations in `le="0.8"`, zero below `le="0.4"` - so the
+  distribution is degenerate and there is no noise floor to clear; 12.8 was rejected as too
+  insensitive, since a 0.78 -> 5s regression would stay invisible. Memory: 5 (highest `DefBuckets`
+  bound under the 10 ceiling), **armed blind and annotated as such in the rule** -
+  `{__name__=~"lightrag.*"}` returns nothing cluster-wide, so that rule is inert for a SECOND
+  independent reason and only the threshold half is in scope here. Producer histograms were left
+  alone (not widened to keep 30s): nothing in the repo justifies 30, and the real p95 is 0.78.
+- 2026-08-16 (#111): **The reachable set is `[q * lowest bound, top bound]`, and getting this wrong
+  TWICE is the lesson.** The issue's pre-mortem 1 said a `<` rule is inert "below the smallest
+  bucket" (0.05). The first implementation here overrode that with "`bucketQuantile` sets
+  `bucketStart = 0` when `b == 0`, so the floor is 0" - which reads the right line of
+  `promql/quantile.go` and stops one line early. That branch returns `ub0 * (rank/count)`, not
+  `ub0 * 0`: `count` is bucket 0's OWN count (the `count -= buckets[b-1].count` line is inside
+  `if b > 0`) and `rank = q*observations`. Selecting `b == 0` needs `count >= rank`, and
+  `count <= observations`, so `rank/count` is bounded in `[q, 1]` and the result in `[q*ub0, ub0]` -
+  and the infimum is ATTAINED, when every observation lands in the lowest bucket. So the p95 floor is
+  0.0475 and `< 0.01` is as inert as `> 30`. **The pre-mortem was off by the factor `q`; the
+  "correction" was off by the whole lower half**, and two unit tests asserted the wrong behaviour
+  until an adversarial review caught it. Check 4 now parses `q` out of each call, and
+  `histogram_bounds.txt` carries both bounds. Zero is reachable only at `q == 0`; a histogram whose
+  lowest bound is `<= 0` is short-circuited by `bucketQuantile` and returned directly, so its floor
+  is that bound rather than `q` times it.
+- 2026-08-16 (#111): **A WRONG derived bound is worse than an absent one.** The first bucket parser
+  searched the whole 12-line constructor window for `ExponentialBuckets(`/`DefBuckets`/`[]float64{`,
+  which silently derives 10 from `Buckets: append(prometheus.DefBuckets, 30, 60, 300)` (truth: 300)
+  and picks up a ladder quoted in a `Help:` string or left in a `// was Buckets: ...` comment. That
+  direction is dangerous precisely because a mismatch is a HARD FAIL whose message says "the
+  producer's buckets top out at X, update the file" - CI instructing the author to commit a false
+  ceiling. Now: strip comments and string literals, find `Buckets:`, balance-scan the value
+  expression, and match the whole expression anchored. Anything else - named var, `append(...)`,
+  `ExponentialBucketsRange` - is unvalidatable and never guessed. The histogram anchor was also
+  broadened to a bare `NewHistogram(Vec)?\(` so `promauto.With(reg).NewHistogramVec(` is seen;
+  `_CTOR`'s `promauto.<ident>.` shape misses it, which is a latent gap in the NAME derivation too if
+  any producer ever adopts promauto.
+- 2026-08-16 (#111): **Only a BARE quantile is range-checked.** `1000 * histogram_quantile(...)`
+  (seconds to milliseconds) and a quantile compared against another quantile carry the threshold in
+  units that are not the histogram's, so range-checking them against the raw ceiling hard-fails a
+  CORRECT rule - the "red build on a correct rule, which is how a check gets weakened to a warning"
+  outcome this very change warns about one layer down. Check 4 strips `and on() (...)` guards and
+  proceeds only when what remains is exactly one `histogram_quantile(` call. Related and dormant:
+  `main.tf` applies reduce+threshold to the LAST query only while `_joined_expressions` concatenates
+  all of them - every rule in `alerts/*.yaml` has exactly one query today.
+- 2026-08-16 (#111): **One smaller correction.** `decimal_points` rounds BEFORE the compare (`modules/grafana_alert/main.tf:207` renders
+  `round($C * 10^d) / 10^d`), and rounding only widens the ceiling upward, so `> 25.9` at
+  `decimal_points: 0` is LEGAL over a 25.6 ceiling. A check ignoring it would red-build a correct
+  rule. Grafana's `round()` is Go `math.Round` (half away from zero), not Python's banker's
+  rounding - hence the explicit `floor(x + 0.5)`.
+- 2026-08-16 (#111): **The guard, and why the file is validated rather than trusted.**
+  `lint_alert_rules.py` Check 4 + `scripts/histogram_bounds.txt` (23 families, the full derivable
+  set across all four producers - not just the two in use, so the NEXT rule is covered). An unknown
+  family is a HARD FAIL, not a skip: a silently-skipped family is the same bypass the check exists
+  to close. But a hand-transcribed ceiling is exactly the drift that made `metrics_allowlist.txt`
+  stale in #57, and it fails in the WORSE direction - a lagging ceiling rejects a threshold that has
+  become legal, which is how a check gets weakened to a warning. So
+  `reconcile_metric_provenance.py` re-derives every bound from the producer's own `Buckets:`
+  expression on the clones it already makes, and a mismatch is a hard failure (unlike the
+  informational `new` direction). `Buckets:` behind a named var (`analyticsDurationBuckets`,
+  `requestDurationBuckets`) is reported unvalidatable and NEVER guessed; those two families are
+  deliberately absent from the file rather than filled in from a reading of the var.
+- 2026-08-16 (#111): **Round 2 of adversarial review: the bare-quantile gate was itself a bypass.**
+  Skipping non-bare quantiles (added to stop `1000 * histogram_quantile(...) > 5000` red-building a
+  correct rule) also skipped a merely PARENTHESISED quantile and one with a trailing `or vector(0)` -
+  both in the histogram's own units, both then free to carry an inert `> 99999` with no annotation.
+  A check whose escape hatch is shape-based grows bypasses the moment the shape test is coarser than
+  the semantics. Fix: normalise before testing - strip guards, strip fully-enclosing parens (only
+  when the leading `(` matches the final `)`, so `(a)+(b)` is untouched), and model `or vector(N)`
+  exactly by adding N to the reachable set. N widens the range downward and CANNOT lift the ceiling,
+  so `or vector(0)` makes a below-floor `<` legal while leaving an above-ceiling `>` just as inert.
+  Second fix in the same area: families/quantiles were read from the RAW expression while bareness
+  was read from the stripped one, so a quantile living inside the idle guard got range-checked
+  against the rule's threshold - `> 10` on a 25.6 ceiling failed against the guard's 2.56 ceiling.
+  Everything now reads the normalised expression.
+- 2026-08-16 (#111): **Two small ones with a shared shape: the remediation must actually work.** The
+  unknown-family violation told the author to add `<family> <top finite bucket bound>` - a 2-field
+  line, which the 3-field regex silently DROPS, so following the message verbatim re-emits the
+  byte-identical message forever. A guard whose error message prescribes a no-op is worse than no
+  message. Also: `/*...*/` block comments and backtick raw strings were not stripped before the
+  `Buckets:` scan, so a commented-out ladder above the live one derived (1,4) instead of (0.005,10) -
+  the same wrong-bound-not-absent class the previous round closed for `//` and `"..."`, just the two
+  lexical forms that round missed. `load_histogram_bounds` now also rejects non-finite and inverted
+  bounds instead of accepting `foo nan inf`.
+- 2026-08-16 (#111): **Review round 1: the census stopped one surface short.** Check 4 walks
+  `alerts/*.yaml`, and the SAME `30` sat in `dashboards/operator.json` and `dashboards/memory.json`
+  as a red `thresholds.steps` value over the same two histograms, with panel descriptions telling a
+  responder the line mirrored the alert. A Grafana step colours at `value >= step`, so both bands
+  were unreachable; and a panel has no `no_data_state` to even mis-configure. Nothing in CI could
+  have caught it - no script read dashboard `thresholds` at all - which is precisely the "fixed the
+  instances, not the class" outcome pre-mortem 5 named. Check 5 (`lint_dashboard_file`) now
+  range-checks a panel's finite steps against the ceiling of its bare-quantile targets. It is
+  deliberately narrow: a panel needs at least one finite step AND every Prometheus target a bare
+  quantile, because a panel carries no annotations, so there is no per-panel escape hatch and the
+  only safe carve-out is not to check. Only the unreachable direction is failed; a step at or below
+  the floor is a permanently-red band, a different defect.
+- 2026-08-16 (#111): **A silent skip is a bypass even when the skip is correct.** Check 4 skipped a
+  non-bare quantile with no CI signal at all, twenty lines from its own "an unknown family is a hard
+  FAIL, because a silently-skipped family is the same bypass". `histogram_quantile(...) * 1000 >
+  999999` got zero signal. The skip itself is right (different units), but it now requires a
+  non-empty `tatara_histogram_range`, so the set of quantile rules the check does not verify is one
+  grep away rather than an emergent property of a regex. Same round: `_OR_VECTOR`'s `[0-9.]+` missed
+  scientific notation, so `or vector(1e3)` dropped a rule out of the check entirely - a constant the
+  parser cannot read must not silently become a shape the parser cannot classify.
+- 2026-08-16 (#111): **"Cannot re-derive" is two outcomes, not one.** `reconcile_bounds` put every
+  bounds family it could not derive into `unvalidatable` (reported, never failed), conflating the
+  intended named-var case with a producer that RENAMED OR DELETED the histogram - where the
+  committed bound is a ghost describing a series that does not exist. `metrics_allowlist.txt`'s
+  stale gate does not backstop it: 7 of the 23 bounds families are not on the allowlist at all. Now
+  split on membership in `derive_metric_names` (the set the reconciler already builds): still
+  declared -> unvalidatable; no longer declared -> ghost, and a hard failure, matching the stale
+  direction it is a copy of.
+- 2026-08-16 (#111): **Review round 2 on the review fix - six defects, and the two worst were in the
+  NEW check.** Check 5 reported from inside its per-target scan, so a panel's verdict depended on
+  the ORDER its targets sit in the JSON: `[quantile, scaled-quantile]` was clean and the swap was
+  too, but `[unknown-family, known]` and its swap disagreed, and an early in-range target ended the
+  scan before a later unreachable step. Classify every target, then report. Second: matching an idle
+  guard by SHAPE (`and [on(...)] (`) is defeated by writing the guard differently - `and on()
+  sum(...) > 0` without parens dropped the rule out of Check 4 entirely, and `(guard) and on()
+  quantile` was read as a quantile rule when PromQL `and` is a FILTER whose value is the LEFT
+  operand. Truncating at the first top-level `and`/`unless` is exact and cannot be defeated by
+  formatting; `or vector(N)` has to be extracted before it, since `or` binds looser than `and`.
+  General lesson, third time on this issue: a check whose gate is a regex over shape grows a bypass
+  every time someone writes the same semantics differently.
+- 2026-08-16 (#111): **Demanding a declaration is itself a false-failure surface.** Making Check 4
+  require `tatara_histogram_range` for every non-bare shape red-built a rule whose threshold is on a
+  RATE filtered by a quantile guard - `sum(rate(errors)) and on() (histogram_quantile(...) > 1)`.
+  The quantile is not the value, so there was nothing to range-check and nothing to declare. Gate on
+  the NORMALISED expression, not the raw one.
+- 2026-08-16 (#111): **Grafana panel config has more ways to say "threshold" than
+  `defaults.thresholds.steps`.** `mode: "percentage"` makes a step a percentage of min..max (reading
+  it as absolute false-failed an 80 over a 25.6 ceiling); a numeric STRING step is coerced by
+  Grafana and was being dropped; `fieldConfig.overrides[].properties[].id == "thresholds"` carries
+  per-series steps and is already used in `dashboards/task-delivery.json`; and
+  `custom.thresholdsStyle.mode: "off"` means the band is never drawn, so failing on a leftover step
+  there is a red build on a panel with no user-visible defect. 6 of the 8 quantile panels in
+  `dashboards/` set `off`, so getting that one wrong would have been immediate.
+- 2026-08-16 (#111): **A new hard failure needs evidence at least as good as the check it guards.**
+  `ghost` was decided by `derive_metric_names` (window 8) while derivability was decided by
+  `derive_bucket_bounds` (window 12), so a `Name:` field pushed past line 8 by a long `Help` string
+  was invisible to both - and the summary then told the maintainer to DELETE a live entry. Widened
+  the declared-set window to match. Not live today (max observed offset across all four producers is
+  4), but the trigger would have been a producer reformatting a struct literal.

@@ -236,12 +236,16 @@ rules:
       - expression: |
           histogram_quantile(0.95, sum(rate(operator_turn_submit_duration_seconds_bucket{namespace="tatara",job="tatara-operator"}[15m])) by (le)) and on() (sum(rate(operator_turn_submit_duration_seconds_count{namespace="tatara",job="tatara-operator"}[15m])) > 0)
     math_operator: ">"
-    threshold: 30
+    # 6.4, not 30: operator_turn_submit_duration_seconds is ExponentialBuckets(0.05, 2, 10),
+    # so histogram_quantile can never return above 25.6 and `> 30` was structurally inert
+    # (#111). 6.4 is a real bucket bound, ~8x the observed p95 (flat at 0.78s across 7d,
+    # every observation in le="0.8") and 4x under the ceiling.
+    threshold: 6.4
     for: 15m
     decimal_points: 1
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-turn-submit-p95-latency-high"
-      summary: "tatara-operator SubmitTurn p95 latency is {{ index $values \"C\" }}s (>30s) over 15m. Dispatching agent turns is slow; wrappers may be unreachable or saturated."
+      summary: "tatara-operator SubmitTurn p95 latency is {{ index $values \"C\" }}s (>6.4s) over 15m. Dispatching agent turns is slow; wrappers may be unreachable or saturated."
     labels:
       homelab: "true"
       system: "tatara"

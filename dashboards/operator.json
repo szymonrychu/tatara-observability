@@ -239,7 +239,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "p95 wall-clock of SubmitTurn calls, broken out by Task kind. Red line at 30s mirrors the 'Operator turn submit p95 latency high' alert (which uses the aggregate p95 across all kinds).",
+      "description": "p95 wall-clock of SubmitTurn calls, broken out by Task kind. Red line at 6.4s mirrors the 'Operator turn submit p95 latency high' alert (which uses the aggregate p95 across all kinds). It sat at 30s until #111, above the 25.6s ceiling of ExponentialBuckets(0.05, 2, 10), so the band could never colour. Observed p95 is flat at 0.78s.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -289,7 +289,7 @@
               },
               {
                 "color": "red",
-                "value": 30
+                "value": 6.4
               }
             ]
           }

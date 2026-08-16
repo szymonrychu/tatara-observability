@@ -104,7 +104,7 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "LightRAG call latency quantiles over 5m, per selected memory stack. Backs the 'LightRAG call p95 latency high' alert (fires p95 >30s for 15m).",
+      "description": "LightRAG call latency quantiles over 5m, per selected memory stack. Backs the 'LightRAG call p95 latency high' alert (fires p95 >5s for 15m). Red line was at 30s until #111, above the 10s DefBuckets ceiling, so the band could never colour. ARMED BLIND: no lightrag_* series has ever been scraped cluster-wide, so this panel is expected to be empty and 5s is not calibrated against observed data.",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "palette-classic"},
@@ -117,7 +117,7 @@
             "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "dashed"}
           },
           "mappings": [], "min": 0, "unit": "s",
-          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 30}]}
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 5}]}
         },
         "overrides": []
       },

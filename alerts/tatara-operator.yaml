@@ -1575,17 +1575,31 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "warning"
+  # Threshold raised 20 -> 100 (2026-08-17). tatara-operator v3.1.0 fixed per-repo
+  # scan-offset starvation: each repo in a project now gets its OWN sweep pass with its
+  # own maxNewTasksPerSweep (5) budget, instead of the whole project sharing one pass. The
+  # implied per-hour ceiling is repo_slots_in_window * 5, not a flat 5 - "capped at 5 per
+  # pass" no longer bounds the hourly rate on its own. Worst case: the issueScan cron is
+  # moving from `0 */4 * * *` to `0 * * * *` on all three projects, which is 15 repo-sweep
+  # slots per 1h window across them, i.e. up to ~75 mints/h - already 3.75x over the old
+  # threshold of 20, which would page on every genuine backlog drain, exactly when a
+  # spurious alert is most harmful. 100 leaves headroom above that 75 worst case without
+  # hiding a real mint/reap loop (which runs far above 100, sustained) - the thing this
+  # alert exists to catch. Measured over the prior 7 days: actual mints were 16 total
+  # across all projects, all parked(backlog-sweep), zero active - the budget sits roughly
+  # two orders of magnitude above realised demand, so this threshold guards a theoretical
+  # ceiling, not observed behavior.
   - name: "Operator task mint burst"
     queries:
       - expression: |
           sum(increase(operator_tasks_minted_per_sweep_sum{namespace="tatara",job="tatara-operator"}[1h])) or vector(0)
     math_operator: ">"
-    threshold: 20
+    threshold: 100
     for: 15m
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-task-mint-burst"
-      summary: "tatara-operator minted {{ index $values \"C\" }} Tasks in 1h (>20). The sweep is capped at maxNewTasksPerSweep (5) per pass, so this is either a mint/reap loop (an issue being re-minted because ownership is not sticking) or a genuine backlog drain. Check sum by (parkReason) (operator_task_parked_total{parkReason=\"backlog-sweep\"}) against operator_task_state{state=\"new\"}: a healthy backlog drain mints parked(backlog-sweep) Tasks that sit in state=new and spawn ZERO pods."
+      summary: "tatara-operator minted {{ index $values \"C\" }} Tasks in 1h (>100). Each repo in a project gets its own sweep pass, each capped at maxNewTasksPerSweep (5), so the hourly ceiling scales with repo count and cron cadence, not a flat 5/h. This is either a mint/reap loop (an issue being re-minted because ownership is not sticking) or a genuine backlog drain. Check sum by (parkReason) (operator_task_parked_total{parkReason=\"backlog-sweep\"}) against operator_task_state{state=\"new\"}: a healthy backlog drain mints parked(backlog-sweep) Tasks that sit in state=new and spawn ZERO pods."
     labels:
       homelab: "true"
       system: "tatara"

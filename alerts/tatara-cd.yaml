@@ -139,17 +139,42 @@ rules:
   # merge-blocked and deploy-blocked are members of the status.parkReason vocabulary
   # (tatara-operator internal/stage/stage.go:84,86 and the ParkReasons list at :110).
   # K.2's original formulation is now the correct one and this is it.
+  #
+  # 2026-08-17: widened to also match merge-auth-refused and merge-order-missing. Gap
+  # found via terraform!215 - a fully reviewed MR that tatara closed unmerged because
+  # the Task parked(merge-auth-refused) and NOTHING fired: at one occurrence it cleared
+  # neither this rule's old two-value matcher NOR the generic "Operator task failure
+  # spike"/"park spike" catch-alls in tatara-operator.yaml, which both need >3 events in
+  # a window to page. Confirmed against live Prometheus: operator_task_parked_total
+  # {parkReason="merge-auth-refused"} is a real series (tatara-operator
+  # internal/controller/merge.go:380, fires when the forge refuses the merge credential -
+  # "a bad/insufficient credential never fixes itself on retry", so it fails fast to
+  # parked instead of hot-requeueing). merge-order-missing is the same class - merge.go:254
+  # parks it immediately when merging is entered with an empty spec.mergeOrder, "treated
+  # as a bug". Both are UnparkNever (internal/stage/park.go), exactly like merge-blocked
+  # and deploy-blocked: no cycle to exhaust, no auto re-entry, a human has to act. Query
+  # against tatara-operator's 28-member parkReason vocabulary (internal/stage/stage.go)
+  # turned up other UnparkNever CD-adjacent reasons that were DELIBERATELY LEFT OUT:
+  #   operator-error   - also parked from non-CD sites (e.g. a stuck workspace PVC bind
+  #                       before any pod runs), so folding it in here would mislabel a
+  #                       pre-implementation failure as a merge/deploy one.
+  #   ci-red/ci-blocked - the red-CI gate fires from awaiting-review and reviewpost.go as
+  #                       much as from merging (ci_gate.go), so it is not CD-exclusive
+  #                       either; still covered by the generic spike rules above.
+  #   ownership-lost    - an ownership-flip park, not a merge/deploy blockage.
+  #   head-moving        - already has its own dedicated rule below ("Tatara merge head
+  #                       kept moving"), do not double-count it here.
   - name: "Tatara merge or deploy cycle exhausted"
     queries:
       - expression: |
-          sum by (parkReason) (increase(operator_task_parked_total{namespace="tatara",job="tatara-operator",parkReason=~"merge-blocked|deploy-blocked"}[1h])) or vector(0)
+          sum by (parkReason) (increase(operator_task_parked_total{namespace="tatara",job="tatara-operator",parkReason=~"merge-blocked|deploy-blocked|merge-auth-refused|merge-order-missing"}[1h])) or vector(0)
     math_operator: ">"
     threshold: 0
     for: 5m
     decimal_points: 0
     annotations:
       runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-tatara-merge-or-deploy-cycle-exhausted"
-      summary: "{{ index $values \"C\" }} Task(s) parked with parkReason={{ index $labels \"parkReason\" }} in 1h - the merge or deploy state re-entered park(merge-timeout|deploy-timeout) more than 3 times (fix H7) and gave up. Under the v2.0.0 lifecycle this is a park with no re-entry left, not a `failed` terminal - the Task sits until ParkRetention reaps it. The delivery path to a cluster-admin-scoped runner has stopped, not just slowed."
+      summary: "{{ index $values \"C\" }} Task(s) parked with parkReason={{ index $labels \"parkReason\" }} in 1h. merge-blocked/deploy-blocked mean the merge or deploy state re-entered park(merge-timeout|deploy-timeout) more than 3 times (fix H7) and gave up; merge-auth-refused/merge-order-missing are fail-fast parks with no cycle at all (a forge credential the writer cannot use, or merging entered with an empty mergeOrder - tatara-operator internal/controller/merge.go). All four are UnparkNever - the Task sits until a human intervenes or ParkRetention reaps it. The delivery path to a cluster-admin-scoped runner has stopped, not just slowed."
     labels:
       homelab: "true"
       system: "tatara"

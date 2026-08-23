@@ -77,8 +77,11 @@ rules:
         approve yet, not an attack. no-live-issue is every owned Issue closed, done or rejected
         - commonly a human closing it mid-flight as a deliberate veto, so do not blame the agent
         citation for it. no-maintainer-comment just means nobody has commented yet: clarify
-        Tasks are outrunning their humans. A grant can also carry no citation at all when
-        autoApproveTataraProposals covers a bot-authored proposal no human ever commented on.
+        Tasks are outrunning their humans. A grant can also carry no citation at all when the
+        auto-approve carve-out covers a bot-authored proposal no human ever commented on -
+        that is Project.spec.autoApproveMaxSignificance, a per-project severity ceiling
+        (off|patch|minor|major, default off) that replaced the old boolean flag; its refusal
+        axis appears as ceiling-off on operator_auto_approve_refused_total.
     labels:
       homelab: "true"
       system: "tatara"

@@ -641,39 +641,73 @@ the strength of a grep against this repo. It *was* written - in the plane that
 delivered nothing. **A competent audit of the wrong plane is indistinguishable
 from a real gap.**
 
-`scripts/check_chart_alert_parity.py` is the reconciliation. Every metric a
-chart alert reads must be read by some rule in `alerts/`. It is deliberately a
+`scripts/check_alert_plane_parity.py` is the reconciliation. It reconciles
+three specification planes against `alerts/`: `operator-chart`
+(`tatara-operator/charts/tatara-operator/templates/prometheusrule.yaml`),
+`memory-chart` (`tatara-memory/charts/tatara-memory/templates/prometheusrule.yaml`)
+and `operator-go` (`tatara-operator/internal/memory/monitoring.go`, the
+`memoryAlertRules` function). Every metric a rule on any of the three planes
+reads must be read by some rule in `alerts/`. It is deliberately a
 metric-level check, not a rule-level one: thresholds, groupings and rule shapes
-are this repo's business, and several ported rules are better than their chart
+are this repo's business, and several ported rules are better than their plane
 originals. A metric no rule here reads is a condition with no witness anywhere.
 
-Waivers live in `scripts/chart_alert_waivers.txt`, keyed on the
-`(chart alert, metric)` pair, and **the reason is mandatory - a reasonless line
-is a parse error, not a pass.** A waiver says "this condition is watched here,
-by a rule keyed on a different metric"; it never says "this condition does not
-matter". If a condition is genuinely not worth watching, delete the alert from
-the producer's chart rather than waiving it here, or the specification lies.
+Waivers live in `scripts/alert_plane_waivers.txt`, keyed on
+`<plane>:<AlertName> <metric>`, and **the reason is mandatory - a reasonless
+line is a parse error, not a pass.** The plane qualifier matters: six alert
+names exist on both `memory-chart` and `operator-go`, and an unqualified key
+would let one plane's waiver blanket the other's. There are two classes.
+`SUPERSEDED` (chart planes only) says "this condition is watched here, by a
+rule keyed on a different metric." `DORMANT-PRODUCER` (`operator-go` only,
+and it must carry a `re-arm: <precondition>` clause) says "this condition's
+metric is not emitted anywhere on this cluster today, and porting the rule
+would require asserting a live-emission provenance that cannot be asserted."
+Neither class ever says "this condition does not matter" - if a condition is
+genuinely not worth watching, delete the alert from the producer rather than
+waiving it here, or the specification lies.
 
-Three shipped waivers, all of the first kind. The one worth reading is
-`TataraSweepStalled`: porting it would have been a **regression**, not a gap
-being closed. It is a flat staleness threshold, and this repo deliberately
-removed exactly that shape after a flat `21600s` bound was breached for roughly
-18 hours of every 24 by the nightly crons. `Operator sweep heartbeat stale`
-replaced it with a next-expected timestamp the operator computes per
-`(project, activity)` from that activity's own cron - cadence lives in the
-producer, one rule covers every Project, and it fires on NoData as well.
+Thirteen shipped waivers. Three are `operator-chart` waivers carried over from
+v1. The one worth reading is `TataraSweepStalled`: porting it would have been
+a **regression**, not a gap being closed. It is a flat staleness threshold, and
+this repo deliberately removed exactly that shape after a flat `21600s` bound
+was breached for roughly 18 hours of every 24 by the nightly crons. `Operator
+sweep heartbeat stale` replaced it with a next-expected timestamp the operator
+computes per `(project, activity)` from that activity's own cron - cadence
+lives in the producer, one rule covers every Project, and it fires on NoData
+as well.
 
-Scope, stated so the name does not imply more than it covers: this checks the
-**tatara-operator** chart's `PrometheusRule` and nothing else. `tatara-memory`'s
-chart also ships one, but the operator provisions it per-Project at runtime and
-labels it through `MEMORY_MONITOR_LABELS` - a different mechanism, on a path no
-static file read can see. Clone failure is a **hard** failure here rather than
-the neutral skip section 5 uses, and that costs no availability:
-`check_label_provenance.py` in the same job already clones tatara-operator and
-already fails closed on it.
+The other ten are `DORMANT-PRODUCER` waivers on `operator-go`'s six postgres
+rules, which read eight CNPG metrics with no witness here. Two of those six
+have no faithful static form - their thresholds are parameterised by the
+Project CR (`PgInstances(project)-1`, and a quarter of that Project's
+`pgWalStorage`) - and all six sit behind generation gates a static read cannot
+see: four only when `instances > 1`, false for project-mtg, and two only when
+`memoryBackup.enabled`, which is false in the chart default and set nowhere in
+`tatara-helmfile`, so they have never been generated on this cluster at all.
+
+`memory-chart`'s five unwatched metrics carry no waivers, because all five
+were ported into `alerts/tatara-memory.yaml` instead: the four
+tatara-memory#89 compensating controls (`http_admission_total`,
+`go_sql_in_use_connections`, `go_sql_max_open_connections`,
+`go_sql_wait_duration_seconds_total`) and the memory API's only p99 latency
+witness (`http_request_duration_seconds`).
+
+v1's stated scope paragraph excluded `tatara-memory`, and it was right to
+state a scope - but both of its reasons were false. It claimed the operator
+provisions the `tatara-memory` chart's `PrometheusRule` at runtime; in fact
+`monitoring.go`'s `memoryAlertRules` builds an INDEPENDENT Go
+re-implementation sharing no bytes with the chart template. It claimed no
+static file read could see that path; the Go set is a plain function whose
+exprs are string literals, as readable as the chart's. The excluded path was
+the one with the measured gap: `memoryAlertRules` had dropped four of the
+chart's ten rules, including both DB-pool controls and the analytics-timeout
+rule written for the tatara-memory#89 incident. Clone failure is a **hard**
+failure here rather than the neutral skip section 5 uses, and that costs no
+availability: `check_label_provenance.py` in the same job already clones
+tatara-operator and already fails closed on it.
 
 ```sh
-python3 scripts/check_chart_alert_parity.py    # needs network for the clone
+python3 scripts/check_alert_plane_parity.py    # needs network for the clone
 ```
 
 ## 10. The routing contract: which labels decide delivery

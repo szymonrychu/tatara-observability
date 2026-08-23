@@ -12,7 +12,7 @@ Past decisions + context. One dated line per entry.
   coverage, which is worse than the silence. The plane is disabled instead
   (`prometheusRule.enabled: false`), and this repo is now the ONLY alerting plane on this cluster.
   9 chart alerts read a metric no rule here read: 6 ported, 3 waived in
-  `scripts/chart_alert_waivers.txt`. `scripts/check_chart_alert_parity.py` reconciles the two from
+  `scripts/alert_plane_waivers.txt`. `scripts/check_alert_plane_parity.py` reconciles the two from
   here on - the chart file is now a SPECIFICATION, `alerts/` is what actually alerts. The cost of
   not reconciling them is on the record as tatara-operator#635, which filed an alert as "never
   written" on a grep of this repo when it existed in the plane that delivered nothing.
@@ -30,6 +30,32 @@ Past decisions + context. One dated line per entry.
   stopped validating against what is published, so an anchor deleted on that branch read as clean.
   Anchors resolving only via the ref are named in the job summary - they are unpublished, and
   merging this repo before the docs PR is what leaves them dangling.
+- 2026-08-23 (#120): `scripts/check_alert_plane_parity.py` (renamed from `check_chart_alert_parity.py`)
+  now reconciles THREE specification planes against `alerts/`, not one: `operator-chart`, the
+  `memory-chart` PrometheusRule template, and `operator-go` (`monitoring.go`'s `memoryAlertRules`,
+  a Go function building CNPG postgres rules with no chart counterpart). v1's stated scope
+  paragraph excluded tatara-memory for two reasons and both were false. It claimed the operator
+  provisions the tatara-memory chart's PrometheusRule at runtime - it does not; `memoryAlertRules`
+  is an INDEPENDENT Go re-implementation sharing no bytes with the chart template, which is exactly
+  how the two drifted unnoticed. It also claimed no static file read could see that path - the Go
+  set is a plain function whose exprs are string literals, as readable as the chart's. The excluded
+  path was the one with the measured gap: `memoryAlertRules` had dropped 4 of the chart's 10 rules,
+  including both DB-pool controls and the analytics-timeout rule written for the tatara-memory#89
+  incident. Waiver keys are now plane-qualified (`<plane>:<AlertName> <metric>`) because six alert
+  names exist on both memory-chart and operator-go, and an unqualified key would let one plane's
+  waiver blanket the other's. `memory-chart`'s 5 unwatched metrics were all PORTED into
+  `alerts/tatara-memory.yaml` rather than waived: the four tatara-memory#89 compensating controls
+  (`http_admission_total`, `go_sql_in_use_connections`, `go_sql_max_open_connections`,
+  `go_sql_wait_duration_seconds_total`) plus the memory API's only p99 latency witness
+  (`http_request_duration_seconds`). A new `DORMANT-PRODUCER` waiver class (operator-go only,
+  requires a `re-arm: <precondition>` clause) covers the 8 CNPG metrics behind operator-go's 6
+  postgres rules, waived rather than ported: two have no faithful static form (thresholds
+  parameterised by the Project CR - `PgInstances(project)-1` and a quarter of that Project's
+  `pgWalStorage`), and all six sit behind generation gates a static read cannot see (four only when
+  `instances > 1`, false for project-mtg; two only when `memoryBackup.enabled`, false in the chart
+  default and set nowhere in tatara-helmfile, so they have never been generated on this cluster at
+  all). The whole memory subsystem has been off on every project since 2026-08-09, so this closes a
+  latent gap - its trigger is the re-enable, not a live incident.
 - 2026-07-12: Issue #50 - "Operator replica missing" warning false-fired on environment cold start /
   Prometheus restart. `count(up{job="tatara-operator"} == 1) or vector(0) < 3` fabricated a literal 0
   when every `up` series was transiently absent, and 0 < 3 held the false page for the whole 15m

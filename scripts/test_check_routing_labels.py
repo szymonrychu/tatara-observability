@@ -47,24 +47,53 @@ def messages(violations):
     return " | ".join(v.message for v in violations)
 
 
+def write(tmp, **files):
+    """Write {basename: yaml-serialisable} into tmp and return the paths."""
+    paths = []
+    for name, body in files.items():
+        path = pathlib.Path(tmp) / f"{name}.yaml"
+        path.write_text(body if isinstance(body, str) else yaml.safe_dump(body))
+        paths.append(str(path))
+    return paths
+
+
 class SystemArmTest(unittest.TestCase):
     """warning|critical => system=tatara. Omitting it is the failure with teeth: the
-    alert falls past every child route to the homelab node, emails, is muted all
-    weekend, and never mints an incident Task."""
+    rule never reaches /operator/webhooks/tatara/grafana, so it never mints an incident
+    Task, whatever else it does."""
 
     def test_warning_without_system_is_a_violation(self):
         v = check.check_rule("f.yaml", rule(labels=labels("warning", system=None)))
         self.assertEqual(len(v), 1)
         self.assertIn("system", messages(v))
+        self.assertIn("incident Task", messages(v))
 
     def test_critical_without_system_is_a_violation(self):
         v = check.check_rule("f.yaml", rule(labels=labels("critical", system=None)))
         self.assertEqual(len(v), 1)
         self.assertIn("system", messages(v))
 
+    def test_the_warning_message_names_the_weekend_mute_and_the_critical_one_does_not(
+        self,
+    ):
+        """The two severities land on DIFFERENT nodes. A warning falls to the muted
+        `homelab` node; a critical matches the `severity=critical` child, which is not
+        muted and reaches the infrastructure webhook. Telling a critical author to look
+        for a weekend mute that does not apply is a false lead in an incident."""
+        warning = messages(
+            check.check_rule("f.yaml", rule(labels=labels("warning", system=None)))
+        )
+        critical = messages(
+            check.check_rule("f.yaml", rule(labels=labels("critical", system=None)))
+        )
+        self.assertIn("muted", warning)
+        self.assertNotIn("muted", critical)
+        self.assertIn("severity=critical", critical)
+
     def test_warning_with_a_wrong_system_value_is_a_violation(self):
         v = check.check_rule("f.yaml", rule(labels=labels("warning", system="Tatara")))
         self.assertEqual(len(v), 1)
+        self.assertIn("system", messages(v))
 
     def test_clean_warning_rule_passes(self):
         self.assertEqual(check.check_rule("f.yaml", rule(labels=labels("warning"))), [])
@@ -93,6 +122,54 @@ class InfoArmTest(unittest.TestCase):
     def test_info_with_an_empty_system_value_is_still_a_violation(self):
         v = check.check_rule("f.yaml", rule(labels=labels("info", system="")))
         self.assertEqual(len(v), 1)
+        self.assertIn("system", messages(v))
+
+    def test_a_foreign_system_value_is_not_described_as_minting_a_task(self):
+        """`system: homeassistant` on an info rule matches no child route, so it does
+        NOT mint an incident Task. The arm still rejects it - `system` is a routing key
+        this repo does not get to borrow - but the message must not claim a consequence
+        that only the value `tatara` has."""
+        v = check.check_rule(
+            "f.yaml", rule(labels=labels("info", system="homeassistant"))
+        )
+        self.assertEqual(len(v), 1)
+        self.assertNotIn("mints an incident Task per fire", messages(v))
+
+
+class PageArmTest(unittest.TestCase):
+    """`page="true"` is the THIRD live child route, and it reaches the same unmuted
+    Critical receiver the critical route does. It sits below `system=tatara`, so it is
+    inert on a routed rule and an escalation on an info one - exactly the rules the
+    severity gate says must be email-only. Neither state is something a tatara rule
+    should express by accident."""
+
+    def test_page_on_an_info_rule_is_a_violation(self):
+        v = check.check_rule(
+            "f.yaml", rule(labels={**labels("info", system=None), "page": "true"})
+        )
+        self.assertEqual(len(v), 1)
+        self.assertIn("page", messages(v))
+
+    def test_page_on_a_routed_rule_is_a_violation(self):
+        v = check.check_rule(
+            "f.yaml", rule(labels={**labels("critical"), "page": "true"})
+        )
+        self.assertEqual(len(v), 1)
+        self.assertIn("page", messages(v))
+
+    def test_page_false_is_still_a_violation(self):
+        v = check.check_rule(
+            "f.yaml", rule(labels={**labels("warning"), "page": "false"})
+        )
+        self.assertEqual(len(v), 1)
+        self.assertIn("page", messages(v))
+
+    def test_a_justification_waives_the_page_arm(self):
+        r = rule(
+            labels={**labels("info", system=None), "page": "true"},
+            tatara_routing_justification="deliberate human page, see #999",
+        )
+        self.assertEqual(check.check_rule("f.yaml", r), [])
 
 
 class HomelabArmTest(unittest.TestCase):
@@ -115,6 +192,29 @@ class HomelabArmTest(unittest.TestCase):
             "f.yaml", rule(labels=labels("info", homelab=None, system=None))
         )
         self.assertEqual(len(v), 1)
+        self.assertIn("homelab", messages(v))
+
+
+class TerraformCoercionTest(unittest.TestCase):
+    """`labels` is typed `map(string)` in the module, so terraform coerces an unquoted
+    YAML scalar before Grafana ever sees it: `homelab: true` renders as the string
+    "true" and routes correctly. Rejecting it would be a red build on a rule with no
+    routing defect - the exact false-failure shape MEMORY.md records for #111."""
+
+    def test_an_unquoted_yaml_true_satisfies_homelab(self):
+        self.assertEqual(
+            check.check_rule("f.yaml", rule(labels=labels("warning", homelab=True))), []
+        )
+
+    def test_an_unquoted_yaml_false_still_fails_homelab(self):
+        v = check.check_rule("f.yaml", rule(labels=labels("warning", homelab=False)))
+        self.assertEqual(len(v), 1)
+        self.assertIn("homelab", messages(v))
+
+    def test_a_numeric_severity_is_still_an_unrecognised_severity(self):
+        v = check.check_rule("f.yaml", rule(labels=labels(severity=1)))
+        self.assertEqual(len(v), 1)
+        self.assertIn("severity", messages(v))
 
 
 class SeverityArmTest(unittest.TestCase):
@@ -153,13 +253,24 @@ class LabelsPresenceTest(unittest.TestCase):
         self.assertEqual(len(v), 1)
         self.assertIn("labels", messages(v))
 
-    def test_missing_labels_reports_once_not_once_per_arm(self):
-        self.assertEqual(len(check.check_rule("f.yaml", rule())), 1)
+    def test_missing_labels_reports_only_the_labels_defect(self):
+        """Not once per arm. Every arm below would also trip, and three violations on
+        one rule for one cause is noise an author has to triage."""
+        v = check.check_rule("f.yaml", rule())
+        self.assertEqual(len(v), 1)
+        self.assertNotIn("homelab:", messages(v))
+        self.assertNotIn("severity:", messages(v))
+
+    def test_labels_declared_as_a_list_is_a_violation_not_a_crash(self):
+        v = check.check_rule("f.yaml", rule(labels=[{"homelab": "true"}]))
+        self.assertEqual(len(v), 1)
+        self.assertIn("labels", messages(v))
 
 
 class WaiverTest(unittest.TestCase):
     """The waiver exists so a legitimate exception is visible in the diff instead of
-    being achieved by deleting the check. It waives the severity=>system arm ONLY."""
+    being achieved by deleting the check. It waives the severity-keyed system and page
+    arms ONLY."""
 
     def test_justification_waives_a_missing_system_on_a_warning_rule(self):
         r = rule(
@@ -177,7 +288,7 @@ class WaiverTest(unittest.TestCase):
 
     def test_justification_does_not_waive_a_missing_homelab(self):
         r = rule(
-            labels=labels("warning", homelab=None),
+            labels=labels("warning", homelab=None, system=None),
             tatara_routing_justification="deliberately email-only, see #999",
         )
         v = check.check_rule("f.yaml", r)
@@ -189,11 +300,15 @@ class WaiverTest(unittest.TestCase):
             labels=labels("page"),
             tatara_routing_justification="deliberately email-only, see #999",
         )
-        self.assertEqual(len(check.check_rule("f.yaml", r)), 1)
+        v = check.check_rule("f.yaml", r)
+        self.assertEqual(len(v), 1)
+        self.assertIn("severity", messages(v))
 
     def test_justification_does_not_waive_missing_labels(self):
         r = rule(tatara_routing_justification="deliberately email-only, see #999")
-        self.assertEqual(len(check.check_rule("f.yaml", r)), 1)
+        v = check.check_rule("f.yaml", r)
+        self.assertEqual(len(v), 1)
+        self.assertIn("labels", messages(v))
 
     def test_empty_justification_is_not_a_waiver(self):
         r = rule(labels=labels("warning", system=None), tatara_routing_justification="")
@@ -205,59 +320,108 @@ class WaiverTest(unittest.TestCase):
         )
         self.assertEqual(len(check.check_rule("f.yaml", r)), 1)
 
-    def test_non_string_justification_is_not_a_waiver(self):
+    def test_a_boolean_justification_is_not_a_waiver(self):
         r = rule(
             labels=labels("warning", system=None), tatara_routing_justification=True
         )
         self.assertEqual(len(check.check_rule("f.yaml", r)), 1)
 
-    def test_a_waived_rule_is_reported_so_the_override_is_visible_in_ci(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = pathlib.Path(tmp) / "g.yaml"
-            path.write_text(
-                yaml.safe_dump(
-                    {
-                        "rules": [
-                            rule(
-                                name="Waived",
-                                labels=labels("warning", system=None),
-                                tatara_routing_justification="see #999",
-                            ),
-                            rule(name="Clean", labels=labels("warning")),
-                        ]
-                    }
-                )
-            )
-            violations, waived = check.check_paths([str(path)])
-        self.assertEqual(violations, [])
-        self.assertEqual([w.rule for w in waived], ["Waived"])
-        self.assertIn("see #999", str(waived[0]))
+    def test_a_numeric_justification_is_not_a_waiver(self):
+        r = rule(
+            labels=labels("warning", system=None), tatara_routing_justification=457
+        )
+        self.assertEqual(len(check.check_rule("f.yaml", r)), 1)
+
+
+class DeadWaiverTest(unittest.TestCase):
+    """A justification on a rule that satisfies both waivable arms is a violation, not
+    a no-op. Left alone it is invisible to CI, unreviewable, and silently ARMS itself
+    the day someone drops `system` from that rule - the exception then applies with a
+    reason written for a condition that no longer exists."""
+
+    def test_a_justification_that_suppresses_nothing_is_a_violation(self):
+        r = rule(
+            labels=labels("warning"),
+            tatara_routing_justification="waived back in #999, no longer applies",
+        )
+        v = check.check_rule("f.yaml", r)
+        self.assertEqual(len(v), 1)
+        self.assertIn("tatara_routing_justification", messages(v))
+
+    def test_a_justification_on_a_clean_info_rule_is_a_violation(self):
+        r = rule(
+            labels=labels("info", system=None),
+            tatara_routing_justification="stale",
+        )
+        self.assertEqual(len(check.check_rule("f.yaml", r)), 1)
+
+    def test_a_live_waiver_is_not_reported_as_dead(self):
+        r = rule(
+            labels=labels("warning", system=None),
+            tatara_routing_justification="see #999",
+        )
+        self.assertEqual(check.check_rule("f.yaml", r), [])
 
 
 class CheckPathsTest(unittest.TestCase):
     def test_reports_every_offending_rule_in_a_file(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = pathlib.Path(tmp) / "g.yaml"
-            path.write_text(
-                yaml.safe_dump(
-                    {
-                        "rules": [
-                            rule(name="Dark", labels=labels("warning", system=None)),
-                            rule(name="Spammy", labels=labels("info")),
-                            rule(name="Clean", labels=labels("critical")),
-                        ]
-                    }
-                )
+            (path,) = write(
+                tmp,
+                g={
+                    "rules": [
+                        rule(name="Dark", labels=labels("warning", system=None)),
+                        rule(name="Spammy", labels=labels("info")),
+                        rule(name="Clean", labels=labels("critical")),
+                    ]
+                },
             )
-            violations, waived = check.check_paths([str(path)])
+            violations, waived = check.check_paths([path])
         self.assertEqual(sorted(v.rule for v in violations), ["Dark", "Spammy"])
+        self.assertEqual(waived, [])
+
+    def test_a_waived_rule_is_reported_so_the_override_is_visible_in_ci(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (path,) = write(
+                tmp,
+                g={
+                    "rules": [
+                        rule(
+                            name="Waived",
+                            labels=labels("warning", system=None),
+                            tatara_routing_justification="see #999",
+                        ),
+                        rule(name="Clean", labels=labels("warning")),
+                    ]
+                },
+            )
+            violations, waived = check.check_paths([path])
+        self.assertEqual(violations, [])
+        self.assertEqual([w.rule for w in waived], ["Waived"])
+        self.assertIn("see #999", str(waived[0]))
+
+    def test_a_dead_waiver_is_not_counted_as_a_waiver(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (path,) = write(
+                tmp,
+                g={
+                    "rules": [
+                        rule(
+                            name="Stale",
+                            labels=labels("warning"),
+                            tatara_routing_justification="no longer applies",
+                        )
+                    ]
+                },
+            )
+            violations, waived = check.check_paths([path])
+        self.assertEqual([v.rule for v in violations], ["Stale"])
         self.assertEqual(waived, [])
 
     def test_a_file_with_no_rules_key_is_not_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = pathlib.Path(tmp) / "g.yaml"
-            path.write_text("interval_seconds: 60\n")
-            self.assertEqual(check.check_paths([str(path)]), ([], []))
+            (path,) = write(tmp, g="interval_seconds: 60\n")
+            self.assertEqual(check.check_paths([path]), ([], []))
 
     def test_violation_str_names_the_file_and_the_rule(self):
         v = check.check_rule(
@@ -267,25 +431,61 @@ class CheckPathsTest(unittest.TestCase):
         self.assertIn("Dark", str(v))
 
 
+class MalformedFileTest(unittest.TestCase):
+    """A guard that cannot read a file must say so, naming the file, and exit 2. The
+    failure mode these shapes used to have was an AttributeError traceback pointing at
+    the checker rather than at the alert file that caused it."""
+
+    def _rc(self, body):
+        with tempfile.TemporaryDirectory() as tmp:
+            (path,) = write(tmp, g=body)
+            return check.main(["check_routing_labels.py", path])
+
+    def test_a_top_level_list_is_exit_2_not_a_silent_pass(self):
+        self.assertEqual(self._rc('- name: "a group in a list"\n'), 2)
+
+    def test_a_scalar_rule_is_exit_2(self):
+        self.assertEqual(self._rc('rules:\n  - "just a name"\n'), 2)
+
+    def test_rules_as_a_mapping_is_exit_2(self):
+        self.assertEqual(self._rc("rules:\n  a rule:\n    threshold: 1\n"), 2)
+
+    def test_malformed_yaml_is_exit_2(self):
+        self.assertEqual(self._rc("rules: [unclosed\n"), 2)
+
+    def test_the_error_names_the_offending_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (path,) = write(tmp, offender='- name: "a group in a list"\n')
+            with self.assertRaises(ValueError) as ctx:
+                check.check_paths([path])
+        self.assertIn("offender.yaml", str(ctx.exception))
+
+
 class MainTest(unittest.TestCase):
     def test_exit_1_on_a_violation(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = pathlib.Path(tmp) / "g.yaml"
-            path.write_text(
-                yaml.safe_dump({"rules": [rule(labels=labels("warning", system=None))]})
+            (path,) = write(
+                tmp, g={"rules": [rule(labels=labels("warning", system=None))]}
             )
-            self.assertEqual(check.main(["check_routing_labels.py", str(path)]), 1)
+            self.assertEqual(check.main(["check_routing_labels.py", path]), 1)
 
     def test_exit_0_on_a_clean_file(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = pathlib.Path(tmp) / "g.yaml"
-            path.write_text(yaml.safe_dump({"rules": [rule(labels=labels("warning"))]}))
-            self.assertEqual(check.main(["check_routing_labels.py", str(path)]), 0)
+            (path,) = write(tmp, g={"rules": [rule(labels=labels("warning"))]})
+            self.assertEqual(check.main(["check_routing_labels.py", path]), 0)
 
     def test_exit_2_on_an_unreadable_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             missing = str(pathlib.Path(tmp) / "nope.yaml")
             self.assertEqual(check.main(["check_routing_labels.py", missing]), 2)
+
+    def test_exit_2_when_no_alert_files_are_found(self):
+        original = check._default_paths
+        check._default_paths = lambda: []
+        try:
+            self.assertEqual(check.main(["check_routing_labels.py"]), 2)
+        finally:
+            check._default_paths = original
 
 
 class LiveCorpusTest(unittest.TestCase):

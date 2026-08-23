@@ -1359,11 +1359,29 @@ PR/push triggers.
   `scripts/check_routing_labels.py`, wired blocking into `alert-rules-lint.yml`. The note at
   :58-61 is no longer the only record of it, and neither is :780-787: all rules must carry
   `homelab="true"`, `critical`/`warning` must carry `system="tatara"`, `info` must NOT, an
-  unrecognised `severity` is a hard failure rather than an else-branch pass, and `labels` must
-  be present and non-empty. Contract, tree, waiver and both failure directions are written up in
-  CONVENTIONS.md section 10. Rule-level `tatara_routing_justification` waives the
-  severity=>system arm only, is registered in `check_alert_schema.py` `LINT_ONLY_KEYS["rule"]`,
-  and is printed by the checker so an override shows up in CI output as well as in the diff.
+  unrecognised `severity` is a hard failure rather than an else-branch pass, `page` must be
+  absent on every rule, and `labels` must be a present, non-empty mapping. Contract, tree,
+  waiver and every failure direction are written up in CONVENTIONS.md section 10. Rule-level
+  `tatara_routing_justification` waives the severity-keyed `system`/`page` arms only, is
+  registered in `check_alert_schema.py` `LINT_ONLY_KEYS["rule"]`, and is printed by the checker
+  so an override shows up in CI output as well as in the diff. A justification that waives
+  nothing is itself a violation - a dead waiver is unreviewable and arms itself silently the
+  day the labels around it change.
+- 2026-08-23 (#117): **`system=tatara` is the ONLY incident-minting route, and the two routed
+  severities fail DIFFERENTLY when it is missing.** A `warning` without it falls to the
+  weekend-muted `homelab` node (one email). A `critical` without it matches the
+  `severity="critical"` child, which is NOT muted and reaches
+  `/operator/webhooks/infrastructure/grafana` on a 4h repeat - a different project's endpoint,
+  so it still mints no tatara Task. The first draft of this guard told every routed author to
+  look for a weekend mute; half of them would have been chasing a mute window that does not
+  apply to them. `page="true"` is the third live child, reaching the same Critical receiver:
+  it sits BELOW `system=tatara`, so it is inert on a routed rule and an escalation on an
+  `info` one - which is why the guard asserts it absent even though no rule uses it.
+- 2026-08-23 (#117): **`labels` is `map(string)`, so terraform coerces before Grafana sees the
+  value.** An unquoted YAML `homelab: true` is a Python bool on the way in and the string
+  `"true"` on the way out, and it routes correctly. Comparing the raw value would have
+  red-built a rule with no routing defect - the same false-failure surface #111 recorded. The
+  checker normalises the way terraform does.
 - 2026-08-23 (#117): **Deleted `local.alert_tags` and the `default_labels` wiring in
   `grafana.tf`.** `main.tf:124` is a ternary, not a merge, and 130/130 rules declare their own
   `labels`, so the fallback never ran and the `homelab="true"` parked there could never be read.

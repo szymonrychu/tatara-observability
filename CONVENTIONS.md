@@ -679,30 +679,33 @@ python3 scripts/check_chart_alert_parity.py    # needs network for the clone
 ## 10. The routing contract: which labels decide delivery
 
 Sections 1-9 all assert that a rule is *correct*. Every one of them assumes it is
-*delivered*. Delivery is decided by two label strings, restated by hand in all 130
-rules, and until issue #117 nothing verified them.
+*delivered*. Delivery is decided by label strings restated by hand in every rule,
+and until issue #117 nothing verified them.
 
 The live notification policy tree (owned by `infra/terraform/grafana`, not this
 repo):
 
 ```
 root                        receiver=Default
-`-- homelab="true"          receiver=Default, mute_time_intervals=["Default"]
-    |-- system="tatara"     receiver=Tatara      <- the operator incident webhook
+`-- homelab="true"          receiver=Default,  mute_time_intervals=["Default"]
+    |-- system="tatara"     receiver=Tatara    -> /operator/webhooks/tatara/grafana
     |-- severity="critical" receiver=Critical
     `-- page="true"         receiver=Critical
 ```
 
-First matching child wins. No route sets `continue`. The `Default` mute interval
-is all day Saturday and Sunday. The `Default` contact point is one email address.
+First matching child wins. No route sets `continue`. `Default` is one email
+address and mutes all day Saturday and Sunday. `Critical` is an unmuted email
+plus a webhook to `/operator/webhooks/`**`infrastructure`**`/grafana` on a 4h
+repeat - a different project's endpoint, so reaching it does **not** mint a
+tatara incident Task either. The only incident-minting path is `system="tatara"`.
 
 ### The contract
 
-| severity | `homelab="true"` | `system="tatara"` |
-|---|---|---|
-| `critical` | required | required |
-| `warning` | required | required |
-| `info` | required | **must be absent** |
+| severity | `homelab="true"` | `system="tatara"` | `page` |
+|---|---|---|---|
+| `critical` | required | required | absent |
+| `warning` | required | required | absent |
+| `info` | required | **must be absent** | absent |
 
 An unrecognised `severity` is a hard failure, not a pass: the contract is keyed on
 severity, so a value with no arm has no defined delivery. A fourth severity needs a
@@ -714,20 +717,30 @@ route - and an arm in the checker - before a rule may carry it.
 
 | defect | lands on | consequence |
 |---|---|---|
-| `warning`/`critical` omits `system` | the `homelab` node | **never mints an incident Task.** Emails, and is muted every weekend |
-| `info` gains `system` | the `system` child | mints an incident Task per fire, for a trend rule |
+| `warning` omits `system` | the `homelab` node | one email, **muted every weekend**, and it **never mints an incident Task** |
+| `critical` omits `system` | `severity="critical"` | the Critical receiver: not muted, but the *infrastructure* webhook - so still **never mints a tatara incident Task** |
+| `info` gains `system` | `system="tatara"` | mints an incident Task per fire, for a trend rule |
+| any rule carries `page` | `page="true"` | escalates an unrouted rule to Critical; inert and misleading on a routed one |
 | any rule omits `homelab` | root | still emails, but loses the mute window and the grouping |
 
-Row 1 is the one with teeth: such a rule passes every other check here, passes
-`terraform validate`, plans, applies green, evaluates correctly and fires correctly,
-and never reaches the agent platform. Same silent-green shape as sections 5 and 7,
-one surface over.
+Rows 1 and 2 are the ones with teeth: such a rule passes every other check here,
+passes `terraform validate`, plans, applies green, evaluates correctly and fires
+correctly, and never reaches the agent platform. Same silent-green shape as
+sections 5 and 7, one surface over. Note that the two severities land on
+**different nodes** - the weekend mute is a `warning` problem, not a `critical`
+one, and telling a critical author otherwise sends them looking for a mute window
+that does not apply.
 
-Row 2 is not hypothetical. The two trend rules added for #457 (`Repository phase
+Row 3 is not hypothetical. The two trend rules added for #457 (`Repository phase
 desync still being produced`, `Ingest job creation race still being hit`) shipped
 carrying `system=tatara` and were corrected by a human reading label sets. **Do not
 "harmonise" the label sets across severities.** `severity: info` means "email only",
 and that is a deliberate severity gate, not an inconsistency.
+
+Row 4 is why `page` is asserted absent even though no rule uses it: it is the third
+live child, it reaches the same unmuted Critical receiver, and it sits *below*
+`system=tatara` in first-match order. So it can only bite the rules with no `system`
+- precisely the `info` rules the severity gate says must be email-only.
 
 ### `labels` is effectively required
 
@@ -743,13 +756,21 @@ so the false branch was unreachable, and the `homelab = "true"` that used to sit
 safety net that cannot fire is worse than none, because it told the next author that
 omitting `homelab` was survivable. The module input stays declared (it is vendored
 from `infra/terraform`; keep it byte-aligned), so the fallback now renders *no*
-labels - which routes to the root receiver. The checker asserts `labels` is present
-and non-empty, which is what keeps that branch unreachable.
+labels - which routes to the root receiver. The checker asserts `labels` is present,
+non-empty and a mapping, which is what keeps that branch unreachable.
+
+### Terraform coercion is part of the predicate
+
+`labels` is typed `map(string)`, so an unquoted YAML `homelab: true` is a bool in the
+file and the string `"true"` by the time Grafana sees it - the rule routes correctly.
+The checker compares values after the same coercion. Quote them anyway for
+consistency with the other 130 rules, but a red build on a rule with no routing
+defect is how a hard gate gets argued down to a warning (see 6.4).
 
 ### The waiver
 
-A rule-level `tatara_routing_justification` (non-empty string) waives the
-severity => `system` arm **for that rule only**:
+A rule-level `tatara_routing_justification` (non-empty string) waives the severity-keyed
+`system` and `page` arms **for that rule only**:
 
 ```yaml
   - name: "An info condition that really must mint a Task"
@@ -761,10 +782,15 @@ severity => `system` arm **for that rule only**:
       severity: "info"
 ```
 
-It does **not** waive `homelab`, severity validity, or non-empty `labels`: there is
-no legitimate reason for a tatara alert to leave the homelab subtree. Waived rules
-are printed by the checker, so the override is visible in CI output as well as in
-the diff.
+It does **not** waive `homelab`, severity validity, or `labels` being a non-empty
+mapping: there is no legitimate reason for a tatara alert to leave the homelab
+subtree. Waived rules are printed by the checker, so the override is visible in CI
+output as well as in the diff.
+
+**A justification that waives nothing is a violation.** A stale key left on a rule
+whose labels already satisfy the contract is invisible to review and arms itself
+silently the day someone changes those labels - the exception then applies with a
+reason written for a condition that no longer exists. Delete it instead.
 
 `tatara_routing_justification` is a LINT-ONLY key (section 7): it is registered in
 `check_alert_schema.py`'s `LINT_ONLY_KEYS["rule"]` and relies on the silent drop to

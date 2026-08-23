@@ -72,6 +72,8 @@ on:
       - "scripts/check_chart_alert_parity.py"
       - "scripts/test_check_chart_alert_parity.py"
       - "scripts/chart_alert_waivers.txt"
+      - "scripts/check_routing_labels.py"
+      - "scripts/test_check_routing_labels.py"
       - ".github/workflows/alert-rules-lint.yml"
   push:
     branches: [main]
@@ -97,6 +99,8 @@ on:
       - "scripts/check_chart_alert_parity.py"
       - "scripts/test_check_chart_alert_parity.py"
       - "scripts/chart_alert_waivers.txt"
+      - "scripts/check_routing_labels.py"
+      - "scripts/test_check_routing_labels.py"
       - ".github/workflows/alert-rules-lint.yml"
   schedule:
     # Nightly reverse-drift sweep: a metric removed from a producer repo never touches
@@ -214,12 +218,13 @@ jobs:
       # The routing contract (issue #117). Every check above asserts a rule is well-formed,
       # its metric exists, its labels exist on that metric, its threshold is in range, its
       # runbook resolves - and every one of them ASSUMES the rule is delivered. Delivery is
-      # decided by two hand-copied label strings that nothing verified: `homelab=true` (the
-      # parent policy) and `system=tatara` (the child route to the operator incident
-      # webhook). Per-rule `labels` REPLACE the module default (main.tf:124 is a ternary),
-      # first matching child wins, and the homelab node is muted all weekend - so a
-      # warning/critical rule that drops `system` lints, plans, applies green, fires
-      # correctly, emails into a Saturday mute, and NEVER mints an incident Task.
+      # decided by hand-copied label strings that nothing verified. `system=tatara` is the
+      # ONLY route to /operator/webhooks/tatara/grafana, so it is the only path that mints
+      # an incident Task. Per-rule `labels` REPLACE the module default (main.tf:124 is a
+      # ternary) and first matching child wins, so a routed rule that drops `system` lints,
+      # plans, applies green, fires correctly and never reaches the agent platform: a
+      # warning falls to the weekend-muted homelab node, a critical matches severity=critical
+      # and reaches the INFRASTRUCTURE webhook instead. Neither mints a tatara Task.
       #
       # Bidirectional and keyed on severity, because both directions have failed: `info`
       # rules must OMIT `system`, and the two #457 trend rules shipped carrying it - each

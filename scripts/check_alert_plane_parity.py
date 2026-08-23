@@ -78,18 +78,25 @@ import tempfile
 from check_label_provenance import alert_queries
 from check_metric_provenance import metric_names
 
-OPERATOR_REPO = "https://github.com/szymonrychu/tatara-operator.git"
-MEMORY_REPO = "https://github.com/szymonrychu/tatara-memory.git"
+REPO_URLS = {
+    "tatara-operator": "https://github.com/szymonrychu/tatara-operator.git",
+    "tatara-memory": "https://github.com/szymonrychu/tatara-memory.git",
+}
 WAIVERS_PATH = pathlib.Path(__file__).resolve().parent / "alert_plane_waivers.txt"
-
-# plane -> (repo, path in that repo, reader). Order is the report order.
-OPERATOR_CHART_PATH = "charts/tatara-operator/templates/prometheusrule.yaml"
-MEMORY_CHART_PATH = "charts/tatara-memory/templates/prometheusrule.yaml"
-OPERATOR_GO_PATH = "internal/memory/monitoring.go"
 
 CHART_PLANES = ("operator-chart", "memory-chart")
 GO_PLANES = ("operator-go",)
 PLANES = CHART_PLANES + GO_PLANES
+
+# plane -> (repo, path within that repo). Order is the report order. A plane in PLANES
+# with no entry here is a hard startup error rather than a KeyError halfway through a
+# run: the whole point of this file is that a plane nobody looked at must never read as
+# a plane with nothing wrong.
+SOURCES = {
+    "operator-chart": ("tatara-operator", "charts/tatara-operator/templates/prometheusrule.yaml"),
+    "memory-chart": ("tatara-memory", "charts/tatara-memory/templates/prometheusrule.yaml"),
+    "operator-go": ("tatara-operator", "internal/memory/monitoring.go"),
+}
 
 _ALERT_LINE = re.compile(r"^(\s*)-\s*alert:\s*(\S+)\s*$")
 _EXPR_LINE = re.compile(r"^(\s*)expr:\s*(.*)$")
@@ -511,10 +518,31 @@ def _read_plane(plane: str, path: pathlib.Path) -> dict[str, set[str]]:
     return go_alerts(text) if plane in GO_PLANES else chart_alerts(text)
 
 
+def unsourced_planes() -> list[str]:
+    """Planes declared in PLANES that SOURCES or REPO_URLS cannot actually reach. Empty
+    on a consistent table; anything else means a plane would be skipped or would crash
+    mid-run, and a plane nobody looked at must never read as a plane with nothing
+    wrong."""
+    return sorted(
+        plane
+        for plane in PLANES
+        if plane not in SOURCES or SOURCES[plane][0] not in REPO_URLS
+    )
+
+
 def main(argv: list[str]) -> int:
     paths = argv[1:] or _alert_paths()
     if not paths:
         print("check_alert_plane_parity: no alert files found", file=sys.stderr)
+        return 2
+    unsourced = unsourced_planes()
+    if unsourced:
+        print(
+            f"check_alert_plane_parity: {', '.join(unsourced)} declared in PLANES but "
+            "not reachable through SOURCES/REPO_URLS. Failing at startup rather than "
+            "silently checking fewer planes than the name promises.",
+            file=sys.stderr,
+        )
         return 2
     try:
         waivers = load_waivers(WAIVERS_PATH)
@@ -523,23 +551,16 @@ def main(argv: list[str]) -> int:
         print(f"check_alert_plane_parity: {exc}", file=sys.stderr)
         return 2
 
-    sources = {
-        "operator-chart": ("tatara-operator", OPERATOR_CHART_PATH),
-        "memory-chart": ("tatara-memory", MEMORY_CHART_PATH),
-        "operator-go": ("tatara-operator", OPERATOR_GO_PATH),
-    }
-    urls = {"tatara-operator": OPERATOR_REPO, "tatara-memory": MEMORY_REPO}
-
     planes: dict[str, dict[str, set[str]]] = {}
     with tempfile.TemporaryDirectory(prefix="alert-plane-parity-") as tmp:
         roots: dict[str, pathlib.Path] = {}
-        for repo, url in urls.items():
+        for repo, url in REPO_URLS.items():
             dest = pathlib.Path(tmp) / repo
             if not clone(repo, url, dest):
                 return 2
             roots[repo] = dest
         for plane in PLANES:
-            repo, rel = sources[plane]
+            repo, rel = SOURCES[plane]
             try:
                 planes[plane] = _read_plane(plane, roots[repo] / rel)
             except OSError as exc:

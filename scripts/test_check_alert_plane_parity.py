@@ -11,6 +11,8 @@ import tempfile
 import unittest
 
 from check_alert_plane_parity import (
+    PLANES,
+    WAIVER_CLASSES,
     UnresolvedExpr,
     Waiver,
     chart_alerts,
@@ -18,6 +20,7 @@ from check_alert_plane_parity import (
     load_waivers,
     ported_metrics,
     reconcile,
+    unsourced_planes,
 )
 
 # A miniature of tatara-operator's prometheusrule.yaml: a plain expr, a Go-templated
@@ -472,6 +475,23 @@ class LoadWaiversTest(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 load_waivers(path)
+
+
+class PlaneTableTest(unittest.TestCase):
+    """The three module-level tables that decide what gets looked at must agree. A plane
+    listed in PLANES but unreachable through SOURCES/REPO_URLS would crash mid-run, and a
+    class restricted to a plane that does not exist can never be used - both are ways the
+    check silently covers less than its name says, which is this file's whole subject."""
+
+    def test_every_declared_plane_is_reachable(self):
+        self.assertEqual(unsourced_planes(), [])
+
+    def test_every_waiver_class_is_restricted_to_planes_that_exist(self):
+        for klass, allowed in WAIVER_CLASSES.items():
+            self.assertTrue(allowed, f"{klass} is allowed on no plane at all")
+            self.assertEqual(
+                sorted(allowed - set(PLANES)), [], f"{klass} names a plane not in PLANES"
+            )
 
 
 class LiveTreeTest(unittest.TestCase):

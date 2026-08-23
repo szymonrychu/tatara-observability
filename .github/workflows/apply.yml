@@ -68,14 +68,28 @@ jobs:
       # fresh terraform process - with fresh per-request deadlines - succeeds on a later
       # attempt. terraform is idempotent and converges to the same desired state.
       # See MEMORY.md 2026-06-28.
+      #
+      # Retries drop to -refresh=false, the same mitigation the apply step below already
+      # carries and for the same reason: the stall always fires on a GET during the mass
+      # refresh of the ~34 rule reads, so a retry that refreshes everything again just
+      # re-stalls on a DIFFERENT rule and burns the attempt. Three full-refresh attempts
+      # is three rolls of the same dice. Attempt 1 keeps the refresh so genuine drift is
+      # still visible in the sticky plan comment; a retried plan is config-vs-state only
+      # and says so in the comment header. See MEMORY.md 2026-08-23.
       - name: terraform plan
         if: github.event_name == 'pull_request'
         run: |
           set -o pipefail
           ok=0
+          refreshed=1
           for attempt in 1 2 3; do
             echo "terraform plan attempt ${attempt}/3"
-            if terraform plan -input=false -no-color -lock-timeout=300s -parallelism=1 2>&1 | tee plan.txt; then
+            refresh_flag=""
+            if [ "${attempt}" -gt 1 ]; then
+              refresh_flag="-refresh=false"
+              refreshed=0
+            fi
+            if terraform plan -input=false -no-color -lock-timeout=300s -parallelism=1 ${refresh_flag} 2>&1 | tee plan.txt; then
               ok=1
               break
             fi
@@ -85,6 +99,11 @@ jobs:
           {
             echo '### terraform plan (tatara-observability)'
             echo
+            if [ "${refreshed}" -ne 1 ]; then
+              echo '> Planned with `-refresh=false` after a provisioning-API stall on the refreshing'
+              echo '> attempt. This is config-vs-state only: out-of-band drift is NOT reflected below.'
+              echo
+            fi
             echo '<details><summary>plan output (truncated)</summary>'
             echo
             echo '```hcl'

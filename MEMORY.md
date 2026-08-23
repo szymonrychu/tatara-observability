@@ -2,6 +2,17 @@
 
 Past decisions + context. One dated line per entry.
 
+- 2026-08-23: The `terraform plan` retry in `.github/workflows/apply.yml` was three rolls of the
+  same dice. The 2026-07-05 entry below worked out that the homelab provisioning-API stall always
+  fires on a GET during the mass refresh of the ~34 rule reads, and gave the APPLY step
+  `-refresh=false` on retries so a fresh process reads ~1 rule instead of ~34. The PLAN step never
+  got that mitigation: it retried with a full refresh each time, so each attempt re-stalled on a
+  DIFFERENT rule group. Observed on PR #121, which touches only `alerts/tatara-wrapper.yaml` and
+  went red on a 503 reading `tatara-ingester` - a rule group it does not modify - after three full
+  refreshes. Ported the apply step's own fix: attempt 1 still refreshes (drift stays visible in
+  the sticky plan comment), retries drop to `-refresh=false` and the comment says so, since a
+  non-refreshed plan cannot show out-of-band drift and a silent one would be read as "no drift".
+
 - 2026-08-23: tatara-claude-code-wrapper#189 - every provenance check in this repo validates the
   metric NAME at its PRODUCER, and not one of them can ask whether the SERIES exists.
   `ccw_commit_push_total` and `ccw_turns_total` were allowlisted, emitted at the producer's main,

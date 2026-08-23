@@ -48,7 +48,9 @@ LINT_ONLY_KEYS = {
     # CONVENTIONS.md 6.3: file-scope justification for default_exec_err_state: Alerting,
     # read by lint_alert_rules.lint_file_exec_err_state.
     "group": frozenset({"tatara_exec_err_justification"}),
-    "rule": frozenset(),
+    # CONVENTIONS.md 10: rule-scope waiver for the severity=>system routing arm, read by
+    # check_routing_labels.check_rule.
+    "rule": frozenset({"tatara_routing_justification"}),
     "query": frozenset(),
 }
 

@@ -592,3 +592,86 @@ Run it locally:
 ```sh
 python3 scripts/check_runbook_urls.py     # needs network for the anchor half
 ```
+
+`TATARA_DOCS_REF` is a **union over `main`, never a replacement for it.** A
+change that adds a rule and its runbook is two PRs, and the docs one has to
+land first or this check sees an anchor that does not exist yet:
+
+```sh
+TATARA_DOCS_REF=feat/my-runbook python3 scripts/check_runbook_urls.py
+```
+
+`main` is always cloned and always authoritative; the ref may only **add**
+anchors on top of it. Replacement was the original behaviour and it silently
+narrowed the check - pointing a run at a docs branch stopped validating against
+what is published, so an anchor *deleted* on that branch read as clean.
+Anchors that resolved only via the ref are listed in the job summary, because
+they are unpublished: merging this repo before the docs PR is exactly what
+leaves those links dangling. CI passes `github.head_ref`, which is empty on
+push, so a merge to `main` is always checked against published `main` alone.
+
+## 9. The chart file is a specification, and CI reconciles it
+
+Until 2026-08-23 this platform had **two alerting planes and delivered on one.**
+`tatara-operator`'s chart ships a 32-alert `PrometheusRule` with
+`prometheusRule.enabled: true`, and this cluster's Prometheus never loaded a
+single one: the kube-prometheus-stack `ruleSelector` matches
+`release=prometheus` and `tatara-helmfile` never set
+`prometheusRule.additionalLabels`.
+
+Setting that label is the obvious fix and is the wrong one. The cluster
+Alertmanager is stock kube-prometheus-stack: `route.receiver: "null"`, one
+`alertname="Watchdog"` child route, and **one receiver named `"null"` carrying
+zero integrations.** It was discarding `PvcBackupJobFailed` on 11 series at the
+time this was measured and nobody had noticed. Labelling the rule would have
+loaded 32 alerts that evaluate, fire and are dropped - manufactured coverage,
+which is worse than the silence it replaced. Grafana is the plane that
+delivers, because the `Tatara` contact point webhooks
+`/operator/webhooks/<project>/grafana`, and that is the only incident-Task
+minting path.
+
+So `tatara-helmfile` sets `prometheusRule.enabled: false` and this repo is the
+single alerting plane on this cluster. That gives the chart file a new job:
+**it is the specification of conditions the producer thinks are worth alerting
+on, and `alerts/` is what is actually alerted.**
+
+What that split costs when nothing reconciles it is already on the record.
+`tatara-operator#635` filed `TataraAccountUsageFeedDead` as "never written" on
+the strength of a grep against this repo. It *was* written - in the plane that
+delivered nothing. **A competent audit of the wrong plane is indistinguishable
+from a real gap.**
+
+`scripts/check_chart_alert_parity.py` is the reconciliation. Every metric a
+chart alert reads must be read by some rule in `alerts/`. It is deliberately a
+metric-level check, not a rule-level one: thresholds, groupings and rule shapes
+are this repo's business, and several ported rules are better than their chart
+originals. A metric no rule here reads is a condition with no witness anywhere.
+
+Waivers live in `scripts/chart_alert_waivers.txt`, keyed on the
+`(chart alert, metric)` pair, and **the reason is mandatory - a reasonless line
+is a parse error, not a pass.** A waiver says "this condition is watched here,
+by a rule keyed on a different metric"; it never says "this condition does not
+matter". If a condition is genuinely not worth watching, delete the alert from
+the producer's chart rather than waiving it here, or the specification lies.
+
+Three shipped waivers, all of the first kind. The one worth reading is
+`TataraSweepStalled`: porting it would have been a **regression**, not a gap
+being closed. It is a flat staleness threshold, and this repo deliberately
+removed exactly that shape after a flat `21600s` bound was breached for roughly
+18 hours of every 24 by the nightly crons. `Operator sweep heartbeat stale`
+replaced it with a next-expected timestamp the operator computes per
+`(project, activity)` from that activity's own cron - cadence lives in the
+producer, one rule covers every Project, and it fires on NoData as well.
+
+Scope, stated so the name does not imply more than it covers: this checks the
+**tatara-operator** chart's `PrometheusRule` and nothing else. `tatara-memory`'s
+chart also ships one, but the operator provisions it per-Project at runtime and
+labels it through `MEMORY_MONITOR_LABELS` - a different mechanism, on a path no
+static file read can see. Clone failure is a **hard** failure here rather than
+the neutral skip section 5 uses, and that costs no availability:
+`check_label_provenance.py` in the same job already clones tatara-operator and
+already fails closed on it.
+
+```sh
+python3 scripts/check_chart_alert_parity.py    # needs network for the clone
+```

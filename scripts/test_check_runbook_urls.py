@@ -19,6 +19,7 @@ from check_runbook_urls import (
     parse_declared_anchors,
     reconcile,
     slugify,
+    union_declared,
 )
 
 
@@ -182,6 +183,49 @@ class DeclaredAnchorsTest(unittest.TestCase):
         # status: none is an honest "no runbook written yet", not a dangling link.
         anchors = {"tatara-runbook-operator-sweep-erroring": "Operator sweep erroring"}
         self.assertEqual(reconcile(anchors, parse_declared_anchors(self.MARKDOWN)), [])
+
+
+class UnionDeclaredTest(unittest.TestCase):
+    """TATARA_DOCS_REF is a UNION over main, not a replacement for it.
+
+    Replacement was the old behaviour and it silently narrowed the check: pointing the
+    run at a docs branch stopped validating against what is actually published, so an
+    anchor DELETED on that branch, or one whose companion docs PR was abandoned, read as
+    clean. The union keeps main authoritative and lets an unmerged branch only ADD."""
+
+    MAIN = {"tatara-runbook-on-main": "covered", "tatara-runbook-shared": "none"}
+
+    def test_ref_anchors_absent_from_main_are_added_and_reported(self):
+        merged, ref_only = union_declared(
+            self.MAIN, {"tatara-runbook-only-on-branch": "covered"}
+        )
+        self.assertEqual(merged.keys() - self.MAIN.keys(), {"tatara-runbook-only-on-branch"})
+        self.assertEqual(ref_only, {"tatara-runbook-only-on-branch"})
+
+    def test_main_anchors_survive_a_ref_that_does_not_declare_them(self):
+        # The whole point: a branch that DELETED an anchor must not make it vanish here.
+        merged, ref_only = union_declared(self.MAIN, {"tatara-runbook-only-on-branch": "covered"})
+        self.assertIn("tatara-runbook-on-main", merged)
+        self.assertIn("tatara-runbook-shared", merged)
+
+    def test_no_ref_clone_leaves_main_untouched(self):
+        merged, ref_only = union_declared(self.MAIN, None)
+        self.assertEqual(merged, self.MAIN)
+        self.assertEqual(ref_only, set())
+
+    def test_a_failed_main_clone_stays_a_neutral_skip(self):
+        # None means "could not look", which must not become "checked and clean" just
+        # because a branch happened to clone.
+        merged, ref_only = union_declared(None, {"tatara-runbook-only-on-branch": "covered"})
+        self.assertIsNone(merged)
+        self.assertEqual(ref_only, set())
+
+    def test_an_anchor_on_both_takes_the_ref_status_and_is_not_ref_only(self):
+        # The branch is the newer intent: a placeholder promoted to covered on the branch
+        # should count as covered in this run's coverage number.
+        merged, ref_only = union_declared(self.MAIN, {"tatara-runbook-shared": "covered"})
+        self.assertEqual(merged["tatara-runbook-shared"], "covered")
+        self.assertEqual(ref_only, set())
 
 
 class LiveAlertsTest(unittest.TestCase):

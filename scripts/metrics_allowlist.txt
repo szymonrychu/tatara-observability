@@ -220,6 +220,44 @@ operator_stall_probe_total
 operator_pod_recreations_total
 operator_live_entry_declined_total
 
+# --- operator + usage-gate: ported off the chart PrometheusRule (2026-08-23,
+# tatara-helmfile#440, tatara-operator#635) ---
+# tatara-operator's chart ships a 32-alert PrometheusRule that this cluster's Prometheus
+# has never loaded (ruleSelector wants release=prometheus; tatara-helmfile never set
+# prometheusRule.additionalLabels), and the Alertmanager behind it is stock
+# kube-prometheus-stack with one receiver named "null" and zero integrations. That plane
+# is being disabled rather than labelled, so the conditions with no witness here moved
+# onto the Grafana plane. scripts/check_chart_alert_parity.py now fails CI if a chart
+# alert reads a metric no rule in alerts/ reads.
+#
+# All six verified by declaration against tatara-operator, not assumed:
+# tatara_account_usage_gate_ready  internal/obs/accountusage_metrics.go:59
+#   LABEL-LESS GaugeVec (NewGaugeVec(..., nil)), not a Gauge, on purpose: the child is
+#   created on first Set, so an operator with the budget gate off emits no series and the
+#   rule cannot fire. Never wrap this one in `or vector(0)`.
+# operator_sweep_skipped_total{project,activity,reason}  internal/obs/sweep_metrics.go:105
+# operator_task_residency_exceeded_total{state,kind}  internal/obs/task_metrics.go:116
+#   `state` and `kind` are closed-set label NAMES, but only the grouping uses them here -
+#   no rule filters on a literal value, so no stage_values_allowlist.txt entry is needed.
+# operator_task_parked_with_live_pod_repaired_total{project,park_reason}
+#   internal/obs/task_metrics.go:120. Note park_reason (snake), not parkReason.
+# operator_semver_label_missing_total{repo}  internal/obs/semver_metrics.go:30
+# operator_push_series_dropped_total{reason}  internal/pushmetrics/receiver.go:106
+#   Registered in the operator's own registry, so it is scraped at job=tatara-operator
+#   like the rest - it counts families the push RECEIVER rejected, and is not itself a
+#   pushed metric.
+#
+# operator_sweep_last_success_timestamp_seconds is deliberately absent from this block: it
+# is already allowlisted above (dashboard-only), and the chart alert that reads it
+# (TataraSweepStalled) is WAIVED rather than ported - "Operator sweep heartbeat stale"
+# already covers that condition cadence-aware. See scripts/chart_alert_waivers.txt.
+tatara_account_usage_gate_ready
+operator_sweep_skipped_total
+operator_task_residency_exceeded_total
+operator_task_parked_with_live_pod_repaired_total
+operator_semver_label_missing_total
+operator_push_series_dropped_total
+
 # --- operator: memory-degradation + saturation batch (2026-07-26, tatara-operator
 # #457/#458/#469/#470, tatara-observability P7) ---
 # All seven verified against tatara-operator origin/main @ a8255cf, by declaration:

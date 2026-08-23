@@ -385,9 +385,18 @@ rules:
   - name: "Memory API request p99 latency high"
     queries:
       - expression: |
-          histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*"}[10m]))) and on() (sum(rate(http_request_duration_seconds_count{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*"}[10m])) > 0)
+          histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*",route!~"/readyz|/healthz|/metrics"}[10m]))) and on() (sum(rate(http_request_duration_seconds_count{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*",route!~"/readyz|/healthz|/metrics"}[10m])) > 0)
     math_operator: ">"
-    # retrievalLatencyP99Seconds. The `and on()` clause is an idle-NaN guard:
+    # retrievalLatencyP99Seconds. The probe routes are excluded on BOTH sides, the
+    # same three "Memory HTTP 5xx error ratio high" above excludes and for a sharper
+    # reason: /readyz and /healthz are fast and scraped on a fixed cadence per pod, so
+    # they are a large, permanently-fast share of the population. A p99 is a RANK, and
+    # padding the population with fast samples walks that rank down into the fast
+    # buckets - the busier the probes, the more real tail latency the rule tolerates
+    # before firing. The chart original did not exclude them; this is one of the ported
+    # rules that is better than its original rather than a faithful copy.
+    #
+    # The `and on()` clause is an idle-NaN guard:
     # histogram_quantile over zero requests returns NaN, which would read as "no
     # data" rather than "idle" - the clause makes an idle service unable to read as
     # a slow one. The bucket ceiling here is 300s, NOT the 10s three copies of this

@@ -201,6 +201,30 @@ rules:
         self.assertEqual(len(violations), 1)
         self.assertEqual(violations[0].level, "rule")
 
+    def test_routing_justification_is_exempt_at_rule_level(self):
+        body = """
+rules:
+  - name: "deliberately email-only"
+    queries:
+      - expression: "up"
+    threshold: 0
+    tatara_routing_justification: "see CONVENTIONS.md section 10"
+"""
+        self.assertEqual(self._violations(body), [])
+
+    def test_routing_justification_is_not_exempt_at_group_level(self):
+        body = """
+tatara_routing_justification: "waivers are per-rule, not per-file"
+rules:
+  - name: "fine"
+    queries:
+      - expression: "up"
+    threshold: 0
+"""
+        violations = self._violations(body)
+        self.assertEqual(len(violations), 1)
+        self.assertEqual(violations[0].level, "group")
+
     def test_every_undeclared_key_is_reported_not_just_the_first(self):
         body = """
 rules:

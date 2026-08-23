@@ -72,6 +72,8 @@ on:
       - "scripts/check_chart_alert_parity.py"
       - "scripts/test_check_chart_alert_parity.py"
       - "scripts/chart_alert_waivers.txt"
+      - "scripts/check_routing_labels.py"
+      - "scripts/test_check_routing_labels.py"
       - ".github/workflows/alert-rules-lint.yml"
   push:
     branches: [main]
@@ -97,6 +99,8 @@ on:
       - "scripts/check_chart_alert_parity.py"
       - "scripts/test_check_chart_alert_parity.py"
       - "scripts/chart_alert_waivers.txt"
+      - "scripts/check_routing_labels.py"
+      - "scripts/test_check_routing_labels.py"
       - ".github/workflows/alert-rules-lint.yml"
   schedule:
     # Nightly reverse-drift sweep: a metric removed from a producer repo never touches
@@ -210,3 +214,21 @@ jobs:
       # already fails closed on it, so this job cannot pass without that clone either way.
       - name: check chart alert parity against tatara-operator
         run: python3 scripts/check_chart_alert_parity.py
+
+      # The routing contract (issue #117). Every check above asserts a rule is well-formed,
+      # its metric exists, its labels exist on that metric, its threshold is in range, its
+      # runbook resolves - and every one of them ASSUMES the rule is delivered. Delivery is
+      # decided by hand-copied label strings that nothing verified. `system=tatara` is the
+      # ONLY route to /operator/webhooks/tatara/grafana, so it is the only path that mints
+      # an incident Task. Per-rule `labels` REPLACE the module default (main.tf:124 is a
+      # ternary) and first matching child wins, so a routed rule that drops `system` lints,
+      # plans, applies green, fires correctly and never reaches the agent platform: a
+      # warning falls to the weekend-muted homelab node, a critical matches severity=critical
+      # and reaches the INFRASTRUCTURE webhook instead. Neither mints a tatara Task.
+      #
+      # Bidirectional and keyed on severity, because both directions have failed: `info`
+      # rules must OMIT `system`, and the two #457 trend rules shipped carrying it - each
+      # fire would have minted an incident for a condition nobody should be paged on. That
+      # was caught by a human reading label sets. This is the CI half.
+      - name: check routing labels
+        run: python3 scripts/check_routing_labels.py

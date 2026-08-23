@@ -1355,3 +1355,46 @@ PR/push triggers.
   was invisible to both - and the summary then told the maintainer to DELETE a live entry. Widened
   the declared-set window to match. Not live today (max observed offset across all four producers is
   4), but the trigger would have been a producer reformatting a struct literal.
+- 2026-08-23 (#117): **The routing contract is now CI-enforced** by
+  `scripts/check_routing_labels.py`, wired blocking into `alert-rules-lint.yml`. The note at
+  :58-61 is no longer the only record of it, and neither is :780-787: all rules must carry
+  `homelab="true"`, `critical`/`warning` must carry `system="tatara"`, `info` must NOT, an
+  unrecognised `severity` is a hard failure rather than an else-branch pass, `page` must be
+  absent on every rule, and `labels` must be a present, non-empty mapping. Contract, tree,
+  waiver and every failure direction are written up in CONVENTIONS.md section 10. Rule-level
+  `tatara_routing_justification` waives the severity-keyed `system`/`page` arms only, is
+  registered in `check_alert_schema.py` `LINT_ONLY_KEYS["rule"]`, and is printed by the checker
+  so an override shows up in CI output as well as in the diff. A justification that waives
+  nothing is itself a violation - a dead waiver is unreviewable and arms itself silently the
+  day the labels around it change.
+- 2026-08-23 (#117): **`system=tatara` is the ONLY incident-minting route, and the two routed
+  severities fail DIFFERENTLY when it is missing.** A `warning` without it falls to the
+  weekend-muted `homelab` node (one email). A `critical` without it matches the
+  `severity="critical"` child, which is NOT muted and reaches
+  `/operator/webhooks/infrastructure/grafana` on a 4h repeat - a different project's endpoint,
+  so it still mints no tatara Task. The first draft of this guard told every routed author to
+  look for a weekend mute; half of them would have been chasing a mute window that does not
+  apply to them. `page="true"` is the third live child, reaching the same Critical receiver:
+  it sits BELOW `system=tatara`, so it is inert on a routed rule and an escalation on an
+  `info` one - which is why the guard asserts it absent even though no rule uses it.
+- 2026-08-23 (#117): **`labels` is `map(string)`, so terraform coerces before Grafana sees the
+  value.** An unquoted YAML `homelab: true` is a Python bool on the way in and the string
+  `"true"` on the way out, and it routes correctly. Comparing the raw value would have
+  red-built a rule with no routing defect - the same false-failure surface #111 recorded. The
+  checker normalises the way terraform does.
+- 2026-08-23 (#117): **Deleted `local.alert_tags` and the `default_labels` wiring in
+  `grafana.tf`.** `main.tf:124` is a ternary, not a merge, and 130/130 rules declare their own
+  `labels`, so the fallback never ran and the `homelab="true"` parked there could never be read.
+  Its comment claimed it was "kept here so the parent homelab notification policy matches",
+  which was false and actively harmful: it told the next author that omitting `homelab` was
+  survivable. The vendored module is untouched (see :55-57) - `default_labels` stays declared in
+  `variables.tf` and the ternary stays in `main.tf`, so it remains byte-aligned with
+  infra/terraform. With nothing wiring it the unreachable branch now renders NO labels rather
+  than a phantom `homelab=true`, and the checker's non-empty-`labels` assertion is what proves
+  the branch stays unreachable. Zero plan diff: every rule takes the true branch.
+- 2026-08-23 (#117): **Three shell scripts in `scripts/` read like guards and gate nothing.**
+  `check_tier_quality_alert.sh`, `check_quality_panels.sh` and `check_token_panels.sh` appear in
+  no workflow (`grep -rn check_tier_quality_alert .github/` is empty) and two of them need `jq`,
+  which no `.mise.toml` pins. Deliberately left alone by #117 - they are dashboard/panel
+  assertions, not the routing contract. Wire them up or delete them, but do not read their
+  presence as coverage.

@@ -210,3 +210,20 @@ jobs:
       # already fails closed on it, so this job cannot pass without that clone either way.
       - name: check chart alert parity against tatara-operator
         run: python3 scripts/check_chart_alert_parity.py
+
+      # The routing contract (issue #117). Every check above asserts a rule is well-formed,
+      # its metric exists, its labels exist on that metric, its threshold is in range, its
+      # runbook resolves - and every one of them ASSUMES the rule is delivered. Delivery is
+      # decided by two hand-copied label strings that nothing verified: `homelab=true` (the
+      # parent policy) and `system=tatara` (the child route to the operator incident
+      # webhook). Per-rule `labels` REPLACE the module default (main.tf:124 is a ternary),
+      # first matching child wins, and the homelab node is muted all weekend - so a
+      # warning/critical rule that drops `system` lints, plans, applies green, fires
+      # correctly, emails into a Saturday mute, and NEVER mints an incident Task.
+      #
+      # Bidirectional and keyed on severity, because both directions have failed: `info`
+      # rules must OMIT `system`, and the two #457 trend rules shipped carrying it - each
+      # fire would have minted an incident for a condition nobody should be paged on. That
+      # was caught by a human reading label sets. This is the CI half.
+      - name: check routing labels
+        run: python3 scripts/check_routing_labels.py

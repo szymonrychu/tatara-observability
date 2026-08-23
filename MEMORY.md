@@ -1355,3 +1355,28 @@ PR/push triggers.
   was invisible to both - and the summary then told the maintainer to DELETE a live entry. Widened
   the declared-set window to match. Not live today (max observed offset across all four producers is
   4), but the trigger would have been a producer reformatting a struct literal.
+- 2026-08-23 (#117): **The routing contract is now CI-enforced** by
+  `scripts/check_routing_labels.py`, wired blocking into `alert-rules-lint.yml`. The note at
+  :58-61 is no longer the only record of it, and neither is :780-787: all rules must carry
+  `homelab="true"`, `critical`/`warning` must carry `system="tatara"`, `info` must NOT, an
+  unrecognised `severity` is a hard failure rather than an else-branch pass, and `labels` must
+  be present and non-empty. Contract, tree, waiver and both failure directions are written up in
+  CONVENTIONS.md section 10. Rule-level `tatara_routing_justification` waives the
+  severity=>system arm only, is registered in `check_alert_schema.py` `LINT_ONLY_KEYS["rule"]`,
+  and is printed by the checker so an override shows up in CI output as well as in the diff.
+- 2026-08-23 (#117): **Deleted `local.alert_tags` and the `default_labels` wiring in
+  `grafana.tf`.** `main.tf:124` is a ternary, not a merge, and 130/130 rules declare their own
+  `labels`, so the fallback never ran and the `homelab="true"` parked there could never be read.
+  Its comment claimed it was "kept here so the parent homelab notification policy matches",
+  which was false and actively harmful: it told the next author that omitting `homelab` was
+  survivable. The vendored module is untouched (see :55-57) - `default_labels` stays declared in
+  `variables.tf` and the ternary stays in `main.tf`, so it remains byte-aligned with
+  infra/terraform. With nothing wiring it the unreachable branch now renders NO labels rather
+  than a phantom `homelab=true`, and the checker's non-empty-`labels` assertion is what proves
+  the branch stays unreachable. Zero plan diff: every rule takes the true branch.
+- 2026-08-23 (#117): **Three shell scripts in `scripts/` read like guards and gate nothing.**
+  `check_tier_quality_alert.sh`, `check_quality_panels.sh` and `check_token_panels.sh` appear in
+  no workflow (`grep -rn check_tier_quality_alert .github/` is empty) and two of them need `jq`,
+  which no `.mise.toml` pins. Deliberately left alone by #117 - they are dashboard/panel
+  assertions, not the routing contract. Wire them up or delete them, but do not read their
+  presence as coverage.

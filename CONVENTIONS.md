@@ -675,3 +675,102 @@ already fails closed on it.
 ```sh
 python3 scripts/check_chart_alert_parity.py    # needs network for the clone
 ```
+
+## 10. The routing contract: which labels decide delivery
+
+Sections 1-9 all assert that a rule is *correct*. Every one of them assumes it is
+*delivered*. Delivery is decided by two label strings, restated by hand in all 130
+rules, and until issue #117 nothing verified them.
+
+The live notification policy tree (owned by `infra/terraform/grafana`, not this
+repo):
+
+```
+root                        receiver=Default
+`-- homelab="true"          receiver=Default, mute_time_intervals=["Default"]
+    |-- system="tatara"     receiver=Tatara      <- the operator incident webhook
+    |-- severity="critical" receiver=Critical
+    `-- page="true"         receiver=Critical
+```
+
+First matching child wins. No route sets `continue`. The `Default` mute interval
+is all day Saturday and Sunday. The `Default` contact point is one email address.
+
+### The contract
+
+| severity | `homelab="true"` | `system="tatara"` |
+|---|---|---|
+| `critical` | required | required |
+| `warning` | required | required |
+| `info` | required | **must be absent** |
+
+An unrecognised `severity` is a hard failure, not a pass: the contract is keyed on
+severity, so a value with no arm has no defined delivery. A fourth severity needs a
+route - and an arm in the checker - before a rule may carry it.
+
+`component` is not part of the predicate and is not asserted.
+
+### What each direction costs
+
+| defect | lands on | consequence |
+|---|---|---|
+| `warning`/`critical` omits `system` | the `homelab` node | **never mints an incident Task.** Emails, and is muted every weekend |
+| `info` gains `system` | the `system` child | mints an incident Task per fire, for a trend rule |
+| any rule omits `homelab` | root | still emails, but loses the mute window and the grouping |
+
+Row 1 is the one with teeth: such a rule passes every other check here, passes
+`terraform validate`, plans, applies green, evaluates correctly and fires correctly,
+and never reaches the agent platform. Same silent-green shape as sections 5 and 7,
+one surface over.
+
+Row 2 is not hypothetical. The two trend rules added for #457 (`Repository phase
+desync still being produced`, `Ingest job creation race still being hit`) shipped
+carrying `system=tatara` and were corrected by a human reading label sets. **Do not
+"harmonise" the label sets across severities.** `severity: info` means "email only",
+and that is a deliberate severity gate, not an inconsistency.
+
+### `labels` is effectively required
+
+`modules/grafana_alert/main.tf:124` is a ternary, not a merge:
+
+```hcl
+labels = length(rule.value.labels) > 0 ? rule.value.labels : each.value.default_labels
+```
+
+A rule's own labels **REPLACE** the module default. All 130 rules declare their own,
+so the false branch was unreachable, and the `homelab = "true"` that used to sit in
+`grafana.tf`'s `local.alert_tags` could never be read. That local is deleted: a
+safety net that cannot fire is worse than none, because it told the next author that
+omitting `homelab` was survivable. The module input stays declared (it is vendored
+from `infra/terraform`; keep it byte-aligned), so the fallback now renders *no*
+labels - which routes to the root receiver. The checker asserts `labels` is present
+and non-empty, which is what keeps that branch unreachable.
+
+### The waiver
+
+A rule-level `tatara_routing_justification` (non-empty string) waives the
+severity => `system` arm **for that rule only**:
+
+```yaml
+  - name: "An info condition that really must mint a Task"
+    tatara_routing_justification: "see #NNN - this trend needs an incident, not an email"
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "info"
+```
+
+It does **not** waive `homelab`, severity validity, or non-empty `labels`: there is
+no legitimate reason for a tatara alert to leave the homelab subtree. Waived rules
+are printed by the checker, so the override is visible in CI output as well as in
+the diff.
+
+`tatara_routing_justification` is a LINT-ONLY key (section 7): it is registered in
+`check_alert_schema.py`'s `LINT_ONLY_KEYS["rule"]` and relies on the silent drop to
+stay out of Grafana. It is rule-scope only - at file scope it is an undeclared key
+and fails the schema check.
+
+```sh
+python3 scripts/check_routing_labels.py    # offline, no cluster, no token
+```

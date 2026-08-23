@@ -1,0 +1,85 @@
+# Keyed waivers for scripts/check_alert_plane_parity.py.
+#
+# Format, one per line, and EVERY field is mandatory (a line missing any of them is a
+# parse error, not a pass):
+#
+#   <plane>:<AlertName> <metric> # <CLASS>: <why no rule in alerts/ reads this metric>
+#
+# Planes: operator-chart, memory-chart, operator-go. The qualifier is not decoration.
+# MemoryDown, MemoryHigh5xx, MemoryHandlerPanics and three more exist on BOTH
+# memory-chart and operator-go; an unqualified key would let one plane's waiver silently
+# blanket the other's identically-named alert, which is the same "a competent audit of
+# the wrong plane" failure this whole check exists to end.
+#
+# The key is (plane, alert, metric), not metric alone: two alerts on one plane can read
+# the same metric with only one of them legitimately unwatched here.
+#
+# CLASSES. A waiver never says "this condition does not matter". If a condition is
+# genuinely not worth alerting on, the right change is to delete the alert from the
+# producer, not to waive it here - a specification plane that carries alerts nobody
+# intends to honour is a specification that lies.
+#
+#   SUPERSEDED         Chart planes only. "This condition IS watched here, by a rule
+#                      keyed on a different metric." Names the rule that replaced it.
+#
+#   DORMANT-PRODUCER   operator-go only, and must carry a `re-arm: <precondition>`
+#                      clause or it is a parse error. "This condition's METRIC is not
+#                      emitted anywhere on this cluster today, and porting the rule
+#                      would require asserting a live-emission provenance that cannot
+#                      be asserted." The re-arm clause names what has to become true
+#                      before the condition needs a witness again, so the waiver is a
+#                      dated, reviewable decision rather than an unstated scope claim in
+#                      a docstring - which is exactly what tatara-observability#120
+#                      found in the previous version of this guard.
+#
+# The two classes are restricted to their planes on purpose. A chart file is a
+# SPECIFICATION and is never rendered at all, so "the producer is dormant" is never why
+# a chart condition is unwatched. And operator-go's postgres superset has no chart
+# counterpart to have been superseded BY.
+#
+# --- 2026-08-23, tatara-helmfile#440: the operator chart plane was disabled and its 32
+# --- alerts reconciled against this repo. 9 read a metric no rule here read; 6 were
+# --- ported and these 3 were already covered by a rule keyed differently.
+
+operator-chart:TataraTasksInflightPinned operator_tasks_inflight # SUPERSEDED: Deliberately replaced, not dropped. The chart rule pages when operator_tasks_inflight sits at the concurrency cap for 2h, but under contract A.6 concurrency gates PODS, not Tasks, so a pinned Task count is not the deadlock signature it was written for. alerts/tatara-operator.yaml:448-453 and :900-906 carry the rules that replaced it on the pod-side saturation signals, and record that reasoning.
+
+operator-chart:TataraTaskRejections operator_task_terminal_total # SUPERSEDED: Re-implemented on operator_task_parked_total. tatara-operator v2.0.0 removed `failed` as a state - a failure now PARKS - so the terminal-state counter is no longer where an exhaustion shows up. alerts/tatara-cd.yaml:31 and :136 watch the park counter instead, which is the surface the current state machine actually reaches.
+
+operator-chart:TataraSweepStalled operator_sweep_last_success_timestamp_seconds # SUPERSEDED: by "Operator sweep heartbeat stale" (alerts/tatara-operator.yaml), which is the same per-(project,activity) sweep deadman keyed on operator_sweep_next_expected_timestamp_seconds instead. PORTING THIS ONE WOULD BE A REGRESSION, not a gap being closed: the chart rule is a FLAT staleness threshold (sweepStaleAfterSeconds, 10800s), and this repo deliberately removed exactly that shape - the comment at alerts/tatara-operator.yaml:1433-1445 records that a flat 21600s threshold was breached for roughly 18 hours of every 24 by the nightly 0 3 / 0 6 crons. The replacement reads a next-expected timestamp the operator computes per (project, activity) from that activity's own cron, so cadence lives in the producer, one rule covers every activity of every Project, and it additionally fires on NoData - strictly more coverage than the chart rule, not less.
+
+# --- 2026-08-23, tatara-observability#120: the memory-chart and operator-go planes were
+# --- added. memory-chart's 5 unwatched metrics were all PORTED (the four
+# --- tatara-memory#89 compensating controls plus the memory API's only p99 latency
+# --- witness), so it carries no waivers. operator-go's 6 CNPG postgres rules read 8
+# --- metrics with no witness here, and are waived rather than ported. Per-rule reasons
+# --- are on each line; the two structural ones common to all of them:
+# ---
+# --- 1. TWO OF THEM HAVE NO FAITHFUL STATIC FORM.
+# ---    MemoryPostgresStreamingReplicasBelowExpected thresholds on
+# ---    `< PgInstances(project)-1` and MemoryPostgresReplicationSlotWalRetentionHigh on
+# ---    `> pgSlotWalRetentionWarnBytes(project)` (a quarter of that Project's own
+# ---    pgWalStorage). Re-deriving the expected replica count from the OBSERVED pod
+# ---    count INVERTS the rule - a cluster that loses a standby lowers its own
+# ---    threshold and can never fire for the case it was written for - and hardcoding 3
+# ---    pages permanently against project-mtg, which runs pgInstances: 1.
+# --- 2. ALL SIX SIT BEHIND GENERATION GATES A STATIC READ CANNOT SEE. The four
+# ---    replication rules are appended only when instances > 1 (false for mtg); the two
+# ---    WAL-archive rules only when backupEnabled, which is memoryBackup.enabled -
+# ---    false in the operator chart's defaults and set NOWHERE in tatara-helmfile - so
+# ---    those two have never been generated on this cluster, on any project, even
+# ---    before the 2026-08-09 disable.
+# ---
+# --- Porting them anyway would mean 6 rules on 8 metric names with zero series in this
+# --- Prometheus under default_no_data_state: "OK" - verbatim the silent-green failure
+# --- scripts/metrics_allowlist.txt was written to end.
+
+operator-go:MemoryPostgresReplicationSlotInactive cnpg_pg_replication_slots_active # DORMANT-PRODUCER: cnpg_* series come from CNPG's user-query collector on the mem-<project>-pg clusters, and the operator deletes the whole CNPG Cluster on memory disable (project_memory_disable.go). No series on any project today, and generated only when instances > 1, so it never existed for project-mtg either. re-arm: spec.memory.enabled: true on any Project with pgInstances > 1
+operator-go:MemoryPostgresReplicationSlotInactive cnpg_pg_replication_in_recovery # DORMANT-PRODUCER: the onPrimary guard's own metric (monitoring.go:375 builds it as a file-local and interpolates it into three rules). Same CNPG collector, same lifecycle as the slot metric above. re-arm: spec.memory.enabled: true on any Project with pgInstances > 1
+operator-go:MemoryPostgresStreamingReplicasBelowExpected cnpg_pg_replication_streaming_replicas # DORMANT-PRODUCER: no series today, and this is the rule with no faithful static form - its threshold is PgInstances(project)-1, read from the Project CR at render time. A static rule would either invert (deriving the expected count from the observed one) or page permanently on project-mtg. re-arm: spec.memory.enabled: true on any Project with pgInstances > 1
+operator-go:MemoryPostgresStreamingReplicasBelowExpected cnpg_pg_replication_in_recovery # DORMANT-PRODUCER: the same onPrimary guard metric, in the same rule's expr. re-arm: spec.memory.enabled: true on any Project with pgInstances > 1
+operator-go:MemoryPostgresReplicationSlotWalRetentionHigh cnpg_pg_replication_slots_pg_wal_lsn_diff # DORMANT-PRODUCER: no series today, and the second rule with no faithful static form - its threshold is pgSlotWalRetentionWarnBytes(project), a quarter of that Project's configured pgWalStorage, so one hardcoded byte count would be wrong for every project that tunes the volume. re-arm: spec.memory.enabled: true on any Project with pgInstances > 1
+operator-go:MemoryPostgresReplicationSlotWalRetentionHigh cnpg_pg_replication_in_recovery # DORMANT-PRODUCER: the same onPrimary guard metric, in the same rule's expr. re-arm: spec.memory.enabled: true on any Project with pgInstances > 1
+operator-go:MemoryPostgresStandbyReplayStalled cnpg_pg_stat_replication_replay_lag_seconds # DORMANT-PRODUCER: CNPG's rendering of pg_stat_replication on the primary, emitted only while a mem-*-pg cluster exists with a streaming standby attached. No series today, and generated only when instances > 1. re-arm: spec.memory.enabled: true on any Project with pgInstances > 1
+operator-go:MemoryPostgresWALArchiveFailing cnpg_pg_stat_archiver_last_failed_time # DORMANT-PRODUCER: gated on backupEnabled, which is memoryBackup.enabled - false in the operator chart default and set nowhere in tatara-helmfile. This rule has never been generated on this cluster, on any project, before or after the memory disable. re-arm: spec.memory.enabled: true on any Project AND memoryBackup.enabled: true on the operator release
+operator-go:MemoryPostgresWALArchiveFailing cnpg_pg_stat_archiver_last_archived_time # DORMANT-PRODUCER: the right-hand side of the same binary comparison, behind the same backupEnabled gate. re-arm: spec.memory.enabled: true on any Project AND memoryBackup.enabled: true on the operator release
+operator-go:MemoryPostgresWALArchiveBacklog cnpg_collector_pg_wal_archive_status # DORMANT-PRODUCER: the same backupEnabled gate. It catches the archive_command that HANGS rather than errors, which is why it is not redundant with WALArchiveFailing - but it is equally ungenerated today. re-arm: spec.memory.enabled: true on any Project AND memoryBackup.enabled: true on the operator release

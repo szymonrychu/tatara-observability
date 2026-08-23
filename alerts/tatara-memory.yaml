@@ -257,6 +257,166 @@ rules:
       component: "memory"
       severity: "warning"
   # ---------------------------------------------------------------------------
+  # PORTED OFF THE tatara-memory CHART (2026-08-23, tatara-observability#120).
+  #
+  # The memory stack's alerts were defined on THREE divergent planes: the chart's
+  # PrometheusRule (10 rules, never installed - the operator provisions the stack
+  # as native objects), tatara-operator's memoryAlertRules (15, Prometheus plane,
+  # route.receiver: "null"), and this file (16, the only plane that mints an
+  # incident Task). The operator's port claimed to be verbatim and was 6 of 10.
+  # The five conditions below had a witness on NEITHER delivering plane.
+  #
+  # Four of them are the compensating controls written for tatara-memory#89: a
+  # wedged code-graph analytics recompute held Postgres connections, mem-mtg-pg
+  # backends went 4 -> 87 over 5.5h, and the incident was only visible six hours
+  # in, database-side, at SQLSTATE 53300 with all 97 non-superuser slots held.
+  # There was NO signal from the tatara-memory process at all. The fifth is the
+  # memory API's only p99 latency witness.
+  #
+  # SCOPING (pre-mortem 1). These use this file's namespace/pod idiom, NOT the
+  # chart's job=~".*tatara-memory.*". The go_sql_* family is client_golang's
+  # DBStatsCollector and is NOT tatara-specific: the only go_sql_in_use_connections
+  # series in this Prometheus today are Grafana's own (job="prometheus-grafana",
+  # namespace="monitoring"), four of them. Both pool rules additionally pin
+  # db_name="tatara_memory" - the registerer name at cmd/tatara-memory/app.go:315 -
+  # so they cannot select Grafana's pool even if the namespace selector were
+  # loosened later.
+  #
+  # ARMED BLIND, AND DELIBERATELY NOT NoData-SHAPED (pre-mortem 2). Memory is off
+  # on every project since 2026-08-09 (operator_memory_stacks{phase="Disabled"}=1
+  # for tatara, infrastructure and mtg), so none of these five metrics has a single
+  # series right now and no threshold below has an observed distribution behind it.
+  # There is deliberately no `or vector(0)` and no per-rule no_data_state override:
+  # all five are `>` rules, absence of series is absence of the condition, and the
+  # absence of the whole stack is already watched by the pod-readiness rules and by
+  # "Memory stack stuck not ready". Fabricating a zero would be #111's silent-green
+  # class arriving through the front door, and forcing Alerting on NoData would page
+  # permanently against a subsystem that is off on purpose. Thresholds are the
+  # chart's own (values.yaml:240-256), carried here with their reasoning so they
+  # survive independently of that file. RETUNE TRIGGER: the first re-enable. Do not
+  # arm these and re-enable memory in the same change - a cold stack will trip the
+  # pool and admission rules during warmup and the reflex is to widen `for:` until
+  # it stops.
+  # ---------------------------------------------------------------------------
+  - name: "Memory bulk admission shedding"
+    queries:
+      - expression: |
+          sum by (class) (rate(http_admission_total{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*",result="shed"}[10m]))
+    math_operator: ">"
+    # admissionShedRate. Shed load is answered with 429 + Retry-After, never a 5xx,
+    # so "Memory HTTP 5xx error ratio high" above structurally cannot see a
+    # concurrent-ingest burst - the two signals are disjoint by design. 0.05/s is
+    # ~30 shed requests across the window: sustained overload, not one burst.
+    threshold: 0.05
+    for: 10m
+    decimal_points: 2
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-bulk-admission-shedding"
+      summary: "tatara-memory is shedding bulk requests on class {{ index $labels \"class\" }} at {{ index $values \"C\" }}/s (>0.05/s) over 10m. Callers are offering more concurrent bulk work than the admission budget allows; the service is protecting its Postgres pool with 429s, not failing."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "warning"
+  - name: "Memory Postgres connection pool saturated"
+    queries:
+      - expression: |
+          sum by (pod) (go_sql_in_use_connections{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*",db_name="tatara_memory"})
+          /
+          clamp_min(sum by (pod) (go_sql_max_open_connections{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*",db_name="tatara_memory"}), 1)
+    math_operator: ">"
+    # dbPoolSaturationRatio. tatara-memory shares one pool across the whole process,
+    # /readyz included: a pool that stays full fails readiness and deadlocks a
+    # rollout against its own health check.
+    threshold: 0.8
+    for: 10m
+    decimal_points: 2
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-postgres-connection-pool-saturated"
+      summary: "tatara-memory pod {{ index $labels \"pod\" }} has {{ index $values \"C\" }} of its Postgres pool in use (>80%) for 10m. Every caller in the process shares this pool including /readyz; find what is holding connections before raising the pool size. This is one of the two tatara-memory#89 controls."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "warning"
+  - name: "Memory Postgres connection pool waiting"
+    queries:
+      - expression: |
+          sum by (pod) (rate(go_sql_wait_duration_seconds_total{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*",db_name="tatara_memory"}[5m]))
+    math_operator: ">"
+    # dbPoolWaitSecondsPerSecond. Seconds spent waiting to acquire a connection per
+    # second of wall clock: the earliest honest symptom, since callers queue before
+    # anything errors. This climbs before saturation crosses 80%; treat the two as
+    # one investigation.
+    threshold: 0.5
+    for: 10m
+    decimal_points: 2
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-postgres-connection-pool-waiting"
+      summary: "tatara-memory pod {{ index $labels \"pod\" }} spent {{ index $values \"C\" }}s per second waiting to acquire a Postgres connection over 5m (sustained 10m). The pool is undersized or a caller is holding a connection far longer than it should. This is one of the two tatara-memory#89 controls."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "warning"
+  # The COMPLEMENTARY ARM of "Memory code-graph analytics stalled with dirty repos"
+  # above, not a duplicate of it. That rule fires on ZERO runs in 30m; this one
+  # fires on runs that DO run and are cut off by ANALYTICS_RECOMPUTE_TIMEOUT. A
+  # recompute that runs on schedule and times out every single time satisfies
+  # neither alone - rate(code_graph_analytics_runs_total[30m]) != 0 keeps the
+  # stalled rule quiet while nothing actually completes. That gap is exactly the
+  # wedge tatara-memory#89 started with.
+  - name: "Memory code-graph analytics recompute timing out"
+    queries:
+      - expression: |
+          sum(increase(code_graph_analytics_runs_total{namespace="tatara",result="timeout"}[1h]))
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-code-graph-analytics-recompute-timing-out"
+      summary: "tatara-memory cut off {{ index $values \"C\" }} code-graph analytics recompute(s) at their per-run deadline in the last hour. A recompute holds database connections while it runs; a wedged one is how tatara-memory#89 started. Do not raise ANALYTICS_RECOMPUTE_TIMEOUT to silence this - check the Postgres pool and pg_stat_activity for the holder."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "warning"
+  - name: "Memory API request p99 latency high"
+    queries:
+      - expression: |
+          histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*",route!~"/readyz|/healthz|/metrics"}[10m]))) and on() (sum(rate(http_request_duration_seconds_count{namespace="tatara",pod=~"mem-.+",pod!~"mem-.*-(neo4j|pg|lightrag).*",route!~"/readyz|/healthz|/metrics"}[10m])) > 0)
+    math_operator: ">"
+    # retrievalLatencyP99Seconds. The probe routes are excluded on BOTH sides, the
+    # same three "Memory HTTP 5xx error ratio high" above excludes and for a sharper
+    # reason: /readyz and /healthz are fast and scraped on a fixed cadence per pod, so
+    # they are a large, permanently-fast share of the population. A p99 is a RANK, and
+    # padding the population with fast samples walks that rank down into the fast
+    # buckets - the busier the probes, the more real tail latency the rule tolerates
+    # before firing. The chart original did not exclude them; this is one of the ported
+    # rules that is better than its original rather than a faithful copy.
+    #
+    # The `and on()` clause is an idle-NaN guard:
+    # histogram_quantile over zero requests returns NaN, which would read as "no
+    # data" rather than "idle" - the clause makes an idle service unable to read as
+    # a slow one. The bucket ceiling here is 300s, NOT the 10s three copies of this
+    # rule's comment asserted: the histogram is requestDurationBuckets
+    # (tatara-memory/internal/httpapi/middleware.go:199), which extends DefBuckets
+    # with 30/60/120/240/300. Those three comments are corrected in this change;
+    # scripts/histogram_bounds.txt now carries the real bound so Check 4 validates
+    # this threshold rather than the stale one.
+    threshold: 2.5
+    for: 15m
+    decimal_points: 2
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-memory-api-request-p99-latency-high"
+      summary: "tatara-memory p99 request latency {{ index $values \"C\" }}s (>2.5s) over 10m, sustained 15m. This is the memory API's only end-to-end latency witness; elevated p99 here often traces to LightRAG, Neo4j or a queued Postgres pool rather than the API layer itself."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "memory"
+      severity: "warning"
+  # ---------------------------------------------------------------------------
   # Root-cause early-warning added after the 2026-07-05 mem-tatara-pg WAL-fill
   # incident: the CNPG postgres volumes slowly filled with un-recyclable WAL
   # (a replica down for days held a replication slot) until the CephFS quota was

@@ -39,14 +39,22 @@ name: alert-rules-lint
 # red threshold step on the two panels backing those rules, on a surface with no
 # no_data_state to even mis-configure.
 #
-# check_chart_alert_parity.py (tatara-helmfile#440) is the dimension OUTSIDE this repo.
-# Every check above validates a rule that exists here. None of them could see that
-# tatara-operator's chart shipped 32 alerts of its OWN which this cluster's Prometheus
-# never loaded, into an Alertmanager whose only receiver is named "null" - a whole second
-# alerting plane, dark since the day it shipped, carrying 9 conditions with no rule here
-# at all. That plane is now disabled (tatara-helmfile sets prometheusRule.enabled: false),
-# 6 of the 9 are ported into alerts/ and 3 are waived against the rules that already
-# replaced them. This script keeps the chart file and alerts/ reconciled from here on.
+# check_alert_plane_parity.py (tatara-helmfile#440, widened by tatara-observability#120)
+# is the dimension OUTSIDE this repo. Every check above validates a rule that exists here.
+# None of them could see that tatara-operator's chart shipped 32 alerts of its OWN which
+# this cluster's Prometheus never loaded, into an Alertmanager whose only receiver is
+# named "null" - a whole second alerting plane, dark since the day it shipped, carrying 9
+# conditions with no rule here at all. That plane is now disabled (tatara-helmfile sets
+# prometheusRule.enabled: false), 6 of the 9 are ported into alerts/ and 3 are waived
+# against the rules that already replaced them.
+#
+# v1 checked that one plane and said so, on two reasons for excluding tatara-memory that
+# were both false - and the excluded path was the one with a measured gap. The operator's
+# memoryAlertRules is an INDEPENDENT Go re-implementation of the tatara-memory chart's
+# PrometheusRule, not that chart file delivered by an unusual mechanism, and it had
+# dropped 4 of that chart's 10 rules including both DB-pool controls written for
+# tatara-memory#89. It reconciles THREE planes now - operator-chart, memory-chart and
+# operator-go - which is why it is no longer named check_chart_alert_parity.
 
 on:
   pull_request:
@@ -69,9 +77,9 @@ on:
       - "scripts/histogram_bounds.txt"
       - "scripts/check_runbook_urls.py"
       - "scripts/test_check_runbook_urls.py"
-      - "scripts/check_chart_alert_parity.py"
-      - "scripts/test_check_chart_alert_parity.py"
-      - "scripts/chart_alert_waivers.txt"
+      - "scripts/check_alert_plane_parity.py"
+      - "scripts/test_check_alert_plane_parity.py"
+      - "scripts/alert_plane_waivers.txt"
       - "scripts/check_routing_labels.py"
       - "scripts/test_check_routing_labels.py"
       - ".github/workflows/alert-rules-lint.yml"
@@ -96,9 +104,9 @@ on:
       - "scripts/histogram_bounds.txt"
       - "scripts/check_runbook_urls.py"
       - "scripts/test_check_runbook_urls.py"
-      - "scripts/check_chart_alert_parity.py"
-      - "scripts/test_check_chart_alert_parity.py"
-      - "scripts/chart_alert_waivers.txt"
+      - "scripts/check_alert_plane_parity.py"
+      - "scripts/test_check_alert_plane_parity.py"
+      - "scripts/alert_plane_waivers.txt"
       - "scripts/check_routing_labels.py"
       - "scripts/test_check_routing_labels.py"
       - ".github/workflows/alert-rules-lint.yml"
@@ -198,22 +206,29 @@ jobs:
           TATARA_DOCS_REF: ${{ github.head_ref }}
         run: python3 scripts/check_runbook_urls.py
 
-      # Two-alerting-plane reconciliation (tatara-helmfile#440). Every check above guards
-      # THIS repo's rules. None of them could see that tatara-operator's chart shipped 32
-      # alerts of its own that Prometheus never loaded (ruleSelector wants
-      # release=prometheus; the deploy repo never set the label) into an Alertmanager whose
-      # only receiver is named "null". That plane is now disabled and this repo is the only
-      # one, which makes the chart file the SPECIFICATION of conditions worth watching
-      # rather than a deploy artifact - and leaves nothing reconciling the two.
-      # tatara-operator#635 is what that costs: it filed an alert as "never written" on a
-      # grep of this repo when the alert existed, in the plane that delivered nothing. A
-      # competent audit of the wrong plane is indistinguishable from a real gap.
+      # Alerting-plane reconciliation (tatara-helmfile#440, widened by
+      # tatara-observability#120). Every check above guards THIS repo's rules. None of them
+      # could see that tatara-operator's chart shipped 32 alerts of its own that Prometheus
+      # never loaded (ruleSelector wants release=prometheus; the deploy repo never set the
+      # label) into an Alertmanager whose only receiver is named "null". That plane is now
+      # disabled and this repo is the only one, which makes each non-delivering file the
+      # SPECIFICATION of conditions worth watching rather than a deploy artifact - and
+      # leaves nothing reconciling them. tatara-operator#635 is what that costs: it filed
+      # an alert as "never written" on a grep of this repo when the alert existed, in the
+      # plane that delivered nothing. A competent audit of the wrong plane is
+      # indistinguishable from a real gap.
+      #
+      # THREE planes, not one: the tatara-operator chart, the tatara-memory chart, and
+      # tatara-operator's memoryAlertRules Go set - which is where the measured 4-rule gap
+      # was, and which v1 excluded on two reasons that were both false.
       #
       # Fails CLOSED on a clone failure, unlike the neutral skip in the step above. That
       # costs no availability: check_label_provenance.py already clones tatara-operator and
       # already fails closed on it, so this job cannot pass without that clone either way.
-      - name: check chart alert parity against tatara-operator
-        run: python3 scripts/check_chart_alert_parity.py
+      # It is also CLOSED on an unresolvable Go expression: a reader that skips the rules
+      # it cannot parse and reports the rest as clean is this whole check, one level down.
+      - name: check alert plane parity against tatara-operator and tatara-memory
+        run: python3 scripts/check_alert_plane_parity.py
 
       # The routing contract (issue #117). Every check above asserts a rule is well-formed,
       # its metric exists, its labels exist on that metric, its threshold is in range, its

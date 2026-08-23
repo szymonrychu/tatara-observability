@@ -81,7 +81,14 @@ rules:
         auto-approve carve-out covers a bot-authored proposal no human ever commented on -
         that is Project.spec.autoApproveMaxSignificance, a per-project severity ceiling
         (off|patch|minor|major, default off) that replaced the old boolean flag; its refusal
-        axis appears as ceiling-off on operator_auto_approve_refused_total.
+        axis appears as ceiling-off on operator_auto_approve_refused_total. THIS RULE DOES NOT
+        SEE THE SHIP GATE, and that is the second thing to check when it is quiet but agents
+        report being blocked: mr_write(action=open) and submit_outcome(action=submitted) run
+        their own approval check, which logs action="approval_required_refused" - a different
+        action value this selector does not match - and counts on
+        operator_rest_ownership_refused_total{target="approval-required"}. A GRANT that this
+        rule never saw can still be refused there, because the ceiling is measured against a
+        change_significance that does not exist until submit.
     labels:
       homelab: "true"
       system: "tatara"

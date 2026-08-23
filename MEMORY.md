@@ -2,6 +2,34 @@
 
 Past decisions + context. One dated line per entry.
 
+- 2026-08-23: tatara-helmfile#440 - the platform had TWO alerting planes and delivered on one.
+  tatara-operator's chart ships a 32-alert PrometheusRule that this cluster's Prometheus never
+  loaded (ruleSelector wants `release=prometheus`; the deploy repo never set
+  `prometheusRule.additionalLabels`). Labelling it was the obvious fix and is WRONG: the cluster
+  Alertmanager is stock kube-prometheus-stack with `route.receiver: "null"` and ONE receiver named
+  `"null"` holding zero integrations - measured live, discarding `PvcBackupJobFailed` on 11 series
+  at the time. Labelling would have loaded 32 rules that fire into nothing, i.e. manufactured
+  coverage, which is worse than the silence. The plane is disabled instead
+  (`prometheusRule.enabled: false`), and this repo is now the ONLY alerting plane on this cluster.
+  9 chart alerts read a metric no rule here read: 6 ported, 3 waived in
+  `scripts/chart_alert_waivers.txt`. `scripts/check_chart_alert_parity.py` reconciles the two from
+  here on - the chart file is now a SPECIFICATION, `alerts/` is what actually alerts. The cost of
+  not reconciling them is on the record as tatara-operator#635, which filed an alert as "never
+  written" on a grep of this repo when it existed in the plane that delivered nothing.
+- 2026-08-23: `TataraSweepStalled` was WAIVED, not ported, against the brief's instruction to port
+  it. It is a FLAT staleness threshold on `operator_sweep_last_success_timestamp_seconds`, and
+  `alerts/tatara-operator.yaml:1433-1445` records that this repo deliberately deleted exactly that
+  shape - a flat 21600s bound was breached ~18h of every 24 by the nightly crons. "Operator sweep
+  heartbeat stale" already covers the condition per-(project,activity) against a next-expected
+  timestamp the operator computes from each activity's own cron, and fires on NoData too. Porting
+  the chart rule would have re-introduced the false-positive class, not closed a gap. When a
+  cross-repo census matches on METRIC NAME, check whether a differently-keyed rule already covers
+  the CONDITION before treating the row as a gap.
+- 2026-08-23: `TATARA_DOCS_REF` in `check_runbook_urls.py` is now a UNION over docs `main`, not a
+  replacement for it. Replacement silently narrowed the check: pointing a run at a docs branch
+  stopped validating against what is published, so an anchor deleted on that branch read as clean.
+  Anchors resolving only via the ref are named in the job summary - they are unpublished, and
+  merging this repo before the docs PR is what leaves them dangling.
 - 2026-07-12: Issue #50 - "Operator replica missing" warning false-fired on environment cold start /
   Prometheus restart. `count(up{job="tatara-operator"} == 1) or vector(0) < 3` fabricated a literal 0
   when every `up` series was transiently absent, and 0 < 3 held the false page for the whole 15m

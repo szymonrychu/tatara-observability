@@ -1760,3 +1760,129 @@ rules:
       system: "tatara"
       component: "operator"
       severity: "warning"
+  # ----------------------------------------------------------------------------
+  # PORTED FROM THE CHART PLANE (tatara-helmfile#440).
+  #
+  # tatara-operator's chart ships a 32-alert PrometheusRule that this cluster's Prometheus
+  # has never loaded: the ruleSelector matches release=prometheus and tatara-helmfile never
+  # set prometheusRule.additionalLabels. Setting that label is the obvious fix and is the
+  # WRONG one - the cluster Alertmanager is stock kube-prometheus-stack with
+  # route.receiver "null", a single Watchdog child route, and ONE receiver named "null"
+  # holding zero integrations. It is discarding PvcBackupJobFailed on 11 series right now.
+  # Labelling the rule would have loaded 32 alerts that evaluate, fire, and are dropped -
+  # manufactured coverage, which is worse than the silence it replaced. tatara-helmfile
+  # sets prometheusRule.enabled: false instead, and the conditions with no witness on THIS
+  # plane move here, because the Tatara contact point webhooks
+  # /operator/webhooks/tatara/grafana and that is the only incident-Task minting path.
+  #
+  # 9 of the 32 chart alerts read a metric no rule here reads. 6 are ported (5 below plus
+  # "Claude account usage gate not ready" in alerts/tatara-usage-gate.yaml); 3 are waived
+  # against the rules that already replaced them, recorded with citations in
+  # scripts/chart_alert_waivers.txt. scripts/check_chart_alert_parity.py is what keeps
+  # that reconciliation honest from here on: the chart file stops being a deploy artifact
+  # and becomes the SPECIFICATION of conditions worth alerting on, alerts/ is what is
+  # actually alerted, and CI fails if the two drift apart again.
+  #
+  # THREE OF THE FIVE BELOW HAVE NO SERIES IN PROMETHEUS TODAY (the counters have never
+  # been observed), so `increase(...)` over them yields NoData, not 0. Every file here
+  # sets default_no_data_state: "OK", so without `or vector(0)` those three would be dark
+  # in exactly the way this whole change exists to stop. The one rule that must NOT get
+  # that treatment is the usage-gate one, for the reason recorded on it there.
+  # ----------------------------------------------------------------------------
+  # Chart: TataraSweepSkipPersistent. Window and threshold are the chart's own
+  # (sweepSkipWindow 24h, sweepSkipPassThreshold 6), carried over unchanged: at the 4h
+  # issueScan cadence, 6 skips in 24h is "every pass for a full day".
+  #
+  # The reason!="mint_budget_bound" exclusion is LOAD-BEARING and is asserted by a unit
+  # test in the producer (tatara-operator internal/obs/sweep_skip_alert_test.go). That
+  # reason is a cap doing its job: an orphan deferred because maxOpenTasks is full is
+  # emitted on every pass for as long as the backlog lasts, so including it pins this
+  # alert on permanently and buries the mr_claimed_by_other_task signal it exists for.
+  # Do not widen the exclusion any further either - over-narrowing hides the real signal,
+  # which is the other half of what that producer-side test asserts.
+  - name: "Operator sweep skip persistent"
+    queries:
+      - expression: |
+          sum by (project, activity, reason) (increase(operator_sweep_skipped_total{namespace="tatara",job="tatara-operator",reason!="mint_budget_bound"}[24h])) or vector(0)
+    math_operator: ">="
+    threshold: 6
+    for: 15m
+    decimal_points: 0
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-sweep-skip-persistent"
+      summary: "The B.4 sweep skipped project={{ index $labels \"project\" }} activity={{ index $labels \"activity\" }} reason={{ index $labels \"reason\" }} {{ index $values \"C\" }} times in 24h (>=6). A SINGLE skip is a normal steady state - reason=mr_claimed_by_other_task means a live Task legitimately controller-owns that MergeRequest, and a parked Task still owns its MR because parking is re-entrant - so this fires only on one that never clears. That means the owning Task has stopped progressing and is not being reaped: find it with operator_task_state_age_seconds, then resolve or reap it. reason=mint_budget_bound is excluded on purpose and must stay excluded (it is the maxOpenTasks cap working, not a failure); a budget that never frees shows up as a climbing state age and as \"Operator sweep creation budget chronically capped\", not here."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # Chart: TataraResidencyExceeded. No series today - `or vector(0)` is required.
+  - name: "Operator task residency cap exceeded"
+    queries:
+      - expression: |
+          sum by (state, kind) (increase(operator_task_residency_exceeded_total{namespace="tatara",job="tatara-operator"}[1h])) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-task-residency-cap-exceeded"
+      summary: "{{ index $values \"C\" }} Task(s) in state={{ index $labels \"state\" }} kind={{ index $labels \"kind\" }} were parked by the ABSOLUTE residency backstop (ResidencyCapAll, 24h) in the last 1h. This is the last line of defence firing, not the normal deadline: tatara-operator#521 replaced a live state's work clock with an IDLE clock on conversationLastEventAt, which a chatty reviewer or a ping-ponging agent conversation resets indefinitely while real time keeps running, and this counter is how often the absolute bound had to do the per-state deadline's job. A single event is worth reading; a SUSTAINED rate concentrated in one (state, kind) pair is a convergence problem in that agent kind. Raising the cap is not the fix - the cap firing is the symptom."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # Chart: TataraParkedWithLivePod. No series today - `or vector(0)` is required.
+  # Threshold is the chart's >2/h, not >0: one repair around a leader-election changeover
+  # or an API-server blip is a benign race; a rate is not.
+  - name: "Operator parked task with live pod"
+    queries:
+      - expression: |
+          sum by (project, park_reason) (increase(operator_task_parked_with_live_pod_repaired_total{namespace="tatara",job="tatara-operator"}[1h])) or vector(0)
+    math_operator: ">"
+    threshold: 2
+    for: 15m
+    decimal_points: 0
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-parked-task-with-live-pod"
+      summary: "{{ index $values \"C\" }} parked-Task-with-live-pod repair(s) for project={{ index $labels \"project\" }} park_reason={{ index $labels \"park_reason\" }} in 1h (>2). parkReason set while the agent pod is still running is TRANSIENT BY DESIGN - ParkTask stamps the flag and deletes the pod in one call, so the window is sub-second and should essentially never be observed. A sustained rate means the park-then-stop sequence is not completing, and the cost is not the stray pod: ADMISSION SLOTS LEAK. A parked Task stops counting as active while its pod still holds concurrency, so the pool silently shrinks with no clock armed on the leaked capacity. Cross-reference parked Tasks against live pods to find whether a leak is still open; a park_reason concentrated on one value names the park path that is dropping its own delete."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # Chart: TataraSemverLabelMissing. No series today - `or vector(0)` is required.
+  - name: "Operator merged a PR with no semver label"
+    queries:
+      - expression: |
+          sum by (repo) (increase(operator_semver_label_missing_total{namespace="tatara",job="tatara-operator"}[1h])) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-merged-a-pr-with-no-semver-label"
+      summary: "The operator merged {{ index $values \"C\" }} MergeRequest(s) in repo={{ index $labels \"repo\" }} carrying no declared change significance, so no semver:<level> label was on the PR at the merge commit and push-CD cut NO TAG from it (contract H.4). No tag means no publish, no pin bump, and a deploying stage that never resolves: the change is on main and is NOT on the cluster, while reading as a clean merge from every other angle. The merge is deliberately not stalled on this - blocking it would strand a reviewed, approved change behind an operator bug - so a HUMAN must tag the merged commit; the tag job is push-triggered and tag mode is not idempotent, so it cannot simply be re-run. Then find why the label was absent: the operator applies it itself from MergeRequest.status.significance BEFORE merging, so this is either a significance never set or a label write that lost a race."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
+  # Chart: TataraPushMetricsDropped.
+  - name: "Operator pushed metrics dropped"
+    queries:
+      - expression: |
+          sum by (reason) (increase(operator_push_series_dropped_total{namespace="tatara",job="tatara-operator",reason="reserved_name"}[15m])) or vector(0)
+    math_operator: ">"
+    threshold: 0
+    for: 5m
+    decimal_points: 0
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-operator-pushed-metrics-dropped"
+      summary: "{{ index $values \"C\" }} pushed metric family/families were dropped for reason={{ index $labels \"reason\" }} in 15m. A short-lived pod (agent wrapper, ingest job) pushed a family whose name matches no prefix in pushMetricsAllowedPrefixes (PUSH_METRICS_ALLOWED_PREFIXES), so the receiver dropped it before it ever reached Prometheus. This is allowlist drift and it is silent on the producing side: the pod pushes successfully, exits, and the metric simply never exists - so any alert or panel on that family reads NoData forever, the same silent-green class this repo's metric-provenance lint guards, arriving through the push path where that lint cannot see it. The counter does not carry the family name; the receiver logs each dropped family at WARN (action=\"push_series_dropped\") on every affected push. Add the narrowest prefix that admits it to pushMetricsAllowedPrefixes in tatara-helmfile."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"

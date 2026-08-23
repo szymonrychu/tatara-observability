@@ -38,6 +38,15 @@ name: alert-rules-lint
 # does the same for dashboards/*.json: the identical unreachable `30` was painted as a
 # red threshold step on the two panels backing those rules, on a surface with no
 # no_data_state to even mis-configure.
+#
+# check_chart_alert_parity.py (tatara-helmfile#440) is the dimension OUTSIDE this repo.
+# Every check above validates a rule that exists here. None of them could see that
+# tatara-operator's chart shipped 32 alerts of its OWN which this cluster's Prometheus
+# never loaded, into an Alertmanager whose only receiver is named "null" - a whole second
+# alerting plane, dark since the day it shipped, carrying 9 conditions with no rule here
+# at all. That plane is now disabled (tatara-helmfile sets prometheusRule.enabled: false),
+# 6 of the 9 are ported into alerts/ and 3 are waived against the rules that already
+# replaced them. This script keeps the chart file and alerts/ reconciled from here on.
 
 on:
   pull_request:
@@ -60,6 +69,9 @@ on:
       - "scripts/histogram_bounds.txt"
       - "scripts/check_runbook_urls.py"
       - "scripts/test_check_runbook_urls.py"
+      - "scripts/check_chart_alert_parity.py"
+      - "scripts/test_check_chart_alert_parity.py"
+      - "scripts/chart_alert_waivers.txt"
       - ".github/workflows/alert-rules-lint.yml"
   push:
     branches: [main]
@@ -82,6 +94,9 @@ on:
       - "scripts/histogram_bounds.txt"
       - "scripts/check_runbook_urls.py"
       - "scripts/test_check_runbook_urls.py"
+      - "scripts/check_chart_alert_parity.py"
+      - "scripts/test_check_chart_alert_parity.py"
+      - "scripts/chart_alert_waivers.txt"
       - ".github/workflows/alert-rules-lint.yml"
   schedule:
     # Nightly reverse-drift sweep: a metric removed from a producer repo never touches
@@ -166,5 +181,32 @@ jobs:
       # shallow-cloning tatara-documentation, same pattern as the step above - that
       # docs/operations/runbooks.md declares every one of those anchors. Clone failure is a
       # neutral skip inside the script; the local half still fails hard.
+      #
+      # TATARA_DOCS_REF makes a two-repo change checkable before either half merges: the
+      # script clones docs `main` as it always did and UNIONS the branch's anchors on top,
+      # never replacing them, so an anchor deleted on the branch still fails. head_ref is
+      # the PR's source branch and is EMPTY on push, so a merge to main is checked against
+      # published main alone. Anchors that resolved only via the branch are listed in the
+      # job summary: they are unpublished, and merging this repo before the docs PR is
+      # exactly what leaves them dangling.
       - name: check runbook_url annotations resolve to real docs anchors
+        env:
+          TATARA_DOCS_REF: ${{ github.head_ref }}
         run: python3 scripts/check_runbook_urls.py
+
+      # Two-alerting-plane reconciliation (tatara-helmfile#440). Every check above guards
+      # THIS repo's rules. None of them could see that tatara-operator's chart shipped 32
+      # alerts of its own that Prometheus never loaded (ruleSelector wants
+      # release=prometheus; the deploy repo never set the label) into an Alertmanager whose
+      # only receiver is named "null". That plane is now disabled and this repo is the only
+      # one, which makes the chart file the SPECIFICATION of conditions worth watching
+      # rather than a deploy artifact - and leaves nothing reconciling the two.
+      # tatara-operator#635 is what that costs: it filed an alert as "never written" on a
+      # grep of this repo when the alert existed, in the plane that delivered nothing. A
+      # competent audit of the wrong plane is indistinguishable from a real gap.
+      #
+      # Fails CLOSED on a clone failure, unlike the neutral skip in the step above. That
+      # costs no availability: check_label_provenance.py already clones tatara-operator and
+      # already fails closed on it, so this job cannot pass without that clone either way.
+      - name: check chart alert parity against tatara-operator
+        run: python3 scripts/check_chart_alert_parity.py

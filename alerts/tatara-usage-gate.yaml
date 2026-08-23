@@ -11,6 +11,44 @@
 interval_seconds: 60
 default_no_data_state: "OK"
 rules:
+  # PORTED FROM THE CHART PLANE (tatara-helmfile#440). tatara-operator's chart ships a
+  # 32-alert PrometheusRule, and this cluster's Prometheus has never loaded it: the
+  # ruleSelector matches release=prometheus and tatara-helmfile never set
+  # prometheusRule.additionalLabels. Labelling it was the obvious fix and is the wrong
+  # one - the cluster Alertmanager is stock kube-prometheus-stack with route.receiver
+  # "null", one child route for Watchdog, and ONE receiver named "null" carrying zero
+  # integrations. PvcBackupJobFailed is firing on 11 series into it right now. Grafana is
+  # the only plane that delivers, because the Tatara contact point webhooks
+  # /operator/webhooks/tatara/grafana, which is the incident-Task minting path. So the
+  # chart plane is being turned off and the conditions with no witness here are moving.
+  #
+  # This is TataraAccountUsageFeedDead. tatara-operator#635 filed the same condition as
+  # "never written" on a grep of this repo; it was written, in the plane that delivers
+  # nothing. That issue's remedy is this rule.
+  #
+  # NO `or vector(0)`, deliberately, and this is the load-bearing detail.
+  # tatara_account_usage_gate_ready is a LABEL-LESS GaugeVec, not a Gauge, precisely so
+  # that its child is created on first Set: an operator with the budget gate off emits NO
+  # SERIES AT ALL (tatara-operator internal/obs/accountusage_metrics.go). Absent -> NoData
+  # -> "OK" via this file's default is the CORRECT reading - no gate, no gate failure. A
+  # fabricated zero would page forever on every project that has the gate off, which is
+  # the inverse of what the metric was shaped to allow.
+  - name: "Claude account usage gate not ready"
+    queries:
+      - expression: |
+          tatara_account_usage_gate_ready
+    math_operator: "<"
+    threshold: 1
+    for: 30m
+    decimal_points: 0
+    annotations:
+      runbook_url: "https://szymonrychu.github.io/tatara-documentation/operations/runbooks/#tatara-runbook-claude-account-usage-gate-not-ready"
+      summary: "tatara_account_usage_gate_ready has read {{ index $values \"C\" }} (<1) for 30m: tokenBudget is enabled in claudeSubscription mode but no usage snapshot newer than tokenBudgetMaxSnapshotAge is governing admission, so the gate FAILS OPEN and admits every spawn regardless of how much of the shared Claude subscription is already burnt. This is the compensating control for that fail-open, and it is deliberately NOT derived: the pre-existing budget rule watches operator_admission_blocked_total{reason=\"token_budget\"}, a counter that by construction never increments while the gate evaluates nothing, so the gate ran inert for weeks reading green. Check tatara_account_usage_snapshot_age_seconds for WHICH feed went quiet and how long ago - source=\"poller\" is the /api/oauth/usage path (see \"Claude account usage poll unhealthy\" in this file), source=\"wrapper\" is the cc-statusline turn-complete callback, and ccw_statusline_reports_total on the pushed wrapper metrics tells a dead statusline apart from an operator not persisting Task.status.accountUsage. Do NOT widen tokenBudgetMaxSnapshotAge to clear this: that makes a staler snapshot count as fresh and returns the gate to inert-but-green."
+    labels:
+      homelab: "true"
+      system: "tatara"
+      component: "operator"
+      severity: "warning"
   - name: "Claude account usage poll unhealthy"
     queries:
       # Guarded on poller_enabled==1, mirroring issue #33's

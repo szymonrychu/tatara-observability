@@ -53,7 +53,14 @@ TATARA_DOCS_REF to the docs branch to validate the pair before either merges:
 
     TATARA_DOCS_REF=feat/my-runbook python3 scripts/check_runbook_urls.py
 
-It defaults to main, so CI always checks against what is actually published.
+IT IS A UNION OVER MAIN, NOT A REPLACEMENT FOR IT. main is always cloned and always
+authoritative; a ref may only ADD anchors on top. Replacement was the original behaviour
+and it silently narrowed the check - pointing a run at a docs branch stopped validating
+against what is published, so an anchor DELETED on that branch, or a companion docs PR
+later abandoned, read as clean. Anchors that resolved only via the ref are listed in the
+job summary, because they are unpublished: merging this repo before the docs PR leaves
+exactly those links dangling. The workflow passes github.head_ref, which is empty on
+push, so a merge to main is always checked against published main alone.
 
 Run: python3 scripts/check_runbook_urls.py
 Exit 0 = clean (including "clone skipped"), 1 = violations, 2 = usage/parse error.
@@ -215,17 +222,58 @@ def clone_docs(dest: pathlib.Path, ref: str) -> bool:
         return False
 
 
+def union_declared(
+    base: dict[str, str] | None, extra: dict[str, str] | None
+) -> tuple[dict[str, str] | None, set[str]]:
+    """Merge a branch ref's declared anchors OVER main's. Returns (merged, ref_only_ids).
+
+    TATARA_DOCS_REF is a union, never a replacement. Replacement was the original
+    behaviour and it silently NARROWED the check: pointing a run at a docs branch stopped
+    validating against what is actually published, so an anchor deleted on that branch -
+    or a companion docs PR later abandoned - read as clean. main stays authoritative and
+    the ref may only ADD.
+
+    A base of None is "could not look at main", which stays a neutral skip whatever the
+    ref says: an anchor that exists only on an unmerged branch is not evidence the link
+    will resolve, and certifying it off a branch is the failure this file exists to stop.
+    """
+    if base is None:
+        return None, set()
+    if not extra:
+        return dict(base), set()
+    ref_only = {a for a in extra if a not in base}
+    merged = dict(base)
+    merged.update(extra)
+    return merged, ref_only
+
+
 def reconcile(anchors: dict[str, str], declared: dict[str, str]) -> list[str]:
     """Anchors this repo links to that the docs page does not declare."""
     return sorted(a for a in anchors if a not in declared)
 
 
 def _write_summary(
-    anchors: dict[str, str], declared: dict[str, str] | None, dangling: list[str]
+    anchors: dict[str, str],
+    declared: dict[str, str] | None,
+    dangling: list[str],
+    ref_only: set[str] | None = None,
+    ref: str = "main",
 ) -> None:
     lines = ["## Alert runbook links", ""]
     lines.append(f"{len(anchors)} alert rule(s) carry a well-formed `runbook_url`.")
     lines.append("")
+    if ref_only:
+        # Naming these is the point of the union. An anchor that resolves only via an
+        # unmerged branch is NOT published yet, and a reviewer has to see which links go
+        # dark if the companion docs PR never lands or lands renamed.
+        lines.append(
+            f"**{len(ref_only)} anchor(s) resolved only via `{ref}`, not from docs "
+            "`main`.** They are unpublished until that docs PR merges, and merging THIS "
+            "repo first leaves them dangling:"
+        )
+        for a in sorted(ref_only):
+            lines.append(f"- `{a}` (rule `{anchors.get(a, '?')}`)")
+        lines.append("")
     if declared is None:
         lines.append(
             "Anchor existence NOT checked this run (tatara-documentation clone failed - "
@@ -264,6 +312,26 @@ def _write_summary(
             f.write(text)
 
 
+def _read_anchors(dest: pathlib.Path, ref: str, hard: bool) -> dict[str, str] | None:
+    """Clone tatara-documentation@ref and parse its declared anchors, or None.
+
+    `hard` only changes the wording: neither arm ever fails the build. A main clone that
+    fails is the long-standing neutral skip; a REF clone that fails is a weaker event
+    still - main already answered, and the ref was only ever going to add to it."""
+    if not clone_docs(dest, ref):
+        return None
+    try:
+        return parse_declared_anchors((dest / RUNBOOKS_PATH).read_text())
+    except OSError as exc:
+        scope = "skipping the anchor-existence check" if hard else f"ignoring {ref}"
+        print(
+            f"::warning::check_runbook_urls: cloned tatara-documentation@{ref} but could "
+            f"not read {RUNBOOKS_PATH} ({exc}) - {scope}",
+            file=sys.stderr,
+        )
+        return None
+
+
 def _default_paths() -> list[str]:
     root = pathlib.Path(__file__).resolve().parent.parent
     return sorted(glob.glob(str(root / "alerts" / "*.yaml")))
@@ -291,28 +359,27 @@ def main(argv: list[str]) -> int:
         return 1
 
     declared: dict[str, str] | None = None
+    ref_declared: dict[str, str] | None = None
     ref = docs_ref()
     with tempfile.TemporaryDirectory(prefix="runbook-anchors-") as tmp:
-        dest = pathlib.Path(tmp) / "tatara-documentation"
-        if clone_docs(dest, ref):
-            try:
-                declared = parse_declared_anchors((dest / RUNBOOKS_PATH).read_text())
-            except OSError as exc:
-                print(
-                    f"::warning::check_runbook_urls: cloned tatara-documentation but could "
-                    f"not read {RUNBOOKS_PATH} ({exc}) - skipping the anchor-existence check",
-                    file=sys.stderr,
-                )
+        # ALWAYS main, exactly as before: main is what is published and stays the
+        # authority. A ref is best-effort and additive on top of it (see union_declared).
+        declared = _read_anchors(pathlib.Path(tmp) / "main", "main", hard=True)
+        if ref != "main":
+            ref_declared = _read_anchors(pathlib.Path(tmp) / "ref", ref, hard=False)
 
+    declared, ref_only = union_declared(declared, ref_declared)
     dangling = reconcile(anchors, declared) if declared is not None else []
-    _write_summary(anchors, declared, dangling)
+    _write_summary(anchors, declared, dangling, ref_only, ref)
 
     if dangling:
         print(
             f"FAIL: {len(dangling)} runbook_url anchor(s) are not declared in "
-            f"tatara-documentation@{ref} {RUNBOOKS_PATH}. See the job summary above. If the "
-            "companion docs PR has not merged yet, that is this check working: land it "
-            "first, or re-run with TATARA_DOCS_REF set to its branch.",
+            f"tatara-documentation {RUNBOOKS_PATH} on main"
+            + (f" or on {ref}" if ref != "main" else "")
+            + ". See the job summary above. If the companion docs PR has not merged yet, "
+            "that is this check working: land it first, or re-run with TATARA_DOCS_REF "
+            "set to its branch.",
             file=sys.stderr,
         )
         return 1

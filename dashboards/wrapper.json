@@ -251,7 +251,7 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "ccw_turns_total by terminal result (complete|failed), increase over 15m. TTL/first-jump caveat: each agent pod starts its turn counter fresh and its series is evicted within the receiver TTL of its last push, so a turn's first increment can be lost and very short-lived runs may under-count. Window is 15m (>= receiver TTL) to mitigate.",
+      "description": "ccw_turns_total by terminal result (complete|failed|interrupted), increase over 15m. THE FIRST-INCREMENT HALF OF THE OLD TTL CAVEAT HERE IS FIXED (tatara-claude-code-wrapper#189): the vec is pre-seeded at registration, so the series exists at 0 from a pod's first second and no turn's first increment is lost to a series that did not exist yet - the caveat reasoned only about the receiver's passive TTL and never about the pusher's ACTIVE DELETE at shutdown, which was the larger of the two and is now gone as well. What remains is a genuine sampling floor: a run still starts its counter fresh, and a run whose whole life fits between two scrapes is still under-counted. Window stays 15m (>= receiver TTL).",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "palette-classic"},
@@ -579,7 +579,7 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Share of CommitAndPush calls ending result=ok over 30m (ccw_commit_push_total), clamp_min(...,1) so it reads 0 (not NaN) when no pushes ran in the window. The 'Wrapper commit/push failure ratio high' alert fires when the fail ratio exceeds 0.2 (i.e. this drops below 0.8) for 30m.",
+      "description": "Share of CommitAndPush calls ending result=ok over 30m (ccw_commit_push_total). The 'Wrapper commit/push failure ratio high' alert fires when the fail ratio exceeds 0.2 (i.e. this drops below 0.8) for 30m. NO clamp_min ON THE DENOMINATOR, DELIBERATELY, unlike the failure-ratio panels: this is the one INVERTED ratio on the board and its base threshold step is RED, so a hard 0 would paint 'no pushes in the window' the same red as 'every push failed'. Since tatara-claude-code-wrapper#189 pre-seeds ccw_commit_push_total at registration the series is present at 0 from a pod's first second, so an empty window IS reachable now - it was previously an absent series and rendered as nothing at all. 0/0 is NaN and Grafana draws a gap, which is the honest reading: there were no pushes to score.",
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "palette-classic"},
@@ -631,7 +631,7 @@
         {
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "editorMode": "code",
-          "expr": "sum(increase(ccw_commit_push_total{result=\"ok\", exported_pod=~\"$pod\"}[30m])) / clamp_min(sum(increase(ccw_commit_push_total{exported_pod=~\"$pod\"}[30m])), 1)",
+          "expr": "sum(increase(ccw_commit_push_total{result=\"ok\", exported_pod=~\"$pod\"}[30m])) / sum(increase(ccw_commit_push_total{exported_pod=~\"$pod\"}[30m]))",
           "legendFormat": "push success ratio",
           "refId": "A"
         }

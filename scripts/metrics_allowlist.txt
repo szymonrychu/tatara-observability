@@ -95,6 +95,21 @@ grafana_alerting_rule_evaluation_attempt_failures_total
 grafana_database_conn_open
 grafana_database_conn_max_open
 
+# --- external: client_golang runtime collectors (tatara-observability#120) ---
+# Emitted BY the tatara-memory process but DECLARED by client_golang, not by any Go source
+# in a producer repo: cmd/tatara-memory/app.go:315 registers
+# collectors.NewDBStatsCollector(db, "tatara_memory"), and the descs come from inside the
+# library. check_label_provenance.py's prometheus.New*/promauto regex cannot see them, so
+# filing these under "memory" would make reconcile_metric_provenance.py report them stale
+# forever. "external" is the existing, correct exemption (SECTION_REPO["external"] = None).
+# The db_name="tatara_memory" constant label the collector adds is what the two pool rules
+# in alerts/tatara-memory.yaml pin on, and is why they cannot select Grafana's own pool -
+# which emits this same family under job="prometheus-grafana" and is the only emitter of
+# it in this Prometheus today.
+go_sql_in_use_connections
+go_sql_max_open_connections
+go_sql_wait_duration_seconds_total
+
 # --- external: forward-looking, not yet deployed by any producer repo ---
 # scripts/reconcile_metric_provenance.py (issue #57) treats "external" sections as exempt
 # from reverse-drift reconciliation - it never clones a repo for these, so a name here is
@@ -384,6 +399,9 @@ ingest_items_total
 code_graph_query_total
 code_graph_analytics_dirty_repos
 code_graph_analytics_runs_total
+# Ported off the tatara-memory chart 2026-08-23 (tatara-observability#120), declared at
+# internal/httpapi/admission.go:47 so the reverse-drift reconciler re-derives it.
+http_admission_total
 # (operator_memory_stacks is listed in the operator section above)
 # dashboard-only (2026-07-13 backfill), all verified in tatara-memory's internal/obs.
 http_request_duration_seconds

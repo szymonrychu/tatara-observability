@@ -33,12 +33,22 @@
 # applied to the bound rather than the name.
 #
 # A family whose `Buckets:` is a named package-level variable is NOT derivable by that
-# reconciler and is deliberately absent below rather than guessed:
-#   - code_graph_analytics_duration_seconds (tatara-memory, analyticsDurationBuckets)
-#   - http_request_duration_seconds         (tatara-memory, requestDurationBuckets)
-# No alert runs a quantile over either today. A rule that starts to will hard-fail Check 4
-# until its bound is added here by hand; add it with a comment naming the var, and the
-# reconciler will report it as unvalidatable rather than failing on it.
+# reconciler. It is not omitted for that reason - it is listed with a comment naming the
+# var, and the reconciler reports it as UNVALIDATABLE rather than failing on it:
+#   - code_graph_analytics_duration_seconds (tatara-memory, analyticsDurationBuckets) is
+#     absent because no alert or dashboard runs a quantile over it.
+#   - http_request_duration_seconds (tatara-memory, requestDurationBuckets) IS listed,
+#     under memory below.
+#
+# CORRECTED 2026-08-23 (tatara-observability#120). This paragraph used to end "No alert
+# runs a quantile over either today", which was true of alerts/ and stated platform-wide.
+# Two alerts ran a p99 over http_request_duration_seconds_bucket the whole time -
+# MemoryRetrievalLatencyHigh, on the tatara-memory chart plane and on tatara-operator's
+# memoryAlertRules - and BOTH carried a comment asserting a 10s DefBuckets ceiling that
+# had not existed since the buckets were widened. That is this file's own scope being read
+# as platform-wide: the same failure scripts/check_alert_plane_parity.py exists to catch,
+# in the file built for the other half of it. The rule is now ported into
+# alerts/tatara-memory.yaml, so Check 4 validates its threshold against the real bound.
 #
 # ExponentialBuckets(start, factor, count) runs start .. start * factor^(count-1).
 # LinearBuckets(start, width, count) runs start .. start + width*(count-1).
@@ -83,6 +93,13 @@ code_graph_compute_duration_seconds 0.005 10
 ingest_item_duration_seconds 0.005 10
 # Literal ladder (httpapi/admission.go).
 http_admission_wait_seconds 0.001 30
+# NAMED VAR, hand-transcribed, reported unvalidatable by the reconciler rather than
+# re-derived: requestDurationBuckets (httpapi/middleware.go:199) is
+# append(prometheus.DefBuckets..., 30, 60, 120, 240, 300), so the ceiling is 300 and NOT
+# the 10s three separate comments in tatara-memory and tatara-operator asserted until
+# 2026-08-23 (tatara-observability#120). Because this one is hand-maintained, a future
+# widening of that var must be copied here by hand - the reverse-drift gate cannot do it.
+http_request_duration_seconds 0.005 300
 
 # --- ingester: tatara-memory-repo-ingester/internal/obs ---
 # DefBuckets.

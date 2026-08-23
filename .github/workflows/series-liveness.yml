@@ -1,0 +1,64 @@
+name: series-liveness
+
+# Scheduled report on which series the alert rules select that Prometheus does not
+# actually hold. See scripts/check_series_liveness.py for why the other three
+# provenance checks structurally cannot see this: they all validate the metric NAME
+# at its PRODUCER, and all three were green throughout
+# tatara-claude-code-wrapper#189 while two live rules had never been able to fire.
+#
+# NEVER a pull_request trigger, deliberately. A dark metric is a FLEET condition,
+# not a property of the change in front of you - a rule correct on the day it merged
+# can go dark three releases later when a producer stops incrementing it, and
+# blocking an unrelated PR on that helps nobody. Same reasoning tatara-helmfile's
+# skills-currency job records for itself.
+#
+# A separate workflow rather than a job in alert-rules-lint.yml because that
+# workflow's header states it deliberately needs no AWS/Grafana secrets, and this
+# one cannot run without them. Folding it in would make every rule lint depend on
+# a Grafana credential.
+#
+# The job FAILS only when the check could not run (missing secrets, transport
+# failure, a query Prometheus rejected). Dark metrics exit 0 and are reported in the
+# step summary. A liveness assertion that silently stops asserting is the same
+# silent-green failure it exists to catch, so the two outcomes must not share an
+# exit code.
+
+on:
+  schedule:
+    # 04:17 UTC, an arbitrary off-peak minute chosen not to collide with
+    # alert-rules-lint's 03:23 reverse-drift sweep.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tatara-observability-series-liveness
+  cancel-in-progress: false
+
+jobs:
+  liveness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: install deps
+        run: pip install --quiet pyyaml
+
+      # The script's own unit tests run here too: this workflow is the only thing
+      # that exercises it on a schedule, and a broken script must fail loudly rather
+      # than report an empty fleet.
+      - name: self-tests
+        run: python3 -m unittest discover scripts -p 'test_check_series_liveness.py' -v
+
+      - name: report alert series liveness
+        env:
+          GRAFANA_URL: ${{ secrets.TF_VAR_GRAFANA_URL }}
+          GRAFANA_API_KEY: ${{ secrets.TF_VAR_GRAFANA_API_KEY }}
+          GRAFANA_DATASOURCE_UID: prometheus
+        run: python3 scripts/check_series_liveness.py

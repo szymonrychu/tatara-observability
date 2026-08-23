@@ -800,3 +800,50 @@ and fails the schema check.
 ```sh
 python3 scripts/check_routing_labels.py    # offline, no cluster, no token
 ```
+
+## 11. The series exists: the one question the producer checks cannot ask
+
+Sections 5, and the two reverse-drift checks it names, all validate the metric
+**name at its producer**: allowlisted here, emitted by the producer repo's live
+Go source, labels declared. Section 6 validates the **comparison**. Section 10
+validates **delivery**. None of them can tell you whether Prometheus actually
+holds the series.
+
+`tatara-claude-code-wrapper#189` is what that costs. `ccw_commit_push_total` and
+`ccw_turns_total` were allowlisted, emitted at the producer's `main`, correctly
+labelled, correctly prefixed, and `operator_push_series_dropped_total` was 0 on
+every reason - every check in this file green, and the two rules reading them
+had never been able to fire. A `prometheus.CounterVec` child does not exist
+until its first `Inc()`, so a counter the wrapper only writes at turn end or at
+shutdown produced a series with one sample or none, and the wrapper's push
+client stopped and DELETEd the run before the shutdown writes even happened.
+`default_no_data_state: "OK"` reported both rules green throughout.
+
+The sharper form, and the reason this check queries **selectors** rather than
+metric names: the family can be live while the child a rule reads is dark.
+Measured at the time of the fix, `ccw_turns_total{result="complete"}` existed
+fleet-wide while `ccw_turns_total{result="failed"}` - the numerator of "Wrapper
+turns erroring" - had never existed anywhere. `clamp_min(..., 0.0001)` guards the
+denominator against an idle fleet; nothing guarded the numerator, and
+`empty / 0.0001` is empty. A name-level check would have called that metric live.
+
+`scripts/check_series_liveness.py` asks Prometheus, once per selector, through
+the Grafana datasource proxy.
+
+**It never gates a PR, and this is not laxity.** A dark metric is a FLEET
+condition, not a property of the change in front of you: a rule can be correct
+on the day it merges and go dark three releases later when a producer stops
+incrementing. Blocking an unrelated PR on that helps nobody, and a check wired
+to `pull_request` would also drag a Grafana credential into every rule lint -
+`alert-rules-lint.yml`'s header states it deliberately needs none. It runs on a
+schedule from `.github/workflows/series-liveness.yml`; its unit tests DO run in
+the lint job, offline, against an injected query function.
+
+**Exit 0 = the check ran, whatever it found. Nonzero = the check could not
+run** - no credentials, transport failure, a query Prometheus rejected. The two
+must not share an exit code: a liveness assertion that has silently stopped
+asserting is the same silent-green failure it exists to catch.
+
+```sh
+GRAFANA_URL=... GRAFANA_API_KEY=... python3 scripts/check_series_liveness.py
+```

@@ -39,6 +39,17 @@ name: alert-rules-lint
 # red threshold step on the two panels backing those rules, on a surface with no
 # no_data_state to even mis-configure.
 #
+# check_series_liveness.py (tatara-claude-code-wrapper#189) is the dimension after ALL of
+# them, and it does not run here. Every check above validates the metric NAME at its
+# PRODUCER - allowlisted, emitted by the producer's Go source, labels declared. All three
+# were green while ccw_commit_push_total{result="fail"} and ccw_turns_total{result="failed"}
+# had never held a single series anywhere in the fleet, because a prometheus.CounterVec
+# child does not exist until its first Inc(). Producer-side correctness cannot answer
+# "does the series exist", so that check queries Prometheus itself, on a SCHEDULE
+# (.github/workflows/series-liveness.yml) and never on a PR: a dark metric is a fleet
+# condition, not a property of the change in front of you. Its unit tests DO run here,
+# via the discover step below.
+#
 # check_chart_alert_parity.py (tatara-helmfile#440) is the dimension OUTSIDE this repo.
 # Every check above validates a rule that exists here. None of them could see that
 # tatara-operator's chart shipped 32 alerts of its OWN which this cluster's Prometheus
@@ -74,6 +85,8 @@ on:
       - "scripts/chart_alert_waivers.txt"
       - "scripts/check_routing_labels.py"
       - "scripts/test_check_routing_labels.py"
+      - "scripts/check_series_liveness.py"
+      - "scripts/test_check_series_liveness.py"
       - ".github/workflows/alert-rules-lint.yml"
   push:
     branches: [main]
@@ -101,6 +114,8 @@ on:
       - "scripts/chart_alert_waivers.txt"
       - "scripts/check_routing_labels.py"
       - "scripts/test_check_routing_labels.py"
+      - "scripts/check_series_liveness.py"
+      - "scripts/test_check_series_liveness.py"
       - ".github/workflows/alert-rules-lint.yml"
   schedule:
     # Nightly reverse-drift sweep: a metric removed from a producer repo never touches

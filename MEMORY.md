@@ -2,6 +2,30 @@
 
 Past decisions + context. One dated line per entry.
 
+- 2026-08-23: tatara-claude-code-wrapper#189 - every provenance check in this repo validates the
+  metric NAME at its PRODUCER, and not one of them can ask whether the SERIES exists.
+  `ccw_commit_push_total` and `ccw_turns_total` were allowlisted, emitted at the producer's main,
+  correctly labelled and correctly prefixed, `operator_push_series_dropped_total` was 0 on every
+  reason - all green - and the two rules reading them had never been able to fire. A
+  `prometheus.CounterVec` child does not exist until its first `Inc()`, so a counter the wrapper
+  writes only at turn end produced a series with one sample or none, and its push client stopped
+  and DELETEd the run BEFORE the shutdown-time writes happened at all. The sharper form, measured
+  live at fix time and the reason `check_series_liveness.py` queries SELECTORS not names: the
+  family can be live while the child a rule reads is dark - `ccw_turns_total{result="complete"}`
+  existed fleet-wide while `{result="failed"}`, the NUMERATOR of "Wrapper turns erroring", had
+  never existed anywhere. `clamp_min(..., 0.0001)` guards the denominator against an idle fleet;
+  nothing guarded the numerator, and `empty / 0.0001` is empty. So those rules could signal "some
+  failures" but structurally could not signal "zero failures", the state they spend their life in.
+  The new check is SCHEDULED and NON-GATING (`.github/workflows/series-liveness.yml`): a dark
+  metric is a fleet condition, not a property of the PR in front of you, and wiring it to
+  `pull_request` would also drag a Grafana credential into every rule lint, which
+  `alert-rules-lint.yml`'s header says it deliberately avoids. Exit 0 when metrics are dark,
+  nonzero ONLY when the check cannot run - a liveness assertion that silently stops asserting is
+  the same silent-green failure it exists to catch. Also corrected the "NO SERIES YET AS OF
+  2026-08-09, and that is expected, not broken" block in `alerts/tatara-wrapper.yaml`: its METHOD
+  was sound (an unlabelled histogram present at registration proves the build is deployed) and is
+  the one #189 used, but its CONCLUSION was wrong for the `probes.Finalize()` arm, which was
+  unpushable by construction rather than merely unexercised.
 - 2026-08-23: tatara-helmfile#440 - the platform had TWO alerting planes and delivered on one.
   tatara-operator's chart ships a 32-alert PrometheusRule that this cluster's Prometheus never
   loaded (ruleSelector wants `release=prometheus`; the deploy repo never set

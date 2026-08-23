@@ -192,13 +192,27 @@ rules:
   # by outcome, with the fleet-wide view. Alerting on it from both sides would double-page
   # one event.
   #
-  # NO SERIES YET AS OF 2026-08-09, and that is expected, not broken. The outcome counter
-  # is written only TERMINALLY - on answer, on supersede by a later probe, or at shutdown
-  # via probes.Finalize() - so a fleet in which no probe has ever finished has never
-  # incremented any of the three. ccw_probe_answer_seconds_count IS present in Prometheus
-  # (an unlabelled histogram exists at registration), which is how we know the probe build
-  # is actually deployed rather than the family being dark. default_no_data_state: "OK"
-  # keeps this green until the first probe completes.
+  # THE 2026-08-09 NOTE HERE WAS WRONG AND IS CORRECTED (tatara-claude-code-wrapper#189).
+  # It read: "NO SERIES YET AS OF 2026-08-09, and that is expected, not broken ... a fleet
+  # in which no probe has ever finished has never incremented any of the three." The METHOD
+  # in it was sound and is the one #189 used - ccw_probe_answer_seconds_count IS present
+  # (an unlabelled histogram exists at registration), so the probe build is deployed and
+  # the family, not the build, was dark. The CONCLUSION was wrong for the shutdown arm.
+  #
+  # probes.Finalize() runs inside sess.Shutdown, and app.shutdown called pusher.Shutdown
+  # FIRST - which stopped the push loop and DELETEd the run's whole series set from the
+  # operator's receiver. Every increment that arm makes therefore landed on a registry
+  # nobody was pushing any more, on a run already dropped: unpushable BY CONSTRUCTION, not
+  # merely unexercised. No number of finished probes would ever have changed it. Nothing
+  # pre-seeded the vec either, so the other two arms could only ever produce a series with
+  # a single sample, which increase() cannot use.
+  #
+  # Fixed wrapper-side: the four closed-label terminal CounterVecs are pre-seeded at
+  # registration, Pusher.Shutdown issues a final push (it previously never pushed at all)
+  # and no longer DELETEs, and pusher.Shutdown moved to LAST in app.shutdown. Expect this
+  # family to appear once that release is deployed. It stays green until then, and
+  # scripts/check_series_liveness.py is what reports the gap from now on instead of a
+  # comment in this file being re-derived from scratch every year.
   - name: "Wrapper agent blocked inside a tool call"
     queries:
       - expression: |
